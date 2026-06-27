@@ -1,11 +1,10 @@
 use std::{
     fmt,
     io::{Cursor, Write},
-    sync::{Arc, Once, RwLock},
+    sync::{Arc, RwLock},
 };
 
 use bao::{encode::Encoder, Hash};
-use bech32::{decode, encode, Bech32m, Hrp};
 use log::trace;
 
 use crate::{
@@ -13,20 +12,8 @@ use crate::{
     error::CarbonadoError,
 };
 
-static INIT: Once = Once::new();
-
-/// Helper function only used in tests.
-pub fn init_logging(rust_log: &str) {
-    INIT.call_once(|| {
-        use std::env::{set_var, var};
-
-        if var("RUST_LOG").is_err() {
-            set_var("RUST_LOG", rust_log);
-        }
-
-        pretty_env_logger::init();
-    });
-}
+// Note: main Bao encode/decode (with 4KB groups + keyed) migrated to bao-tree in encoding/decoding.
+// This module retains old bao types for BaoHash/BaoHasher (unused in core pipeline) and hash (de)code helpers.
 
 /// Encodes a Bao hash into a hexadecimal string.
 pub fn encode_bao_hash(hash: &Hash) -> String {
@@ -44,9 +31,10 @@ pub fn decode_bao_hash(hash: &[u8]) -> Result<Hash, CarbonadoError> {
     }
 }
 
-/// Calculate padding (find a length that divides evenly both by Zfec FEC_K and Bao SLICE_LEN, then find the difference).
+/// Calculate padding (find a length that divides evenly both by FEC_K and Bao SLICE_LEN, then find the difference).
 ///
 /// Returns (padding_len, chunk_size).
+/// Kept specific to FEC_K*SLICE (not generalized) to preserve alignment invariant for 1KB slices + 4-shard RS striping + 4KB Bao groups (plan todo noted in AGENTS; change would affect extract/scrub geometry).
 pub fn calc_padding_len(input_len: usize) -> (u32, u32) {
     let input_len = input_len as f64;
     let overlap_constant = SLICE_LEN as f64 * FEC_K as f64;
@@ -55,17 +43,6 @@ pub fn calc_padding_len(input_len: usize) -> (u32, u32) {
     let chunk_size = target_size / FEC_K as f64;
     trace!("input_len: {input_len:.0}, target_size: {target_size:.0}, padding_len: {padding_len:.0}, chunk_size: {chunk_size:.0}");
     (padding_len as u32, chunk_size as u32)
-}
-
-/// Helper for encoding data to bech32m.
-pub fn bech32m_encode(hrp: &str, bytes: &[u8]) -> Result<String, CarbonadoError> {
-    Ok(encode::<Bech32m>(Hrp::parse(hrp)?, bytes)?)
-}
-
-/// Helper for decoding bech32-encoded data.
-pub fn bech32_decode(bech32_str: &str) -> Result<(String, Vec<u8>), CarbonadoError> {
-    let (hrp, words) = decode(bech32_str)?;
-    Ok((hrp.to_string(), words))
 }
 
 #[derive(Clone, Debug)]
@@ -119,19 +96,29 @@ impl BaoHasher {
         Arc::new(bao_hasher)
     }
 
-    pub fn update(&self, buf: &[u8]) {
-        let mut encoder = self.encoder.write().expect("encoder write lock");
-        encoder.write_all(buf).expect("write to encoder");
+    pub fn update(&self, buf: &[u8]) -> Result<(), CarbonadoError> {
+        let mut encoder = self.encoder.write().map_err(|e| {
+            CarbonadoError::InternalStateError(format!("poisoned encoder lock: {}", e))
+        })?;
+        encoder.write_all(buf).map_err(CarbonadoError::StdIoError)?;
+        Ok(())
     }
 
-    pub fn finalize(&self) -> BaoHash {
-        let mut encoder = self.encoder.write().expect("encoder read lock");
-        BaoHash::from(encoder.finalize().expect("finalize bao hash"))
+    pub fn finalize(&self) -> Result<BaoHash, CarbonadoError> {
+        let mut encoder = self.encoder.write().map_err(|e| {
+            CarbonadoError::InternalStateError(format!("poisoned encoder lock on finalize: {}", e))
+        })?;
+        let finalized = encoder.finalize().map_err(|e| {
+            CarbonadoError::InternalStateError(format!("bao finalize failed: {}", e))
+        })?;
+        Ok(BaoHash::from(finalized))
     }
 
-    pub fn read_all(&self) -> Vec<u8> {
-        let encoder = self.encoder.write().expect("encoder read lock");
+    pub fn read_all(&self) -> Result<Vec<u8>, CarbonadoError> {
+        let encoder = self.encoder.write().map_err(|e| {
+            CarbonadoError::InternalStateError(format!("poisoned encoder lock on read_all: {}", e))
+        })?;
         let data = encoder.clone().into_inner();
-        data.into_inner().to_vec()
+        Ok(data.into_inner().to_vec())
     }
 }

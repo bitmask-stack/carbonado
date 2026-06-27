@@ -2,6 +2,7 @@ name: Rust
 
 on:
   - push
+  - pull_request
 
 env:
   CARGO_TERM_COLOR: always
@@ -11,74 +12,89 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
 
-      - uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
+      - uses: dtolnay/rust-toolchain@stable
 
-      - uses: Swatinem/rust-cache@v1
+      - uses: Swatinem/rust-cache@v2
 
-      - name: Lint
-        run: cargo clippy --lib -- -D warnings
+      - name: Lint (native, all targets/features)
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
   lint-wasm:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
 
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          profile: minimal
-          toolchain: stable
+          targets: wasm32-unknown-unknown
 
-      - uses: Swatinem/rust-cache@v1
-      - uses: jetli/wasm-pack-action@v0.3.0
+      - uses: Swatinem/rust-cache@v2
 
-      - name: Add wasm32 target
-        run: rustup target add wasm32-unknown-unknown
-
-      - name: Lint (wasm32)
-        run: cargo clippy --target wasm32-unknown-unknown --lib -- -D warnings
+      - name: Lint (wasm32, no pqc)
+        run: cargo clippy --target wasm32-unknown-unknown --no-default-features --features "" -- -D warnings
 
   desktop:
     runs-on: ubuntu-latest
     needs: lint
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
 
-      - uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
+      - uses: dtolnay/rust-toolchain@stable
 
-      - uses: Swatinem/rust-cache@v1
+      - uses: Swatinem/rust-cache@v2
 
-      - name: Test
-        run: cargo test -- --nocapture
+      - name: Test (native)
+        run: cargo test --all-features -- --nocapture
         env:
           RUST_BACKTRACE: 1
 
-  # web:
-  #   runs-on: ubuntu-latest
-  #   needs: lint-wasm
+  # Explicit test matrix for additional targets (checks only where full
+  # cross-testing is expensive; actual tests run on native + wasm where possible)
+  test-matrix:
+    runs-on: ubuntu-latest
+    needs: lint
+    strategy:
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-gnu
+          - wasm32-unknown-unknown
 
-  #   steps:
-  #     - uses: actions/checkout@v2
+    steps:
+      - uses: actions/checkout@v4
 
-  #     - uses: actions-rs/toolchain@v1
-  #       with:
-  #         profile: minimal
-  #         toolchain: stable
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
-  #     - uses: Swatinem/rust-cache@v1
-  #     - uses: jetli/wasm-pack-action@v0.3.0
+      - uses: Swatinem/rust-cache@v2
 
-  #     - name: Add wasm32 target
-  #       run: rustup target add wasm32-unknown-unknown
+      - name: Check ${{ matrix.target }} (with pqc)
+        run: cargo check --target ${{ matrix.target }} --all-features
 
-  #     - name: Test
-  #       run: wasm-pack test --headless --chrome
+      - name: Check ${{ matrix.target }} (no pqc)
+        run: cargo check --target ${{ matrix.target }} --no-default-features
+
+  # WASM browser testing is limited because libbitcoinpqc uses C code + cmake.
+  # We only guarantee that the crate compiles to wasm32 with pqc disabled.
+  # Full wasm-pack test can be run locally with:
+  #   RUSTFLAGS="--cfg getrandom_backend=\"wasm_js\"" wasm-pack test --headless --chrome
+  web-check:
+    runs-on: ubuntu-latest
+    needs: lint-wasm
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check wasm32 (no pqc)
+        run: cargo check --target wasm32-unknown-unknown --no-default-features

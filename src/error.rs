@@ -14,22 +14,6 @@ pub enum CarbonadoError {
     #[error(transparent)]
     Infallible(#[from] std::convert::Infallible),
 
-    /// Error decoding hexadecimal-encoded string
-    #[error(transparent)]
-    HexDecodeError(#[from] hex::FromHexError),
-
-    /// Bech32 encode error
-    #[error(transparent)]
-    Bech32EncodeError(#[from] bech32::EncodeError),
-
-    /// Bech32 decode error
-    #[error(transparent)]
-    Bech32DecodeError(#[from] bech32::DecodeError),
-
-    /// Bech32 hrp error
-    #[error(transparent)]
-    Bech32HrpError(#[from] bech32::primitives::hrp::Error),
-
     /// snap error
     #[error(transparent)]
     SnapError(#[from] snap::Error),
@@ -38,25 +22,15 @@ pub enum CarbonadoError {
     #[error("Snappy into_inner error when writing bytes to compression.")]
     SnapWriteIntoInnerError(String),
 
-    /// ecies error
-    #[error(transparent)]
-    EciesError(#[from] libsecp256k1_core::Error),
-
+    // The old EciesError variant was removed as part of the clean break to the v2 symmetric model.
+    // All encryption-related errors now go through the new symmetric primitives (see crypto.rs).
     /// bao decode error
     #[error(transparent)]
     BaoDecodeError(#[from] bao::decode::Error),
 
-    /// zfec_rs error
+    /// FEC (reed-solomon-erasure) error. Transparent for now (structural; no secret leakage).
     #[error(transparent)]
-    ZfecError(#[from] zfec_rs::Error),
-
-    /// nostr secp256k1 error
-    #[error(transparent)]
-    NostrSecp256k1Error(#[from] nostr::secp256k1::Error),
-
-    /// nostr NIP-19 / Bech32 error
-    #[error(transparent)]
-    NostrNip19Error(#[from] nostr::nips::nip19::Error),
+    FecError(#[from] reed_solomon_erasure::Error),
 
     /// An uneven number of input bytes were provided for zfec chunks
     #[error("Input bytes must divide evenly over number of zfec chunks.")]
@@ -74,6 +48,12 @@ pub enum CarbonadoError {
     #[error("Mismatch between scrubbed data length, input len: {0}, scrubbed len: {1}")]
     ScrubbedLengthMismatch(usize, usize),
 
+    /// Scrub requires the Bao bit (uses slice extraction for FEC shard candidates)
+    #[error(
+        "Scrub requires Bao bit in format (for slice-based candidate extraction from verifiable)"
+    )]
+    ScrubRequiresBao,
+
     /// Hash decode error
     #[error("Hash must be {0} bytes long, an input of {1} bytes was provided.")]
     HashDecodeError(usize, usize),
@@ -82,8 +62,8 @@ pub enum CarbonadoError {
     #[error("Scrubbed hash is not equal to original hash.")]
     InvalidScrubbedHash,
 
-    /// Zfec padding should be zero when encoding
-    #[error("Padding from Zfec should always be zero, since Carbonado adds its own padding. Padding was {0}.")]
+    /// FEC padding should be zero when encoding (Carbonado adds its own)
+    #[error("Padding from FEC should always be zero, since Carbonado adds its own padding. Padding was {0}.")]
     EncodeZfecPaddingError(usize),
 
     /// Invalid chunk length
@@ -92,23 +72,11 @@ pub enum CarbonadoError {
 
     /// Invalid verifiable slice length
     #[error("Verifiable slice count should be evenly divisible by 8. Remainder was {0}.")]
-    InvalidVerifiableSliceCount(u16),
+    InvalidVerifiableSliceCount(u32),
 
     /// Invalid magic number
     #[error("File header lacks Carbonado magic number and may not be a proper Carbonado file. Magic number found was {0}.")]
     InvalidMagicNumber(String),
-
-    /// Pubkey serialization error
-    #[error("Pubkey did not serialize into expected length.")]
-    PubkeySerializationError,
-
-    /// Hash bytes length error
-    #[error("Hash bytes were not of expected length.")]
-    HashBytesLengthError,
-
-    /// Unexpected signature bytes length
-    #[error("Signature bytes were not of expected length. Length was: {0}.")]
-    UnexpectedSignatureBytesLength(usize),
 
     /// Invalid header length calculation
     #[error("Invalid header length calculation")]
@@ -117,4 +85,28 @@ pub enum CarbonadoError {
     /// Invalid header length calculation
     #[error("Incorrect public key format")]
     IncorrectPubKeyFormat,
+
+    // === New symmetric crypto errors (v2) ===
+    #[error("Invalid key length")]
+    InvalidKeyLength,
+
+    #[error("Ciphertext too short (expected at least nonce+tag or tag for the provided nonce)")]
+    InvalidCiphertextLength,
+
+    #[error("HMAC authentication failed")]
+    AuthenticationFailed,
+
+    #[error("Failed to obtain randomness")]
+    RandomnessError,
+
+    #[error("Not implemented")]
+    NotImplemented,
+
+    /// Post-quantum cryptography operation failed (SLH-DSA etc. via libbitcoinpqc)
+    #[error("Post-quantum cryptography error: {0}")]
+    PqcError(String),
+
+    /// Internal state corruption (e.g. poisoned lock in streaming helpers)
+    #[error("Internal state corrupted: {0}")]
+    InternalStateError(String),
 }
