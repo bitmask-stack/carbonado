@@ -14,7 +14,7 @@ See section 11 (v2.0 Plans) for the stabilization steps, including bumping to 2.
 
 - **Clean cryptographic break.** This version of Carbonado does **not** contain any code to read or write v1 ECIES-encrypted files. Old encrypted archives require external migration (use an older version of the tool to extract plaintext, then re-encode with the new symmetric primitives).
 - "Backward compatibility / migration path" (from the original spec) refers **only** to preserving the non-crypto properties of the format:
-  - Pipeline ordering (snap → encrypt → zfec → bao and reverse)
+  - Pipeline ordering (compress(zstd-20) → encrypt → FEC → bao and reverse)
   - Flat-file portability
   - WASM/browser support
   - Bao-based streaming verification and replication proofs
@@ -110,7 +110,7 @@ This section provides a thorough, decision-by-decision comparison between the or
 - The v2 behavior.
 - **Why** (first-principles security arguments, performance, simplicity, hardware realities, quantum posture, reproducibility for archival/scrub, and alignment with AGENTS.md invariants and the original Surmount spec).
 
-The overarching principle is a **clean cryptographic break** (see §1). v1 ECIES material (secp pubkeys, Schnorr sigs in header, ecies crate) is completely removed — no dual paths, no decode support for old files. Migration of old archives is always external. Non-crypto properties (snap → [encrypt] → FEC → bao pipeline shape, flat-file portability, WASM, Bao verifiability, content-addressable outer hash, 16 Format combos) are preserved.
+The overarching principle is a **clean cryptographic break** (see §1). v1 ECIES material (secp pubkeys, Schnorr sigs in header, ecies crate) is completely removed — no dual paths, no decode support for old files. Migration of old archives is always external. Non-crypto properties (zstd-20 compress → [encrypt] → FEC → bao pipeline shape, flat-file portability, WASM, Bao verifiability, content-addressable outer hash, 16 Format combos) are preserved.
 
 #### High-Level Feature Comparison
 
@@ -469,7 +469,7 @@ Current registered labels (must be kept in sync with code):
 3. **MAC Before Decrypt Invariant**: The EtM tag must be verified successfully before any keystream is applied or plaintext is returned.
 4. **Header MAC Invariant**: The `header_mac` must be verified (using the `header-auth` subkey) before trusting any metadata in a v2 `Header`.
 5. **Nonce Uniqueness Invariant**: The implementation must never reuse a nonce under the same master key for encryption.
-6. **Content vs. Container Invariant (multi-dimensional)**: The outer Bao hash always names the *final processed form* of the data after applying the selected Format pipeline (any combination of Snappy + encryption + Zfec + Bao). 
+6. **Content vs. Container Invariant (multi-dimensional)**: The outer Bao hash always names the *final processed form* of the data after applying the selected Format pipeline (any combination of Zstd(level 20) + encryption + FEC + Bao). 
 
    **Important architectural detail**: The Bao root hash is computed **only over the body** (the bytes after all chosen transformations). The `Header` (including the `format` bitmask byte, `payload_nonce`, lengths, `slh_public_key`, etc.) is constructed *after* the hash and prepended on disk. Therefore the Bao hash does **not** cryptographically commit to any header fields, including the format bits that determined how the body was created.
 
@@ -527,7 +527,7 @@ These invariants are more important than any particular performance optimization
 ## 3. What "Preserving Existing Capabilities" Means
 
 We keep:
-- Snap compression (optional)
+- Zstd (level 20) compression (optional)
 - Forward error correction (RS 4/8)
 - Bao streaming verification + slice extraction
 - Format bitmask: the `Encrypted` variant (lowest bit) controls symmetric encryption. The bit position is deliberate so that even numeric format values indicate unencrypted data (easier for markets and tools to filter).
@@ -667,7 +667,7 @@ This tension is acknowledged but not resolved in the current design. Carbonado i
 - The two `.expect()` calls in the hot symmetric crypto paths (after `derive_subkey`) are on programmer invariants, not attacker input, but they still exist.
 - AGENTS.md "Current Rough Edges" and some older work log entries need periodic pruning as items are completed.
 - WASM + libbitcoinpqc cross-compilation limitations remain (documented, not a code bug in Carbonado itself).
-- Bao crate: Code migrated to use local keyed bao-tree fork (../bao-tree) as default with 4KB chunk groups (BlockSize::from_chunk_log(2) == BAO_BLOCK_SIZE). Keyed roots commit to Format bitmask. Old bao=0.13 kept only for Hash type + reexport. 1KB SLICE_LEN kept on top of groups. Temporary fork until upstream. (See Cargo.toml, constants.rs, encoding/decoding.rs).
+- Bao crate: Code migrated to use local keyed bao-tree fork (../bao-tree) as default with 4KB chunk groups (BlockSize::from_chunk_log(2) == BAO_BLOCK_SIZE). Keyed roots commit to Format bitmask. Old bao=0.13 kept only for Hash type + reexport. 1KB SLICE_LEN kept on top of groups. Temporary fork until upstream. (See Cargo.toml, constants.rs, encoding/decoding.rs). CI workflows explicitly checkout the fork on branch 76-keyed-bao; dep uses default-features=false.
 - reed-solomon-erasure dep: upstream "looking for maintainers"; added Cargo note for periodic re-eval (no runtime issues, det, suitable).
 
 All core cryptographic requirements from the original Surmount spec (symmetric AES-256-CTR + full HMAC-SHA512 EtM, Argon2id helper, SLH-DSA sidecars only, clean break, u32 chunk support, etc.) are now implemented and verified.
@@ -741,7 +741,7 @@ Currently everything is "inboard": when Zfec or Bao bits are set, the resulting 
 
 **Desired**:
 - Configurable outboard mode.
-- For public (non-Encrypted) files: the main stored/served bytes on disk can be the bare original data (or post-snap if compression requested), exactly as the file would exist without Carbonado.
+- For public (non-Encrypted) files: the main stored/served bytes on disk can be the bare original data (or post-compress(zstd-20) if compression requested), exactly as the file would exist without Carbonado.
 - Verification data (Bao outboard hashes) and/or FEC parity live in separate side files (e.g. named after the bao hash + .cXX + .out or conventional extensions).
 - This is excellent for webservers: a public c4/c6/c12/c14 archive can be served directly via static HTTP with no wrapper bytes in the response body. Verifiers download the bare file + the outboard sidecar(s).
 - Encrypted formats probably stay inboard (or the outboard data would still be paired with the encrypted main file).
@@ -792,7 +792,7 @@ Update Cargo description and any "0.7" references.
 - Bao (keyed, 4KB groups) remains the verifiability primitive.
 - Format bitmask 4 bits / 16 combinations preserved.
 - Header (when used) is public + header_mac authenticated; never contains key material.
-- Non-crypto properties from section 1 (snap optional, zfec/FEC, bao streaming, WASM, content address via outer hash for the chosen format pipeline).
+- Non-crypto properties from section 1 (Zstd level 20 compression optional, FEC, bao streaming, WASM, content address via outer hash for the chosen format pipeline).
 - Subkey derivation, EtM, CTR rules, etc. unchanged.
 - SLH-DSA only as detachable sidecars.
 

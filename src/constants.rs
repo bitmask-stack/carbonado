@@ -45,7 +45,7 @@ pub const FEC_M: usize = 8;
 /// | Bit name in enum | Meaning when set |
 /// |-------|-------|
 /// | Encrypted | Apply symmetric encryption (AES-256-CTR + HMAC-SHA512 EtM) |
-/// | Snappy | Apply Snappy compression |
+/// | Snappy | Apply Zstd compression at level 20 |
 /// | Bao   | Add Bao streaming verifiability |
 /// | Zfec  | Add FEC (reed-solomon-erasure 4/8) forward error correction |
 ///

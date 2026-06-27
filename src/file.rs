@@ -266,7 +266,7 @@ pub fn encode(
     let mut bytes_compressed = 0u32;
 
     if format.contains(Format::Snappy) {
-        data = encoding::snap(&data)?;
+        data = encoding::compress(&data)?;
         bytes_compressed = data.len() as u32;
     }
 

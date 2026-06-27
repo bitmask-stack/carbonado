@@ -1,4 +1,4 @@
-use std::io::Write;
+
 
 use bao::Hash;
 // ecies removed (clean break from ECIES v1)
@@ -9,7 +9,6 @@ use bao_tree::{
 use log::{debug, trace};
 use reed_solomon_erasure::galois_8::Field;
 use reed_solomon_erasure::ReedSolomon;
-use snap::write::FrameEncoder;
 
 use crate::{
     constants::{Format, BAO_BLOCK_SIZE, FEC_K, FEC_M, SLICE_LEN},
@@ -18,17 +17,10 @@ use crate::{
     utils::calc_padding_len,
 };
 
-/// Snappy compression
-pub fn snap(input: &[u8]) -> Result<Vec<u8>, CarbonadoError> {
+/// Compression using zstd at level 20
+pub fn compress(input: &[u8]) -> Result<Vec<u8>, CarbonadoError> {
     trace!("compressing");
-    let buffer: &[u8] = input;
-    let output = vec![];
-    let mut writer = FrameEncoder::new(output);
-    writer.write_all(buffer)?;
-    let compressed = writer
-        .into_inner()
-        .map_err(|err| CarbonadoError::SnapWriteIntoInnerError(err.to_string()))?;
-
+    let compressed = zstd::encode_all(input, 20).map_err(|err| CarbonadoError::ZstdError(err.to_string()))?;
     Ok(compressed)
 }
 
@@ -114,7 +106,7 @@ pub fn zfec(input: &[u8]) -> Result<(Vec<u8>, u32, u32), CarbonadoError> {
 
 /// Encode data into Carbonado format, performing compression, encryption, adding error correction codes, and stream verification encoding, in that order.
 ///
-///  `snap -> symmetric_encrypt (internal nonce) -> zfec (RS FEC) -> bao`
+///  `compress(zstd-20) -> symmetric_encrypt (internal nonce) -> zfec (RS FEC) -> bao`
 ///
 /// The first parameter is the 32-byte symmetric master key (not a public key — this is the v2 symmetric design).
 pub fn encode(master_key: &[u8], input: &[u8], format: u8) -> Result<Encoded, CarbonadoError> {
@@ -137,7 +129,7 @@ pub fn encode(master_key: &[u8], input: &[u8], format: u8) -> Result<Encoded, Ca
     let bytes_verifiable;
 
     if format.contains(Format::Snappy) {
-        compressed = snap(input)?;
+        compressed = compress(input)?;
         bytes_compressed = compressed.len() as u32;
     } else {
         compressed = input.to_owned();

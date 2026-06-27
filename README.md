@@ -9,7 +9,7 @@
 - **SLH-DSA (FIPS-205)** post-quantum signatures as **sidecars only** (via `libbitcoinpqc`)
 - **Bao** streaming verifiability
 - **Reed-Solomon 4/8** (deterministic FEC replacement for classic zfec) forward error correction
-- **Snappy** compression (optional)
+- **Zstd (level 20)** compression (optional)
 
 It is hardware-accelerated (AES-NI/VAES + SHA extensions), WASM-compatible, and makes **no attempt** to decode legacy v1 ECIES files — this is a clean cryptographic break.
 
@@ -72,6 +72,12 @@ Here is what changed and why we made each decision:
   Carbonado now expects you to give it a high-entropy 32-byte (or 64-byte) master key. If you only have a passphrase, you derive the key yourself with Argon2id (or similar) before calling the library. This makes the security contract of the container format simpler and more explicit.
 
 - **Size limits and bookkeeping**: We widened several internal counters from 16-bit to 32-bit.  
+
+- **Compression**: Upgraded from the old Snappy to Zstd at level 20 while keeping the bit name/position (for format number stability).  
+  Reason: Zstd gives far better compression ratios on the kinds of data people actually archive here (code, contracts, blobs). Level 20 is aggressive but still practical for encode time. Compression remains early in the pipeline so the size win multiplies through FEC and Bao.
+
+- **Compression**: We upgraded the optional compression step from Snappy to Zstd at level 20 (the "Snappy" Format bit still controls whether it is applied, preserving the format numbers cX).  
+  It still runs early so savings compound before FEC doubles the data and before Bao. Level 20 was selected for excellent ratios on real archival payloads with acceptable encode/decode speed.
   The old limits artificially capped FEC-protected segments at roughly 64 MiB. There was no good reason for that cap anymore.
 
 - **Magic number and versioning**: We bumped the crate to version 2.0.0 and changed the magic number at the start of every file to `CARBONADO20\n`.  
@@ -81,8 +87,8 @@ Here is what changed and why we made each decision:
   If you have old encrypted archives, you must extract them with an older version of the tools and re-encode them with a fresh master key. We made this decision so the code stays simple and we don't have to carry security baggage from the old design forever.
 
 What stayed the same on purpose:
-- Optional Snappy compression
-- The overall processing order (compress → encrypt → error correction → add verifiability)
+- Optional compression (the "Snappy" Format bit still enables it; now always Zstd level 20)
+- The overall processing order (compress(zstd-20) → encrypt → error correction → add verifiability)
 - Bao streaming verification and the ability to extract/verify small slices
 - The 16 format levels (c0–c15)
 - The flat-file format and full WASM support

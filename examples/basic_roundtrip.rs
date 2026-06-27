@@ -23,7 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Original size: {} bytes", plaintext.len());
 
-    // Level 15 = full features: Encrypted (symmetric AES-256-CTR + HMAC) + Snappy + Bao + Zfec
+    // Level 15 = full features: Encrypted (symmetric AES-256-CTR + HMAC) + Zstd(level 20) + Bao + Zfec (RS)
     let level = 15u8;
 
     // Using the low-level encode/decode API here for the demo.

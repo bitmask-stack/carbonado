@@ -4,7 +4,7 @@
 //!
 //! It combines a fully symmetric, hardware-accelerated cryptographic stack
 //! (AES-256-CTR + full HMAC-SHA512 EtM) with Bao streaming verifiability,
-//! FEC (reed-solomon-erasure 4/8) forward error correction, optional Snappy compression, and
+//! FEC (reed-solomon-erasure 4/8) forward error correction, optional Zstd (level 20) compression, and
 //! SLH-DSA post-quantum signatures delivered exclusively as **sidecars**.
 //!
 //! ## Security Model & Production Guidance

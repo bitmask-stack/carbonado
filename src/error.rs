@@ -14,13 +14,9 @@ pub enum CarbonadoError {
     #[error(transparent)]
     Infallible(#[from] std::convert::Infallible),
 
-    /// snap error
-    #[error(transparent)]
-    SnapError(#[from] snap::Error),
-
-    /// Snappy into_inner error when writing bytes to compression
-    #[error("Snappy into_inner error when writing bytes to compression.")]
-    SnapWriteIntoInnerError(String),
+    /// zstd error
+    #[error("zstd encode/decode failed: {0}")]
+    ZstdError(String),
 
     // The old EciesError variant was removed as part of the clean break to the v2 symmetric model.
     // All encryption-related errors now go through the new symmetric primitives (see crypto.rs).
@@ -30,7 +26,7 @@ pub enum CarbonadoError {
 
     /// FEC (reed-solomon-erasure) error. Transparent for now (structural; no secret leakage).
     #[error(transparent)]
-    FecError(#[from] reed_solomon_erasure::Error),
+    FecError(reed_solomon_erasure::Error),
 
     /// An uneven number of input bytes were provided for zfec chunks
     #[error("Input bytes must divide evenly over number of zfec chunks.")]
@@ -109,4 +105,10 @@ pub enum CarbonadoError {
     /// Internal state corruption (e.g. poisoned lock in streaming helpers)
     #[error("Internal state corrupted: {0}")]
     InternalStateError(String),
+}
+
+impl From<reed_solomon_erasure::Error> for CarbonadoError {
+    fn from(value: reed_solomon_erasure::Error) -> Self {
+        Self::FecError(value)
+    }
 }

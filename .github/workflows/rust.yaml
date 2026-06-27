@@ -14,6 +14,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Checkout bao-tree keyed fork (sibling for path dep)
+        uses: actions/checkout@v4
+        with:
+          repository: SurmountSystems/bao-tree
+          ref: 76-keyed-bao
+          path: ../bao-tree
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
@@ -26,6 +33,13 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Checkout bao-tree keyed fork (sibling for path dep)
+        uses: actions/checkout@v4
+        with:
+          repository: SurmountSystems/bao-tree
+          ref: 76-keyed-bao
+          path: ../bao-tree
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -42,6 +56,13 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Checkout bao-tree keyed fork (sibling for path dep)
+        uses: actions/checkout@v4
+        with:
+          repository: SurmountSystems/bao-tree
+          ref: 76-keyed-bao
+          path: ../bao-tree
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -67,6 +88,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Checkout bao-tree keyed fork (sibling for path dep)
+        uses: actions/checkout@v4
+        with:
+          repository: SurmountSystems/bao-tree
+          ref: 76-keyed-bao
+          path: ../bao-tree
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -89,6 +117,13 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Checkout bao-tree keyed fork (sibling for path dep)
+        uses: actions/checkout@v4
+        with:
+          repository: SurmountSystems/bao-tree
+          ref: 76-keyed-bao
+          path: ../bao-tree
 
       - uses: dtolnay/rust-toolchain@stable
         with:

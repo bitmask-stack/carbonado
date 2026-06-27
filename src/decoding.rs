@@ -9,7 +9,7 @@ use bao_tree::{
 use log::{debug, info, trace, warn};
 use reed_solomon_erasure::galois_8::Field;
 use reed_solomon_erasure::ReedSolomon;
-use snap::read::FrameDecoder;
+
 
 use crate::{
     constants::{Format, BAO_BLOCK_SIZE, FEC_K, FEC_M, SLICE_LEN},
@@ -138,16 +138,14 @@ pub fn bao(input: &[u8], hash: &[u8], format: u8) -> Result<Vec<u8>, CarbonadoEr
 // Decryption is now performed via crate::crypto::symmetric_decrypt (or _with_nonce).
 // The Format::Encrypted bit still controls whether symmetric decryption (AES-256-CTR + HMAC) is applied.
 
-/// Snappy decompression
-pub fn snap(input: &[u8]) -> Result<Vec<u8>, CarbonadoError> {
+/// Decompression using zstd
+pub fn decompress(input: &[u8]) -> Result<Vec<u8>, CarbonadoError> {
     trace!("decompressing");
-    let mut decompressed = vec![];
-    FrameDecoder::new(input).read_to_end(&mut decompressed)?;
-
+    let decompressed = zstd::decode_all(input).map_err(|err| CarbonadoError::ZstdError(err.to_string()))?;
     Ok(decompressed)
 }
 
-/// Decode data from Carbonado format in reverse order: `bao -> zfec -> symmetric_decrypt (internal nonce) -> snap`
+/// Decode data from Carbonado format in reverse order: `bao -> zfec -> symmetric_decrypt (internal nonce) -> decompress(zstd)`
 ///
 /// The first parameter is the 32-byte symmetric master key (not a secret key in the asymmetric sense — this is the v2 symmetric design).
 pub fn decode(
@@ -178,7 +176,7 @@ pub fn decode(
     };
 
     let decompressed = if format.contains(Format::Snappy) {
-        snap(&decrypted)?
+        decompress(&decrypted)?
     } else {
         decrypted
     };

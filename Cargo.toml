@@ -20,15 +20,18 @@ bao = "0.13"
 # See AGENTS.md and constants::BAO_BLOCK_SIZE.
 # Temporary until upstreamed to n0-computer/bao-tree.
 # To fetch the fork (for agents):
-#   git clone git@github.com:SurmountSystems/bao-tree.git ../bao-tree
-#   (or: git clone https://github.com/SurmountSystems/bao-tree.git ../bao-tree)
-# NOTE: path dep requires sibling checkout for builds; will not cargo publish / vendor / CI
-# in isolation until git dep or upstream. WASM/cross builds also need the fork available.
-bao_tree = { package = "bao-tree", path = "../bao-tree" }
+#   git clone -b 76-keyed-bao git@github.com:SurmountSystems/bao-tree.git ../bao-tree
+#   (or: git clone -b 76-keyed-bao https://github.com/SurmountSystems/bao-tree.git ../bao-tree)
+# NOTE: path dep requires sibling checkout for builds (CI clones the 76-keyed-bao branch).
+# Will not cargo publish / vendor in isolation until git dep or upstream.
+# WASM/cross builds also need the fork available.
+# We set default-features = false because the fork's defaults pull in tokio/fs/etc
+# which are not needed (we only use sync keyed) and break some cross/wasm targets.
+bao_tree = { package = "bao-tree", path = "../bao-tree", default-features = false }
 bitmask-enum = "2.1.0"
 log = "0.4.19"
 serde = { version = "1.0.164", features = ["derive"] }
-snap = "1.1.0"
+zstd = "0.13"
 thiserror = "1.0"
 
 # v2.0 FEC: reed-solomon-erasure (deterministic RS 4/8, ~50% erasure (any 4 shards),
