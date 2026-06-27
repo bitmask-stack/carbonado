@@ -1,5 +1,3 @@
-
-
 use bao::Hash;
 // ecies removed (clean break from ECIES v1)
 use bao_tree::{
@@ -20,7 +18,8 @@ use crate::{
 /// Compression using zstd at level 20
 pub fn compress(input: &[u8]) -> Result<Vec<u8>, CarbonadoError> {
     trace!("compressing");
-    let compressed = zstd::encode_all(input, 20).map_err(|err| CarbonadoError::ZstdError(err.to_string()))?;
+    let compressed =
+        zstd::encode_all(input, 20).map_err(|err| CarbonadoError::ZstdError(err.to_string()))?;
     Ok(compressed)
 }
 

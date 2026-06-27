@@ -670,7 +670,7 @@ This tension is acknowledged but not resolved in the current design. Carbonado i
 - Bao crate: Code migrated to use local keyed bao-tree fork (../bao-tree) as default with 4KB chunk groups (BlockSize::from_chunk_log(2) == BAO_BLOCK_SIZE). Keyed roots commit to Format bitmask. Old bao=0.13 kept only for Hash type + reexport. 1KB SLICE_LEN kept on top of groups. Temporary fork until upstream. (See Cargo.toml, constants.rs, encoding/decoding.rs). CI workflows explicitly checkout the fork on branch 76-keyed-bao; dep uses default-features=false.
 - reed-solomon-erasure dep: upstream "looking for maintainers"; added Cargo note for periodic re-eval (no runtime issues, det, suitable).
 
-All core cryptographic requirements from the original Surmount spec (symmetric AES-256-CTR + full HMAC-SHA512 EtM, Argon2id helper, SLH-DSA sidecars only, clean break, u32 chunk support, etc.) are now implemented and verified.
+All core cryptographic requirements from the original Surmount spec (symmetric AES-256-CTR + full HMAC-SHA512 EtM, SLH-DSA sidecars only, clean break, u32 chunk support, etc.) are now implemented and verified. Argon2id passphrase KDF was deliberately removed; callers derive high-entropy master keys outside the library (Argon2id recommended for passphrases).
 
 ---
 

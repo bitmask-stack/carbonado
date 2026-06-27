@@ -5,8 +5,10 @@
 //! - **AES-256-CTR** for length-preserving bulk encryption (hardware accelerated via AES-NI/VAES).
 //! - **HMAC-SHA512** (full 64-byte tags) in Encrypt-then-MAC construction for integrity and authentication.
 //! - **HMAC-SHA512-based subkey derivation** (BIP-32 style) for key separation.
-//! - **Argon2id** helper for passphrase-based key derivation.
 //! - **SLH-DSA (FIPS-205 / SPHINCS+)** post-quantum signatures via `libbitcoinpqc`, **strictly for sidecar use only**.
+//!
+//! Passphrase-to-key derivation (e.g. Argon2id) is the caller's responsibility before
+//! supplying a 32-byte master key to Carbonado.
 //!
 //! # Important Security Model
 //!

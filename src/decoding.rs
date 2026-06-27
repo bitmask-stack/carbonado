@@ -10,7 +10,6 @@ use log::{debug, info, trace, warn};
 use reed_solomon_erasure::galois_8::Field;
 use reed_solomon_erasure::ReedSolomon;
 
-
 use crate::{
     constants::{Format, BAO_BLOCK_SIZE, FEC_K, FEC_M, SLICE_LEN},
     encoding,
@@ -141,7 +140,8 @@ pub fn bao(input: &[u8], hash: &[u8], format: u8) -> Result<Vec<u8>, CarbonadoEr
 /// Decompression using zstd
 pub fn decompress(input: &[u8]) -> Result<Vec<u8>, CarbonadoError> {
     trace!("decompressing");
-    let decompressed = zstd::decode_all(input).map_err(|err| CarbonadoError::ZstdError(err.to_string()))?;
+    let decompressed =
+        zstd::decode_all(input).map_err(|err| CarbonadoError::ZstdError(err.to_string()))?;
     Ok(decompressed)
 }
 

@@ -5,7 +5,6 @@
 **Carbonado** is a single flat-file archival container format designed for long-term, consensus-critical data. It combines:
 
 - **AES-256-CTR + full HMAC-SHA512 EtM** (v2 symmetric encryption)
-- **Argon2id** key derivation helper
 - **SLH-DSA (FIPS-205)** post-quantum signatures as **sidecars only** (via `libbitcoinpqc`)
 - **Bao** streaming verifiability
 - **Reed-Solomon 4/8** (deterministic FEC replacement for classic zfec) forward error correction
@@ -28,7 +27,7 @@ The Carbonado archival format has features to make it resistant against:
 - Drive failure and Data loss
     - Uses [bao encoding](https://github.com/oconnor663/bao) so it can be uploaded to a remote peer, and random 1KB slices of that data can be periodically checked against a local hash to verify data replication and integrity. This way, copies can be distributed geographically; in case of a coronal mass ejection or solar flare, at most, only half the planet will be affected.
 - Surveillance
-    - Files are encrypted at-rest by default using the v2 symmetric scheme: **AES-256-CTR** for confidentiality (length-preserving) combined with **full HMAC-SHA512** (64-byte tags) in an Encrypt-then-MAC construction for integrity and authenticity. All key separation uses HMAC-SHA512 in a BIP-32-style construction. A master key (32 or 64 bytes recommended) can be provided directly or derived via Argon2id.
+    - Files are encrypted at-rest by default using the v2 symmetric scheme: **AES-256-CTR** for confidentiality (length-preserving) combined with **full HMAC-SHA512** (64-byte tags) in an Encrypt-then-MAC construction for integrity and authenticity. All key separation uses HMAC-SHA512 in a BIP-32-style construction. Callers supply a high-entropy 32-byte (or 64-byte) master key; passphrase derivation (e.g. Argon2id) is the caller's responsibility outside the library.
 - Theft
     - Decoding is done by the client with their own keys, so it won't matter if devices where data is stored are taken or lost, even if the storage media is unencrypted.
 - Digital obsolescence
