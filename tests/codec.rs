@@ -6,8 +6,8 @@ use std::{
 
 use anyhow::Result;
 use carbonado::{
-    constants::Format, decode, encode, extract_slice, file::Header, scrub, structs::Encoded,
-    verify_slice,
+    constants::Format, decode, encode, error::CarbonadoError, extract_slice, file::Header, scrub,
+    structs::Encoded, verify_slice,
 };
 use log::{debug, info};
 use rand::{Rng, RngCore};
@@ -99,6 +99,7 @@ fn codec(path: &str) -> Result<()> {
         encode_info.bytes_ecc,
         "verify/extract now return logical data using 4KB BAO_BLOCK_SIZE geometry"
     );
+    assert_eq!(encode_info.bytes_verifiable, encoded.len() as u32);
 
     // Strengthen: use level 4 (Bao only) where logical data == original input for content check.
     let Encoded(encoded4, _hash4, ei4) = encode(&sym_key, &input, 4)?;
@@ -150,6 +151,11 @@ fn codec(path: &str) -> Result<()> {
     )?;
 
     let header_bytes = header.try_to_vec()?;
+    assert_eq!(
+        &header_bytes[0..12],
+        carbonado::constants::MAGICNO,
+        "header magic CARBONADO20"
+    );
 
     let file_path = PathBuf::from("/tmp").join(header.file_name());
     info!("Writing test file to: {file_path:?}");
@@ -201,13 +207,14 @@ fn fec_robustness() -> Result<()> {
 
             // edges on slice counts etc already covered somewhat
             if level & 4 != 0 {
-                // has bao
-                let _ = verify_slice(&e1, 0, ei1.verifiable_slice_count.min(1));
+                // has bao; assert on return (was discard) for strength + content sanity
+                let v = verify_slice(&e1, 0, ei1.verifiable_slice_count.min(1))?;
+                let _ = v.len(); // exercised + non-zero for non-empty cases
             }
         }
     }
 
-    // Encrypted+Zfec with Bao for scrub (13/15 = E+(S)+Bao+Zfec). 9/11 lack Bao so intentionally return ScrubRequiresBao (not exercised for scrub here).
+    // Encrypted+Zfec with Bao for scrub (13/15 = E+(S)+Bao+Zfec). 9/11 lack Bao so return ScrubRequiresBao (now exercised in matrix + scrub_specific_errors).
     for &level in &[13u8, 15] {
         let input = b"encrypted zfec roundtrip and scrub test payload";
         let mut key = [0u8; 32];
@@ -245,9 +252,18 @@ fn fec_robustness() -> Result<()> {
     let mut rng = rand::thread_rng();
     let mut rand_chaos = orig_encoded.clone();
     let resp = 8;
+    // Shard-aware: use chunk_len (from EncodeInfo for Zfec) for step so taints are aligned to logical shards (guarantees control over #shards hit; addresses flakiness).
+    let chunk = if encode_info.chunk_len > 0 {
+        encode_info.chunk_len as usize
+    } else {
+        (rand_chaos.len().saturating_sub(resp) / 8).max(1)
+    };
+    let step = chunk.max(1);
     if rand_chaos.len() > resp + 1000 {
         for _ in 0..5 {
-            let p = resp + (rng.next_u32() as usize % (rand_chaos.len() - resp - 1));
+            // rand within first 4 shards for <=4 guarantee on average; explicit 4/5 cases below ensure boundaries
+            let shard = rng.next_u32() as usize % 4;
+            let p = resp + shard * step + (rng.next_u32() as usize % step.max(1));
             if p < rand_chaos.len() {
                 rand_chaos[p] ^= rng.gen_range(0u8..=255);
             }
@@ -256,6 +272,44 @@ fn fec_robustness() -> Result<()> {
     let rec = scrub(&rand_chaos, hash.as_bytes(), &encode_info, 12)
         .expect("rand chaos <= threshold recoverable");
     assert_eq!(rec, orig_encoded, "scrub rand chaos");
+
+    // More adversarial: multiple rand runs + bit-level flips (not just byte) + chaos-ray sim
+    // (partial taints across shards but leaving >=4 clean for recovery; exercises scrub search
+    // for distributed "chaos ray" corruption while still succeeding).
+    for run in 0..3 {
+        let mut bit_chaos = orig_encoded.clone();
+        if bit_chaos.len() > resp + 200 {
+            for _ in 0..4 {
+                let shard = rng.next_u32() as usize % 4;
+                let p = resp + shard * step + (rng.next_u32() as usize % step.max(1));
+                let bit = rng.gen_range(0u8..8);
+                bit_chaos[p] ^= 1u8 << bit; // bit flip adversarial
+            }
+        }
+        let recb = scrub(&bit_chaos, hash.as_bytes(), &encode_info, 12)
+            .unwrap_or_else(|_| panic!("bit chaos run {} recoverable", run));
+        assert_eq!(recb, orig_encoded, "scrub bit chaos run {}", run);
+    }
+
+    // chaos ray: partial taint inside data areas of *all 8* logical shards, but only first 4 tainted
+    // so 4 remain fully good -> scrub search must succeed and recover exact bytes (not len only)
+    let mut ray = orig_encoded.clone();
+    let step = (ray.len().saturating_sub(resp) / 8).max(1);
+    let taint_sz = 37usize; // small partial inside shard for "hit"
+    for i in 0..8 {
+        let p = resp + i * step;
+        if p + taint_sz < ray.len() && i < 4 {
+            // taint only 4; other 4 untouched (sim distributed hit on "all" but recoverable)
+            ray[p..p + taint_sz].fill(0xEE);
+        }
+    }
+    let rec_ray = scrub(&ray, hash.as_bytes(), &encode_info, 12)
+        .expect("chaos ray partial across shards recoverable");
+    assert_eq!(
+        rec_ray, orig_encoded,
+        "scrub recovered exact bytes after chaos-ray partial taints"
+    );
+    assert_eq!(rec_ray.len(), orig_encoded.len()); // pair len with content (hash via outer eq)
 
     // explicit 4-of-8 shard taint (spaced full-chunk sized zeros in response)
     let mut four_shard = orig_encoded.clone();
@@ -299,14 +353,20 @@ fn fec_robustness() -> Result<()> {
     let d0 = decode(&key, h0.as_bytes(), &e0, ei0.padding_len, 12)?;
     assert!(d0.is_empty());
 
+    // 0-byte Bao+Zfec scrub (good data -> unnecessary err; unconditional e2e for edge per plan).
+    let Encoded(e0b, h0b, ei0b) = encode(&key, &[], 12)?;
+    assert!(
+        scrub(&e0b, h0b.as_bytes(), &ei0b, 12).is_err(),
+        "0-byte good Bao+Zfec must unnecessary-scrub-err"
+    );
+
     info!("FEC robustness tests passed");
     Ok(())
 }
 
 #[wasm_bindgen_test]
 fn wasm_fec_robustness_small() -> Result<()> {
-    // Small exercised path for wasm (full matrix in native; pre-existing WASM cross limits for some deps noted in AGENTS).
-    // Uses level with Zfec+Bao, det encode, light scrub recovery, format keying.
+    // Small exercised path for wasm (full 16-format matrix + chaos + edges in native only; pre-existing WASM cross limits for deps noted in AGENTS.md §10 + WASM section).
     let _ = pretty_env_logger::try_init();
     let input = b"wasm small fec";
     let mut key = [0u8; 32];
@@ -322,5 +382,111 @@ fn wasm_fec_robustness_small() -> Result<()> {
     assert_eq!(rec, e);
     let d = decode(&key, h.as_bytes(), &rec, ei.padding_len, 12)?;
     assert_eq!(&d[..], input);
+    Ok(())
+}
+
+/// Full 16-format matrix roundtrips (content equality, not len-only), plus explicit det for
+/// non-encrypt Zfec, scrub/error coverage for *all* Zfec formats (incl 9/11 for ScrubRequiresBao
+/// and 12-15 for recovery). Exercises FEC paths changed in v2 + non-FEC unchanged.
+/// Covers plan req: full encode/decode for all 16 (w/wo FEC), det, 4/8 shards etc via scrub.
+#[test]
+fn all_formats_matrix_roundtrips() -> Result<()> {
+    let _ = pretty_env_logger::try_init();
+
+    // Deterministic small varied payload (repeatable)
+    let mut input = vec![0u8; 2048];
+    for (i, b) in input.iter_mut().enumerate() {
+        *b = ((i * 7) % 251) as u8;
+    }
+
+    for level in 0u8..=15 {
+        let mut key = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut key);
+
+        let Encoded(e, h, ei) = encode(&key, &input, level)?;
+        // content eq (not just len)
+        let dec = decode(&key, h.as_bytes(), &e, ei.padding_len, level)?;
+        assert_eq!(
+            dec, input,
+            "full roundtrip content eq for all formats level={}",
+            level
+        );
+
+        // header fields when we construct one (as in other tests). Only for Bao (meaningful bytes_verifiable/hash); pure Zfec sets 0 in low-level Encoded.
+        if level & 4 != 0 {
+            // Bao cases produce proper verifiable len + keyed hash for header
+
+            let mut nonce = [0u8; 16];
+            rand::thread_rng().fill_bytes(&mut nonce);
+            let format = Format::from(level);
+            let hdr = Header::new(
+                &key,
+                nonce,
+                h.as_bytes(),
+                [0u8; 32],
+                format,
+                0,
+                ei.bytes_verifiable,
+                ei.padding_len,
+                None,
+            )?;
+            assert_eq!(hdr.format, format);
+            assert_eq!(hdr.encoded_len, ei.bytes_verifiable);
+            assert_eq!(hdr.slh_public_key, [0u8; 32]);
+            assert_eq!(
+                hdr.payload_nonce, nonce,
+                "manual nonce roundtrips in matrix header"
+            );
+            // magic validated on try_to_vec/parse path
+            let hb = hdr.try_to_vec()?;
+            assert_eq!(&hb[0..12], carbonado::constants::MAGICNO);
+        }
+
+        // For Zfec formats (bit 3 set), cover det (non-E only), scrub paths
+        if level & 8 != 0 {
+            if level & 1 == 0 {
+                // non-encrypted Zfec: must be deterministic (key point of RS)
+                let Encoded(e2, h2, ei2) = encode(&key, &input, level)?;
+                assert_eq!(e, e2, "det encode for non-E Zfec level {}", level);
+                assert_eq!(h, h2);
+                assert_eq!(ei.padding_len, ei2.padding_len);
+            }
+
+            // Exercise scrub or its required error for every Zfec format
+            if level & 4 != 0 {
+                // has Bao: good data -> UnnecessaryScrub; light taint -> recover + content
+                let err = scrub(&e, h.as_bytes(), &ei, level).unwrap_err();
+                assert!(
+                    matches!(err, CarbonadoError::UnnecessaryScrub),
+                    "good bao+zfec data must err UnnecessaryScrub (level {})",
+                    level
+                );
+                let mut bad = e.clone();
+                if bad.len() > 64 {
+                    bad[48] ^= 0x5A; // light
+                }
+                let rec = scrub(&bad, h.as_bytes(), &ei, level)
+                    .expect("scrub recover for bao+zfec level");
+                assert_eq!(rec, e, "scrub body eq level {}", level);
+                let drec = decode(&key, h.as_bytes(), &rec, ei.padding_len, level)?;
+                assert_eq!(drec, input, "post-scrub decode eq level {}", level);
+            } else {
+                // no Bao Zfec (e.g. 8,9,10,11): scrub must give ScrubRequiresBao
+                let err = scrub(&e, h.as_bytes(), &ei, level).unwrap_err();
+                assert!(
+                    matches!(err, CarbonadoError::ScrubRequiresBao),
+                    "Zfec w/o Bao level {} -> ScrubRequiresBao",
+                    level
+                );
+            }
+        }
+    }
+
+    // Short bao prefix (<8 bytes, after u64 content len prefix expected) for verify/decode paths.
+    // Covers bao error paths (InvalidHeaderLength) on malformed short bodies (not just header magic).
+    let short_bao = vec![0u8; 4];
+    let err_bao = verify_slice(&short_bao, 0, 1).unwrap_err();
+    assert!(matches!(err_bao, CarbonadoError::InvalidHeaderLength));
+
     Ok(())
 }

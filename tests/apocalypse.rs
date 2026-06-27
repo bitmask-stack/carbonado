@@ -74,7 +74,6 @@ fn act_of_god(path: &str) -> Result<()> {
     info!("Encoding {path}...");
     let Encoded(orig_encoded, hash, encode_info) = encode(&key, &input, 12)?;
     debug!("Encoding Info: {encode_info:#?}");
-    let _new_encoded = orig_encoded.clone();
 
     info!("Scrubbing stream against hash: {hash}...");
     // Pass the exact format used for this bao (level 12 = Bao+Zfec) so keyed paths in
@@ -107,7 +106,6 @@ fn act_of_god(path: &str) -> Result<()> {
         scrub(&flipped, hash.as_bytes(), &encode_info, 12).expect("scrub must recover distributed");
     assert_eq!(rec, orig_encoded);
 
-    let _ = orig_encoded; // baseline already asserted via encodes
     info!("All good!");
 
     Ok(())

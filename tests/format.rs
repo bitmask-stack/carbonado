@@ -1,7 +1,9 @@
 use std::{fs::OpenOptions, io::Write, path::PathBuf};
 
 use anyhow::Result;
-use carbonado::{constants::Format, decode, encode, file::Header, structs::Encoded};
+use carbonado::{
+    constants::Format, decode, encode, error::CarbonadoError, file::Header, scrub, structs::Encoded,
+};
 use log::{debug, info, trace};
 use rand::RngCore;
 use wasm_bindgen_test::wasm_bindgen_test_configure;
@@ -72,6 +74,20 @@ fn format() -> Result<()> {
     assert_eq!(header.format, format);
     assert_eq!(header.chunk_index, 0);
     assert_eq!(header.padding_len, encode_info.padding_len);
+    assert_eq!(header.encoded_len, encode_info.bytes_verifiable);
+    assert_eq!(header.slh_public_key, [0u8; 32]);
+    assert_eq!(
+        header.payload_nonce, payload_nonce,
+        "nonce roundtrips through header"
+    );
+
+    // Confirm v2 magic in serialized header (CARBONADO20, old 02 rejected separately)
+    let header_bytes = header.try_to_vec()?;
+    assert_eq!(
+        &header_bytes[0..12],
+        carbonado::constants::MAGICNO,
+        "serialized header uses CARBONADO20 magic"
+    );
 
     info!("Decoding Carbonado bytes");
     let decoded = decode(
@@ -85,6 +101,90 @@ fn format() -> Result<()> {
     assert_eq!(decoded, input, "Decoded output is same as encoded input");
 
     info!("All good!");
+
+    Ok(())
+}
+
+/// Targeted test for v2 magic: old/dev magic (CARBONADO02) and other invalids rejected with clear error.
+/// Covers the "old magic produces migration error" requirement from v2 stabilization plan.
+#[test]
+fn header_rejects_bad_magic() -> Result<()> {
+    let _ = pretty_env_logger::try_init();
+
+    // Craft a buffer >= LEN with old dev magic (02 transitional)
+    let mut bad02 = [0u8; Header::LEN];
+    bad02[0..12].copy_from_slice(b"CARBONADO02\n"); // exactly 12 bytes: CARBONADO(9)+02(2)+\n(1)
+    let err = Header::try_from(&bad02[..]).unwrap_err();
+    assert!(
+        matches!(err, CarbonadoError::InvalidMagicNumber(_)),
+        "CARBONADO02 (old dev) must be rejected as InvalidMagicNumber (directs to external migration)"
+    );
+
+    // Random invalid magic
+    let mut bad = [0u8; Header::LEN];
+    bad[0..12].copy_from_slice(b"BADMAGIC!\nXX"); // 12 bytes
+    let err2 = Header::try_from(&bad[..]).unwrap_err();
+    assert!(matches!(err2, CarbonadoError::InvalidMagicNumber(_)));
+
+    // Too short also errors (length before magic check path)
+    let short = [0u8; 10];
+    let err3 = Header::try_from(&short[..]).unwrap_err();
+    // short < LEN hits length check before magic (specific)
+    assert!(matches!(err3, CarbonadoError::InvalidHeaderLength));
+
+    Ok(())
+}
+
+/// Exercise specific scrub errors for Zfec formats: ScrubRequiresBao for no-Bao Zfec (9/11 etc),
+/// and InvalidScrubbedHash for irrecoverable (exercises error paths unconditionally).
+#[test]
+fn scrub_specific_errors() -> Result<()> {
+    let _ = pretty_env_logger::try_init();
+
+    let mut input = vec![0xCCu8; 4096]; // large enough for shard taints to be effective (>~100)
+    for (i, b) in input.iter_mut().enumerate() {
+        *b = (i % 251) as u8;
+    }
+    let input = &input[..];
+    let mut key = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut key);
+
+    // Levels 9,11 = Encrypted?+Zfec (no Bao) -> scrub must return ScrubRequiresBao
+    for &level in &[9u8, 11] {
+        let Encoded(e, h, ei) = encode(&key, input, level)?;
+        let err = scrub(&e, h.as_bytes(), &ei, level).unwrap_err();
+        assert!(
+            matches!(err, CarbonadoError::ScrubRequiresBao),
+            "level {} (Zfec no Bao) must error ScrubRequiresBao",
+            level
+        );
+    }
+
+    // Level 8/10 also no bao zfec (non E), same
+    for &level in &[8u8, 10] {
+        let Encoded(e, h, ei) = encode(&key, input, level)?;
+        let err = scrub(&e, h.as_bytes(), &ei, level).unwrap_err();
+        assert!(matches!(err, CarbonadoError::ScrubRequiresBao));
+    }
+
+    // For a Bao+Zfec, make irrecoverable (>4 shards) -> InvalidScrubbedHash
+    let Encoded(e, h, ei) = encode(&key, input, 12)?;
+    let mut too_bad = e.clone();
+    // taint 5+ shard regions aggressively (large input ensures effective distributed hit)
+    let step = (too_bad.len().saturating_sub(8) / 8).max(16);
+    for i in 0..5 {
+        let p = 8 + i * step;
+        let z = (step / 2).max(8);
+        if p + z <= too_bad.len() {
+            too_bad[p..p + z].fill(0);
+        }
+    }
+    let err = scrub(&too_bad, h.as_bytes(), &ei, 12).unwrap_err();
+    assert!(
+        matches!(err, CarbonadoError::InvalidScrubbedHash),
+        "excessive shard taint must yield InvalidScrubbedHash, got: {}",
+        err
+    );
 
     Ok(())
 }
