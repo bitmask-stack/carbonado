@@ -108,17 +108,25 @@ pub fn scattered_stream_knockout(
     rng: &mut impl Rng,
 ) -> KnockoutReport {
     let cap = max_bad_shards.min(FEC_K);
-    // Data-shard indices only (0..FEC_K), same rationale as distributed_byte_knockout.
-    let shard_assignments: Vec<usize> = (0..cap).collect();
+    // Data-shard indices with non-empty byte ranges only.
+    let shard_assignments: Vec<usize> = (0..cap)
+        .filter(|&s| !layout.shard_byte_range(s).is_empty())
+        .collect();
     let mut report = KnockoutReport {
         positions: Vec::with_capacity(total_knockouts),
         shards_touched: Vec::new(),
     };
+    if shard_assignments.is_empty() {
+        return report;
+    }
 
-    for _ in 0..total_knockouts {
+    let max_attempts = total_knockouts.saturating_mul(8).max(1);
+    let mut attempts = 0usize;
+    while report.positions.len() < total_knockouts && attempts < max_attempts {
         let shard = shard_assignments[rng.gen_range(0..shard_assignments.len())];
         let range = layout.shard_byte_range(shard);
         if range.is_empty() {
+            attempts += 1;
             continue;
         }
         let pos = rng.gen_range(range.start..range.end);
@@ -127,6 +135,7 @@ pub fn scattered_stream_knockout(
         if !report.shards_touched.contains(&shard) {
             report.shards_touched.push(shard);
         }
+        attempts += 1;
     }
     report
 }
@@ -146,4 +155,89 @@ pub fn flip_byte(buf: &mut [u8], offset: usize, mask: u8) {
     if offset < buf.len() {
         buf[offset] ^= mask;
     }
+}
+
+/// Layout of data-shard stripes inside an outboard bare main (c8–c15 with Zfec).
+///
+/// Outboard bare `main` stores the pre-FEC logical body; `scrub_outboard` and
+/// `zfec_with_parity` read data shards at fixed `chunk_len` strides. Parity
+/// shards live in the separate `.par` sidecar.
+#[derive(Clone, Debug)]
+pub struct OutboardShardLayout {
+    pub chunk_len: usize,
+    pub main_len: usize,
+    pub parity_len: usize,
+}
+
+impl OutboardShardLayout {
+    pub fn from_outboard_encode(main_len: usize, parity_len: usize, chunk_len: u32) -> Self {
+        Self {
+            chunk_len: chunk_len as usize,
+            main_len,
+            parity_len,
+        }
+    }
+
+    /// Data shard `idx` (0..FEC_K) byte span in bare main.
+    pub fn data_shard_byte_range(&self, shard_idx: usize) -> Range<usize> {
+        assert!(shard_idx < FEC_K);
+        let start = shard_idx * self.chunk_len;
+        let end = (start + self.chunk_len).min(self.main_len);
+        start..end
+    }
+
+    /// Parity shard `idx` (0..FEC_M - FEC_K) byte span in `.par` sidecar.
+    pub fn parity_shard_byte_range(&self, parity_shard_idx: usize) -> Range<usize> {
+        assert!(parity_shard_idx < FEC_M - FEC_K);
+        let start = parity_shard_idx * self.chunk_len;
+        let end = (start + self.chunk_len).min(self.parity_len);
+        start..end
+    }
+
+    pub fn max_recoverable_bad_shards(&self) -> usize {
+        FEC_K
+    }
+}
+
+/// Scatter knockouts across outboard bare main data shards (≤ `max_bad_shards`).
+///
+/// Does not touch the `.par` sidecar — models JBOD main-disk corruption with
+/// intact parity for `zfec_with_parity` / `scrub_outboard` recovery.
+pub fn scattered_outboard_main_knockout(
+    main: &mut [u8],
+    layout: &OutboardShardLayout,
+    total_knockouts: usize,
+    max_bad_shards: usize,
+    rng: &mut impl Rng,
+) -> KnockoutReport {
+    let cap = max_bad_shards.min(FEC_K);
+    let shard_assignments: Vec<usize> = (0..cap)
+        .filter(|&s| !layout.data_shard_byte_range(s).is_empty())
+        .collect();
+    let mut report = KnockoutReport {
+        positions: Vec::with_capacity(total_knockouts),
+        shards_touched: Vec::new(),
+    };
+    if shard_assignments.is_empty() {
+        return report;
+    }
+
+    let max_attempts = total_knockouts.saturating_mul(8).max(1);
+    let mut attempts = 0usize;
+    while report.positions.len() < total_knockouts && attempts < max_attempts {
+        let shard = shard_assignments[rng.gen_range(0..shard_assignments.len())];
+        let range = layout.data_shard_byte_range(shard);
+        if range.is_empty() {
+            attempts += 1;
+            continue;
+        }
+        let pos = rng.gen_range(range.start..range.end);
+        main[pos] ^= rng.gen_range(1u8..=255);
+        report.positions.push(pos);
+        if !report.shards_touched.contains(&shard) {
+            report.shards_touched.push(shard);
+        }
+        attempts += 1;
+    }
+    report
 }

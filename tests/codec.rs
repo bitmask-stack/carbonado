@@ -4,11 +4,14 @@ use std::{
     path::PathBuf,
 };
 
+mod common;
+
 use anyhow::Result;
 use carbonado::{
     constants::Format, decode, encode, error::CarbonadoError, extract_slice, file::Header, scrub,
     structs::Encoded, verify_slice,
 };
+use common::corruption::{scattered_stream_knockout, InboardShardLayout};
 use log::{debug, info};
 use rand::{Rng, RngCore};
 use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
@@ -390,14 +393,18 @@ fn fec_robustness() -> Result<()> {
 
 #[wasm_bindgen_test]
 fn wasm_fec_robustness_small() -> Result<()> {
-    // Small exercised path for wasm (full 16-format matrix + chaos + edges in native only; pre-existing WASM cross limits for deps noted in AGENTS.md §10 + WASM section).
+    // WASM subset: light flip + 16 KiB stripe-boundary distributed knockout (c12).
+    // Full outboard chaos / multi-format matrix remain native-only (see doc/TEST_STRATEGY.md).
     let _ = pretty_env_logger::try_init();
-    let input = b"wasm small fec";
+    let mut rng = rand::thread_rng();
     let mut key = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut key);
+    rng.fill_bytes(&mut key);
+
+    // Small payload: single-byte flip scrub path.
+    let input = b"wasm small fec";
     let Encoded(e, h, ei) = encode(&key, input, 12)?;
     let Encoded(e2, _, _) = encode(&key, input, 12)?;
-    assert_eq!(e, e2); // det
+    assert_eq!(e, e2);
     let mut bad = e.clone();
     if bad.len() > 10 {
         bad[10] ^= 0x01;
@@ -406,6 +413,19 @@ fn wasm_fec_robustness_small() -> Result<()> {
     assert_eq!(rec, e);
     let d = decode(&key, h.as_bytes(), &rec, ei.padding_len, 12)?;
     assert_eq!(&d[..], input);
+
+    // Stripe-boundary payload: distributed knockout across ≤4 data shards.
+    let boundary: Vec<u8> = (0..16_384).map(|i| (i % 251) as u8).collect();
+    let Encoded(eb, hb, eib) = encode(&key, &boundary, 12)?;
+    let layout = InboardShardLayout::from_encode_info(eb.len(), eib.chunk_len);
+    let mut chaos = eb.clone();
+    let report = scattered_stream_knockout(&mut chaos, &layout, 16, 4, &mut rng);
+    assert!(report.shards_touched.len() <= 4);
+    let rec_b = scrub(&chaos, hb.as_bytes(), &eib, 12).expect("wasm stripe-boundary scrub");
+    assert_eq!(rec_b, eb);
+    let dec_b = decode(&key, hb.as_bytes(), &rec_b, eib.padding_len, 12)?;
+    assert_eq!(dec_b, boundary);
+
     Ok(())
 }
 

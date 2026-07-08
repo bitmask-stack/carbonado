@@ -18,7 +18,7 @@ This document plans the test matrix, FEC/scrub/sharding coverage, and remaining 
 | **Integration** | `tests/*.rs` (one crate per file) | `fec_chaos.rs`, `fec_scrub_matrix.rs`, `shard_fec_scrub.rs` |
 | **Property** | `proptest!` in integration crates | `fec_chaos.rs`, `streaming.rs`, `adversarial_proptest.rs` |
 | **Shared helpers** | `tests/common/` | `corruption.rs`, `format_matrix.rs`, `header_layout.rs` |
-| **WASM subset** | `#[wasm_bindgen_test]` in `codec.rs` | Small FEC scrub path only (full matrix native) |
+| **WASM subset** | `#[wasm_bindgen_test]` in `codec.rs` | Light flip + 16 KiB stripe-boundary distributed knockout (full chaos native) |
 
 Each integration test file starts with `mod common;` and imports only needed helpers.
 
@@ -32,8 +32,9 @@ Bitmask: `Encrypted(1) | Snappy(2) | Bao(4) | Zfec(8)`.
 |------|-------|--------|
 | **T0** | Low-level `encode`/`decode` roundtrip all 16 | Done — `tests/codec.rs::all_formats_matrix_roundtrips` |
 | **T1** | `stream_encode_buffer` all 16 (proptest) | Done — `tests/streaming.rs` |
-| **T2** | Scrub all Bao+Zfec (c12–c15) light + distributed | **New** — `tests/fec_scrub_matrix.rs` |
-| **T3** | Outboard scrub c12/c14/c15 | **New** — `tests/fec_scrub_matrix.rs` |
+| **T2** | Scrub all Bao+Zfec (c12–c15) light + distributed | Done — `tests/fec_scrub_matrix.rs` |
+| **T3** | Outboard scrub c12/c14/c15 light flip | Done — `tests/fec_scrub_matrix.rs` |
+| **T3b** | Outboard distributed chaos + stripe-boundary scrub | Done — `tests/fec_chaos.rs` |
 | **T4** | Outboard roundtrip all 16 | Done — `tests/format.rs::outboard_and_keyed_c_number` |
 | **T5** | `encode_stream`/`decode_stream` format sweep | Done — `tests/streaming.rs::file_stream_format_sweep` |
 | **T6** | Directory heterogeneous c4–c7 + catalog c14/c15 | Done — `tests/directory_archive.rs` (28) |
@@ -57,7 +58,7 @@ Carbonado uses **reed-solomon-erasure 4/8**: any **4 of 8** shards reconstruct t
 
 ### Distributed knockout (`tests/common/corruption.rs`)
 
-- `distributed_byte_knockout` — random zeros across ≤4 distinct shard regions
+- `distributed_byte_knockout` — XOR flips (non-zero mask) across ≤4 distinct shard regions
 - `scattered_stream_knockout` — XOR flips spread through the encoded stream
 - `erase_shards` — full shard loss (simulates JBOD disk failure)
 
@@ -65,6 +66,9 @@ Carbonado uses **reed-solomon-erasure 4/8**: any **4 of 8** shards reconstruct t
 
 - Public Bao+Zfec (c12, c14): sizes 4 KiB–256 KiB, 4-shard distributed recovery
 - Encrypted (c13, c15): scattered knockout + content roundtrip
+- **Outboard distributed chaos** (c12/c14/c15): corrupt bare main + intact `.par` → `scrub_outboard` + `decode_outboard`
+- **`zfec_with_parity` without scrub** (c8 outboard): truncated main erasure + intact `.par` → direct `decode_outboard` (XOR corruption on Bao+Zfec still uses scrub)
+- **Stripe-boundary chaos** (single-stripe `chunk_len` scaling): inboard + outboard at 16 KiB ±1, 32 KiB, 48 KiB
 - **Negative proof**: 5 erased shards → `InvalidScrubbedHash`
 - Proptest: c12 random size/knockout counts
 
@@ -103,10 +107,10 @@ Carbonado uses **reed-solomon-erasure 4/8**: any **4 of 8** shards reconstruct t
 
 ### P2 — FEC / scrub depth
 
-1. Outboard distributed chaos (corrupt bare main + intact `.par`)
-2. `zfec_with_parity` corruption without scrub (direct decode recovery)
-3. Multi-stripe payloads (>16 KiB) chaos across stripe boundaries
-4. WASM: expand `wasm_fec_robustness_small` or document native-only chaos
+1. ~~Outboard distributed chaos (corrupt bare main + intact `.par`)~~ **Done** — `tests/fec_chaos.rs::outboard_distributed_knockout_scrub_recover_c12_c14_c15`
+2. ~~`zfec_with_parity` corruption without scrub (direct decode recovery)~~ **Done** — `tests/fec_chaos.rs::zfec_with_parity_outboard_decode_without_scrub` + `src/stream/fec.rs` unit test (c8 erasure via truncated main)
+3. ~~Multi-stripe payloads (>16 KiB) chaos across stripe boundaries~~ **Done** — `tests/fec_chaos.rs::multi_stripe_boundary_*`
+4. ~~WASM: expand `wasm_fec_robustness_small` or document native-only chaos~~ **Done** — expanded in `tests/codec.rs` (stripe-boundary distributed knockout); outboard/multi-format chaos documented native-only
 
 ### P3 — Directory + P2P integration
 

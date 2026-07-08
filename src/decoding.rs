@@ -97,36 +97,42 @@ pub fn zfec_with_parity(
     padding: u32,
 ) -> Result<Vec<u8>, CarbonadoError> {
     trace!("forward error correcting from bare + parity sidecar (reed-solomon outboard)");
-    if input.is_empty() {
+    if input.is_empty() && parity.is_empty() {
         return Ok(vec![]);
     }
-    let input_len = input.len();
-    let (calc_pad, chunk_len) = crate::utils::calc_padding_len(input_len);
-    let pad = if padding != 0 { padding } else { calc_pad };
-    let shard_len = chunk_len as usize;
-    if !parity.len().is_multiple_of(shard_len) || parity.len() / shard_len != FEC_M - FEC_K {
+    let parity_shards = FEC_M - FEC_K;
+    if !parity.len().is_multiple_of(parity_shards) {
         return Err(CarbonadoError::UnevenZfecChunks);
     }
+    let shard_len = parity.len() / parity_shards;
+    let padded_total = shard_len * FEC_K;
+    let pad = padding as usize;
+    if pad > padded_total {
+        return Err(CarbonadoError::ScrubbedLengthMismatch(padded_total, pad));
+    }
+    // Logical length from parity stripe geometry + encode-time padding (not truncated main len).
+    let logical_len = padded_total - pad;
 
-    let mut padded = Vec::from(input);
-    padded.extend(vec![0u8; pad as usize]);
+    // Stripe geometry comes from the parity sidecar (encode-time chunk_len), not truncated main len.
+    let mut padded = vec![0u8; padded_total];
+    let copy = input.len().min(logical_len);
+    padded[..copy].copy_from_slice(&input[..copy]);
 
     let mut shards: Vec<Option<Vec<u8>>> = vec![None; FEC_M];
     for (i, sh) in shards.iter_mut().enumerate().take(FEC_K) {
         let start = i * shard_len;
         let end = start + shard_len;
-        if end <= padded.len() {
+        if end <= copy {
             *sh = Some(padded[start..end].to_vec());
         } else {
-            *sh = Some(vec![0u8; shard_len]);
+            // Truncated or missing data column — erasure; RS reconstructs from parity.
+            *sh = None;
         }
     }
-    for j in 0..(FEC_M - FEC_K) {
+    for j in 0..parity_shards {
         let start = j * shard_len;
         let end = start + shard_len;
-        if end <= parity.len() {
-            shards[FEC_K + j] = Some(parity[start..end].to_vec());
-        }
+        shards[FEC_K + j] = Some(parity[start..end].to_vec());
     }
 
     let rs = ReedSolomon::<Field>::new(FEC_K, FEC_M - FEC_K)?;
@@ -141,13 +147,13 @@ pub fn zfec_with_parity(
         }
     }
 
-    if (decoded.len() as u32) < pad {
+    if decoded.len() < logical_len {
         return Err(CarbonadoError::ScrubbedLengthMismatch(
             decoded.len(),
-            pad as usize,
+            logical_len,
         ));
     }
-    decoded.truncate(decoded.len() - pad as usize);
+    decoded.truncate(logical_len);
     Ok(decoded)
 }
 
@@ -346,28 +352,37 @@ pub fn scrub_outboard(
             return Err(CarbonadoError::MissingFecParity);
         };
 
-        let input_len_for_pad = bare.len();
-        let (calc_pad, chunk_len) = crate::utils::calc_padding_len(input_len_for_pad);
-        let pad = if padding != 0 { padding } else { calc_pad };
-        let shard_len = chunk_len as usize;
-        if !par.len().is_multiple_of(shard_len) || (par.len() / shard_len) != (FEC_M - FEC_K) {
+        // Encode-time geometry (parity sidecar + EncodeInfo), not calc_padding_len(bare.len()).
+        let shard_len = encode_info.chunk_len as usize;
+        if shard_len == 0 {
             return Err(CarbonadoError::UnevenZfecChunks);
         }
+        let parity_shards = FEC_M - FEC_K;
+        if !par.len().is_multiple_of(shard_len) || par.len() / shard_len != parity_shards {
+            return Err(CarbonadoError::UnevenZfecChunks);
+        }
+        let padded_total = shard_len * FEC_K;
+        let pad = padding as usize;
+        if pad > padded_total {
+            return Err(CarbonadoError::ScrubbedLengthMismatch(padded_total, pad));
+        }
+        let logical_len = padded_total - pad;
+        let copy = bare.len().min(logical_len);
+
+        let mut padded = vec![0u8; padded_total];
+        padded[..copy].copy_from_slice(&bare[..copy]);
 
         let mut chunks: Vec<(usize, Vec<u8>)> = vec![];
         for i in 0..FEC_K {
             let start = i * shard_len;
             let end = start + shard_len;
-            if end <= bare.len() {
-                chunks.push((i, bare[start..end].to_vec()));
+            if end <= copy {
+                chunks.push((i, padded[start..end].to_vec()));
             }
         }
-        for j in 0..(FEC_M - FEC_K) {
+        for j in 0..parity_shards {
             let start = j * shard_len;
-            let end = (start + shard_len).min(par.len());
-            if end > start {
-                chunks.push((FEC_K + j, par[start..end].to_vec()));
-            }
+            chunks.push((FEC_K + j, par[start..start + shard_len].to_vec()));
         }
 
         let n = chunks.len();
@@ -382,7 +397,7 @@ pub fn scrub_outboard(
                     sel.push((c.0, &c.1));
                 }
             }
-            if let Ok(cand_inner) = zfec_chunks(&sel, pad) {
+            if let Ok(cand_inner) = zfec_chunks(&sel, padding) {
                 if bao_with_outboard(&cand_inner, ob, hash, format).is_ok() {
                     recovered = Some(cand_inner);
                     break;

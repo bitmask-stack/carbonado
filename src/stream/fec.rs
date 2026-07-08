@@ -204,6 +204,10 @@ pub fn stream_decode_inboard<R: Read, W: Write>(
 }
 
 /// Outboard FEC decode: bare main reader + parity reader -> logical output.
+///
+/// **Degraded / truncated main:** prefer [`crate::decoding::zfec_with_parity`] via
+/// [`crate::stream::stream_decode_outboard_buffer`], which derives stripe geometry from
+/// the parity sidecar (encode-time `chunk_len`) rather than `calc_padding_len(main_len)`.
 pub fn stream_decode_outboard<R: Read, W: Write>(
     mut main: R,
     mut parity: R,
@@ -211,39 +215,57 @@ pub fn stream_decode_outboard<R: Read, W: Write>(
     main_len: usize,
     output: &mut W,
 ) -> Result<u64, CarbonadoError> {
-    if main_len == 0 {
+    if main_len == 0 && padding == 0 {
         return Ok(0);
     }
-    let (calc_pad, chunk_len) = calc_padding_len(main_len);
-    let pad = if padding != 0 { padding } else { calc_pad };
-    let shard_len = chunk_len as usize;
 
-    let mut padded = Vec::with_capacity(main_len + pad as usize);
-    let mut buf = [0u8; SLICE_LEN as usize];
-    let mut read_main = 0usize;
-    while read_main < main_len {
-        let n = main.read(&mut buf).map_err(CarbonadoError::StdIoError)?;
-        if n == 0 {
-            break;
-        }
-        let take = n.min(main_len - read_main);
-        padded.extend_from_slice(&buf[..take]);
-        read_main += take;
+    // Read parity first to derive encode-time shard geometry (matches zfec_with_parity).
+    let mut parity_buf = Vec::new();
+    parity
+        .read_to_end(&mut parity_buf)
+        .map_err(CarbonadoError::StdIoError)?;
+    let parity_shards = FEC_M - FEC_K;
+    if !parity_buf.len().is_multiple_of(parity_shards) {
+        return Err(CarbonadoError::UnevenZfecChunks);
     }
-    padded.resize(main_len + pad as usize, 0);
+    let shard_len = parity_buf.len() / parity_shards;
+    let padded_total = shard_len * FEC_K;
+    let pad = padding as usize;
+    if pad > padded_total {
+        return Err(CarbonadoError::ScrubbedLengthMismatch(padded_total, pad));
+    }
+    let logical_len = padded_total - pad;
+
+    let mut main_buf = Vec::new();
+    if main_len > 0 {
+        let mut buf = [0u8; SLICE_LEN as usize];
+        let mut read_main = 0usize;
+        while read_main < main_len {
+            let n = main.read(&mut buf).map_err(CarbonadoError::StdIoError)?;
+            if n == 0 {
+                break;
+            }
+            let take = n.min(main_len - read_main);
+            main_buf.extend_from_slice(&buf[..take]);
+            read_main += take;
+        }
+    }
+    let copy = main_buf.len().min(logical_len);
+
+    let mut padded = vec![0u8; padded_total];
+    padded[..copy].copy_from_slice(&main_buf[..copy]);
 
     let mut shards: Vec<Option<Vec<u8>>> = vec![None; FEC_M];
     for (i, shard) in shards.iter_mut().enumerate().take(FEC_K) {
         let start = i * shard_len;
         let end = start + shard_len;
-        *shard = Some(padded[start..end].to_vec());
+        if end <= copy {
+            *shard = Some(padded[start..end].to_vec());
+        }
     }
-    for j in 0..(FEC_M - FEC_K) {
-        let mut pbuf = vec![0u8; shard_len];
-        parity
-            .read_exact(&mut pbuf)
-            .map_err(CarbonadoError::StdIoError)?;
-        shards[FEC_K + j] = Some(pbuf);
+    for j in 0..parity_shards {
+        let start = j * shard_len;
+        shards[FEC_K + j] = Some(parity_buf[start..start + shard_len].to_vec());
     }
 
     let rs = ReedSolomon::<Field>::new(FEC_K, FEC_M - FEC_K)?;
@@ -252,13 +274,13 @@ pub fn stream_decode_outboard<R: Read, W: Write>(
     for s in shards.iter().take(FEC_K).flatten() {
         decoded.extend_from_slice(s);
     }
-    if (decoded.len() as u32) < pad {
+    if decoded.len() < logical_len {
         return Err(CarbonadoError::ScrubbedLengthMismatch(
             decoded.len(),
-            pad as usize,
+            logical_len,
         ));
     }
-    decoded.truncate(decoded.len() - pad as usize);
+    decoded.truncate(logical_len);
     output
         .write_all(&decoded)
         .map_err(CarbonadoError::StdIoError)?;
@@ -368,5 +390,86 @@ mod tests {
         let decoded = zfec_with_parity(&input, &parity, pl).expect("zfec outboard");
         assert_eq!(decoded, input);
         assert_eq!(chunk_len % SLICE_LEN, 0);
+    }
+
+    #[test]
+    fn zfec_with_parity_recovers_erased_trailing_shards() {
+        use crate::decoding::zfec_with_parity;
+
+        let input: Vec<u8> = (0..32_768).map(|i| (i % 251) as u8).collect();
+        let (pl, chunk_len, parity) = encode_outboard_parity_buffer(&input).expect("parity");
+        let chunk = chunk_len as usize;
+        let truncated = &input[..input.len() - 2 * chunk];
+        let decoded = zfec_with_parity(truncated, &parity, pl).expect("erasure decode");
+        assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn zfec_with_parity_recovers_fully_erased_main_from_parity() {
+        use crate::decoding::zfec_with_parity;
+
+        let input: Vec<u8> = (0..16_384).map(|i| (i % 251) as u8).collect();
+        let (pl, _, parity) = encode_outboard_parity_buffer(&input).expect("parity");
+        let decoded = zfec_with_parity(&[], &parity, pl).expect("parity-only reconstruct");
+        assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn zfec_with_parity_rejects_malformed_parity_length() {
+        use crate::decoding::zfec_with_parity;
+        use crate::error::CarbonadoError;
+
+        let input: Vec<u8> = (0..8192).map(|i| (i % 251) as u8).collect();
+        let (_, _, parity) = encode_outboard_parity_buffer(&input).expect("parity");
+        let bad = &parity[..parity.len() - 1];
+        let err = zfec_with_parity(&input, bad, 0).unwrap_err();
+        assert!(matches!(err, CarbonadoError::UnevenZfecChunks));
+    }
+
+    #[test]
+    fn zfec_with_parity_rejects_padding_beyond_stripe() {
+        use crate::decoding::zfec_with_parity;
+        use crate::error::CarbonadoError;
+
+        let input: Vec<u8> = (0..8192).map(|i| (i % 251) as u8).collect();
+        let (_, _, parity) = encode_outboard_parity_buffer(&input).expect("parity");
+        let padded_total = (parity.len() / (FEC_M - FEC_K)) * FEC_K;
+        let err = zfec_with_parity(&input, &parity, (padded_total + 1) as u32).unwrap_err();
+        assert!(matches!(
+            err,
+            CarbonadoError::ScrubbedLengthMismatch(a, b) if a == padded_total && b == padded_total + 1
+        ));
+    }
+
+    #[test]
+    fn zfec_with_parity_corrupt_parity_does_not_recover_original() {
+        use crate::decoding::zfec_with_parity;
+
+        let input: Vec<u8> = (0..16_384).map(|i| (i % 251) as u8).collect();
+        let (pl, chunk_len, parity) = encode_outboard_parity_buffer(&input).expect("parity");
+        let chunk = chunk_len as usize;
+        let mut bad_parity = parity.clone();
+        for j in 0..3 {
+            bad_parity[j * chunk..(j + 1) * chunk].fill(0xFF);
+        }
+        // RS reconstruct treats present-but-corrupt shards as valid; output must differ.
+        let decoded = zfec_with_parity(&[], &bad_parity, pl).expect("reconstruct returns Ok");
+        assert_ne!(decoded, input);
+    }
+
+    #[test]
+    fn zfec_with_parity_empty_parity_with_nonempty_input_errors() {
+        use crate::decoding::zfec_with_parity;
+        use crate::error::CarbonadoError;
+
+        let input: Vec<u8> = (0..4096).map(|i| (i % 251) as u8).collect();
+        let (pl, _, _) = encode_outboard_parity_buffer(&input).expect("parity");
+        let err = zfec_with_parity(&input, &[], pl).unwrap_err();
+        assert!(matches!(
+            err,
+            CarbonadoError::UnevenZfecChunks
+                | CarbonadoError::FecError(_)
+                | CarbonadoError::ScrubbedLengthMismatch(0, _)
+        ));
     }
 }
