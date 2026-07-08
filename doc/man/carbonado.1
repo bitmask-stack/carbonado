@@ -1,0 +1,53 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH carbonado 1  "carbonado 2.0.0" 
+.SH NAME
+carbonado \- Apocalypse\-resistant archival for files and directory trees
+.SH SYNOPSIS
+\fBcarbonado\fR [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIsubcommands\fR>
+.SH DESCRIPTION
+Encode and decode Carbonado archives for single files or directory trees.
+.PP
+KEY MATERIAL:
+  First encrypted encode auto\-generates a BIP39 mnemonic (24 words), saved in plaintext at the path from `carbonado key path` (override: CARBONADO_MNEMONIC_PATH). Later encode/decode reuse it unless `\-\-master` is given. Decode never auto\-generates.
+.PP
+ARTIFACTS:
+  Single\-file default: inboard headered `{hash}.c{fmt:02x}` (format 14 → `.c0e`).
+  `\-\-outboard`: bare main + optional `.out`/`.par` sidecars (single\-file only).
+  Directory: inboard Adamantine 1.0 catalog `.adam.c14` (or `.adam.c15` with `\-\-encrypted`) and heterogeneous bare segment mains (c4/c6 or c5/c7). Output defaults to `{input}\-archive/`.
+.PP
+See `carbonado <command> \-\-help` for per\-command options.
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.SH SUBCOMMANDS
+.TP
+carbonado\-key(1)
+Manage persisted BIP39 seed (plaintext; see `carbonado key path`)
+.TP
+carbonado\-encode(1)
+Encode a file or directory into a Carbonado archive
+.TP
+carbonado\-decode(1)
+Decode a headered archive, bare outboard main, or Adamantine catalog
+.TP
+carbonado\-help(1)
+Print this message or the help of the given subcommand(s)
+.SH EXTRA
+EXAMPLES:
+  carbonado encode secret.bin \-\-format 15
+  carbonado encode ./my\-project \-\-encrypted \-o ./archive\-out
+
+  carbonado encode myfile.bin \-\-outboard \-\-format 14
+  carbonado encode ./my\-project \-o ./archive\-out
+  carbonado decode ./archive\-out/<catalog>.adam.c14 \-o ./restored
+  carbonado decode ./archive\-out/<catalog>.adam.c15 \-o ./restored
+
+  carbonado key path
+  carbonado key show
+.SH VERSION
+v2.0.0

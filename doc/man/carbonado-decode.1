@@ -1,0 +1,37 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH carbonado-decode 1  "carbonado-decode " 
+.SH NAME
+carbonado\-decode \- Decode a headered archive, bare outboard main, or Adamantine catalog
+.SH SYNOPSIS
+\fBcarbonado\-decode\fR [\fB\-\-master\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-hash\fR] [\fB\-f\fR|\fB\-\-format\fR] [\fB\-\-padding\fR] [\fB\-\-bao\-outboard\fR] [\fB\-\-fec\-parity\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIINPUT\fR> 
+.SH DESCRIPTION
+Decode a headered archive, bare outboard main, or Adamantine catalog
+.SH OPTIONS
+.TP
+\fB\-\-master\fR \fI<HEX>\fR
+32\-byte master key as 64 hex chars (default: stored BIP39 seed from `carbonado key path`)
+.TP
+\fB\-o\fR, \fB\-\-output\fR \fI<PATH>\fR
+Output file or directory [default: recovered.bin or recovered_dir]
+.TP
+\fB\-\-hash\fR \fI<HEX>\fR
+Bare outboard only: Bao root as 64 hex chars (default: parsed from filename)
+.TP
+\fB\-f\fR, \fB\-\-format\fR \fI<LEVEL>\fR
+Bare outboard only: format level 0–15 when not encoded in filename (rejected on headered inboard)
+.TP
+\fB\-\-padding\fR \fI<BYTES>\fR [default: 0]
+Bare outboard only: FEC padding in bytes [default: 0, auto when `.par` sidecar present]
+.TP
+\fB\-\-bao\-outboard\fR \fI<PATH>\fR
+Bare outboard only: path to Bao `.out` sidecar [default: sibling of input]
+.TP
+\fB\-\-fec\-parity\fR \fI<PATH>\fR
+Bare outboard only: path to FEC `.par` sidecar [default: sibling of input]
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+<\fIINPUT\fR>
+Archive path: headered `.c{fmt:02x}`, bare outboard main, or `.adam.c{N}` directory catalog (decimal N)

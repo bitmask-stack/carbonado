@@ -7,7 +7,10 @@ description = "An apocalypse-resistant data storage format for the truly paranoi
 documentation = "https://docs.rs/carbonado"
 homepage = "https://github.com/bitmask-stack/carbonado"
 repository = "https://github.com/bitmask-stack/carbonado.git"
-include = ["src/**/*", "LICENSE", "README.md"]
+readme = "README.md"
+keywords = ["archive", "encryption", "erasure-coding", "bao", "backup"]
+categories = ["command-line-utilities", "cryptography"]
+include = ["src/**/*", "LICENSE", "README.md", "doc/man/*.1", "doc/man/README.md", ".cargo/config.toml.example"]
 
 [dependencies]
 # bao kept for Hash re-export (blake3::Hash), pub re-export in lib, and legacy error type bridging.
@@ -22,22 +25,48 @@ bao = "0.13"
 # To fetch the fork (for agents):
 #   git clone -b 76-keyed-bao git@github.com:SurmountSystems/bao-tree.git ../bao-tree
 #   (or: git clone -b 76-keyed-bao https://github.com/SurmountSystems/bao-tree.git ../bao-tree)
-# NOTE: path dep requires sibling checkout for builds (CI clones the 76-keyed-bao branch).
-# Will not cargo publish / vendor in isolation until git dep or upstream.
-# WASM/cross builds also need the fork available.
+# Keyed fork (SurmountSystems/bao-tree branch 76-keyed-bao). Git dep supports `cargo install`
+# from crates.io and `cargo install --path .` without a sibling checkout.
+# For faster local iteration, copy `.cargo/config.toml.example` → `.cargo/config.toml`
+# after `just setup-bao-tree` to patch in `../bao-tree`.
 # We set default-features = false because the fork's defaults pull in tokio/fs/etc
 # which are not needed (we only use sync keyed) and break some cross/wasm targets.
-bao_tree = { package = "bao-tree", path = "../bao-tree", default-features = false }
+bao_tree = { package = "bao-tree", git = "https://github.com/SurmountSystems/bao-tree.git", branch = "76-keyed-bao", default-features = false, features = ["validate"] }
 bitmask-enum = "2.1.0"
 log = "0.4.19"
 serde = { version = "1.0.164", features = ["derive"] }
 zstd = "0.13"
 thiserror = "1.0"
 
+# For hybrid paranoia layer: secp256k1 ECDH + ChaCha20-Poly1305 AEAD as inner,
+# wrapped in outer AES-CTR + HMAC-EtM.
+secp256k1 = { version = "0.29", features = ["global-context", "rand-std"] }
+chacha20poly1305 = "0.10"
+
+# For direct BLAKE3 hashing in filepack manifest (directory archival) and binary.
+# (blake3 already indirect via bao-tree; explicit for file/dir content hashes.)
+blake3 = { version = "1", default-features = false, features = ["std"] }
+
+# Minimal CBOR for filepack manifest (standard is CBOR `manifest.filepack`).
+ciborium = "0.2"
+
+# rkyv FilepackManifest v2 (canonical directory catalog payload inside Adamantine 1.0).
+rkyv = { version = "0.8.16", features = ["unaligned", "bytecheck"] }
+
+# Segment format heuristic for directory archives (compressible vs incompressible).
+infer = "0.19"
+
+# CLI binary (`carbonado`) — optional for library-only consumers.
+clap = { version = "4.4", features = ["derive"], optional = true }
+bip39 = { version = "2", features = ["rand"], optional = true }
+directories = { version = "5", optional = true }
+clap_mangen = { version = "0.2", optional = true }
+
 # v2.0 FEC: reed-solomon-erasure (deterministic RS 4/8, ~50% erasure (any 4 shards),
-# reproducible for reliable scrub + bao hash match). Preserves 4/8 model + 4KB/1KB align.
+# reproducible for reliable scrub + bao hash match). Preserves 4/8 model + 4 KiB slice/Bao-leaf align.
 # Note: upstream notes "looking for new maintainers" (as of 2026); periodically re-eval for archival use (see AGENTS).
 reed-solomon-erasure = "5"
+positioned-io = { version = "0.3.5", default-features = false }
 
 # New symmetric crypto stack (AES-256-CTR + HMAC-SHA512 EtM)
 aes = "0.8"
@@ -51,8 +80,14 @@ libbitcoinpqc = { version = "0.1", optional = true }
 # Future quantum-resistant key formats (qpub etc.) will be handled separately.
 
 [features]
-default = ["pqc"]
+default = ["pqc", "ots", "cli"]
 pqc = ["dep:libbitcoinpqc"]
+# OpenTimestamps stub stamping (offline/testable; no network calendar in default build).
+ots = []
+# `carbonado` CLI binary (encode/decode/key). Disable for library-only dependency trees.
+cli = ["dep:clap", "dep:bip39", "dep:directories"]
+# `gen-carbonado-man` — regenerate roff pages under doc/man/ (`just gen-man`).
+man-gen = ["cli", "dep:clap_mangen"]
 
 [dev-dependencies]
 anyhow = "1.0.71"
@@ -61,7 +96,20 @@ rand = "0.8.5"
 wasm-bindgen-test = "0.3.37"
 criterion = { version = "0.5", features = ["html_reports"] }
 proptest = "1"
+tiny_http = "0.12"
 
 [[bench]]
 name = "crypto_bench"
 harness = false
+
+# Primary CLI: `cargo install carbonado` or `cargo install --path . --bin carbonado`
+[[bin]]
+name = "carbonado"
+path = "src/bin/carbonado/main.rs"
+required-features = ["cli"]
+
+# Maintainer tool: `just gen-man` → doc/man/*.1
+[[bin]]
+name = "gen-carbonado-man"
+path = "src/bin/gen-carbonado-man.rs"
+required-features = ["man-gen"]

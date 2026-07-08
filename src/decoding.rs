@@ -1,28 +1,30 @@
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 
-// ecies removed (clean break from ECIES v1)
-use bao_tree::{
-    io::{outboard::EmptyOutboard, sync::keyed_decode_ranges},
-    iter::BaoChunk,
-    ChunkRanges,
-};
 use log::{debug, info, trace, warn};
-use reed_solomon_erasure::galois_8::Field;
-use reed_solomon_erasure::ReedSolomon;
+
+pub use crate::stream::compress::decompress_buffer as decompress;
+pub use crate::stream::decode::{stream_decode_buffer, stream_decode_outboard_buffer};
 
 use crate::{
-    constants::{Format, BAO_BLOCK_SIZE, FEC_K, FEC_M, SLICE_LEN},
+    constants::{Format, FEC_K, FEC_M},
     encoding,
     error::CarbonadoError,
+    stream::{extract_slice_inboard_for_scrub, map_decode_error, verify_slice_inboard_seekable},
     structs::EncodeInfo,
     utils::decode_bao_hash,
 };
 
-fn zfec_chunks(
-    chunked_bytes: Vec<(usize, Vec<u8>)>,
-    padding: u32,
-) -> Result<Vec<u8>, CarbonadoError> {
-    // RS path (deterministic): use provided (index, data) for good shards.
+// Keep zfec_chunks and bao helpers used by scrub + outboard verify
+use bao_tree::{
+    io::{outboard::EmptyOutboard, sync::keyed_decode_ranges},
+    ChunkRanges,
+};
+use reed_solomon_erasure::galois_8::Field;
+use reed_solomon_erasure::ReedSolomon;
+
+use crate::constants::{BAO_BLOCK_SIZE, SLICE_LEN};
+
+fn zfec_chunks(chunked_bytes: &[(usize, &[u8])], padding: u32) -> Result<Vec<u8>, CarbonadoError> {
     let data_shards = FEC_K;
     let parity_shards = FEC_M - FEC_K;
     let total_shards = FEC_M;
@@ -36,20 +38,18 @@ fn zfec_chunks(
     };
 
     let mut shards: Vec<Option<Vec<u8>>> = vec![None; total_shards];
-    for (idx, data) in chunked_bytes {
+    for &(idx, data) in chunked_bytes {
         if idx < total_shards && !data.is_empty() {
-            shards[idx] = Some(data);
+            shards[idx] = Some(data.to_vec());
         }
     }
-    // Uniform length pre-check (mixed partial extracts from scrub could otherwise reach RS).
     for d in shards.iter().flatten() {
         if d.len() != shard_size {
             return Err(CarbonadoError::UnevenZfecChunks);
         }
     }
 
-    let rs = ReedSolomon::<Field>::new(data_shards, parity_shards)?; // uses From for FecError
-
+    let rs = ReedSolomon::<Field>::new(data_shards, parity_shards)?;
     rs.reconstruct(&mut shards)?;
 
     let mut decoded = vec![];
@@ -68,45 +68,108 @@ fn zfec_chunks(
         ));
     }
     decoded.truncate(decoded.len() - padding as usize);
-
     Ok(decoded)
 }
 
-/// Zfec forward error correction decoding (reed-solomon-erasure)
-pub fn zfec(input: &[u8], padding: u32) -> Result<Vec<u8>, CarbonadoError> {
-    trace!("forward error correcting (reed-solomon)");
+pub fn bao_with_outboard(
+    bare: &[u8],
+    outboard: &[u8],
+    hash: &[u8],
+    format: u8,
+) -> Result<Vec<u8>, CarbonadoError> {
+    trace!("verifying bare data with outboard sidecar (keyed 4KB bao-tree)");
+    if bare.is_empty() && outboard.is_empty() {
+        return Ok(vec![]);
+    }
+    crate::stream::bao::stream_bao_outboard_verify(
+        bare,
+        bare.len() as u64,
+        outboard,
+        hash,
+        format,
+    )?;
+    Ok(bare.to_vec())
+}
+
+pub fn zfec_with_parity(
+    input: &[u8],
+    parity: &[u8],
+    padding: u32,
+) -> Result<Vec<u8>, CarbonadoError> {
+    trace!("forward error correcting from bare + parity sidecar (reed-solomon outboard)");
     if input.is_empty() {
-        // 0-len FEC body (from empty input) -> empty after trim
         return Ok(vec![]);
     }
     let input_len = input.len();
+    let (calc_pad, chunk_len) = crate::utils::calc_padding_len(input_len);
+    let pad = if padding != 0 { padding } else { calc_pad };
+    let shard_len = chunk_len as usize;
+    if !parity.len().is_multiple_of(shard_len) || parity.len() / shard_len != FEC_M - FEC_K {
+        return Err(CarbonadoError::UnevenZfecChunks);
+    }
 
+    let mut padded = Vec::from(input);
+    padded.extend(vec![0u8; pad as usize]);
+
+    let mut shards: Vec<Option<Vec<u8>>> = vec![None; FEC_M];
+    for (i, sh) in shards.iter_mut().enumerate().take(FEC_K) {
+        let start = i * shard_len;
+        let end = start + shard_len;
+        if end <= padded.len() {
+            *sh = Some(padded[start..end].to_vec());
+        } else {
+            *sh = Some(vec![0u8; shard_len]);
+        }
+    }
+    for j in 0..(FEC_M - FEC_K) {
+        let start = j * shard_len;
+        let end = start + shard_len;
+        if end <= parity.len() {
+            shards[FEC_K + j] = Some(parity[start..end].to_vec());
+        }
+    }
+
+    let rs = ReedSolomon::<Field>::new(FEC_K, FEC_M - FEC_K)?;
+    rs.reconstruct(&mut shards)?;
+
+    let mut decoded = vec![];
+    for sh in shards.iter().take(FEC_K) {
+        if let Some(ref s) = sh {
+            decoded.extend_from_slice(s);
+        } else {
+            decoded.resize(decoded.len() + shard_len, 0);
+        }
+    }
+
+    if (decoded.len() as u32) < pad {
+        return Err(CarbonadoError::ScrubbedLengthMismatch(
+            decoded.len(),
+            pad as usize,
+        ));
+    }
+    decoded.truncate(decoded.len() - pad as usize);
+    Ok(decoded)
+}
+
+pub fn zfec(input: &[u8], padding: u32) -> Result<Vec<u8>, CarbonadoError> {
+    trace!("forward error correcting (reed-solomon)");
+    if input.is_empty() {
+        return Ok(vec![]);
+    }
+    let input_len = input.len();
     #[allow(clippy::manual_is_multiple_of)]
     if input_len % FEC_M != 0 {
         return Err(CarbonadoError::UnevenZfecChunks);
     }
-
-    let chunks: Vec<(usize, Vec<u8>)> = input
-        .chunks_exact(input_len / FEC_M)
-        .enumerate()
-        .map(|(i, c)| (i, c.to_owned()))
-        .collect();
-
-    let decoded = zfec_chunks(chunks, padding)?;
-
-    Ok(decoded)
+    let chunk_len = input_len / FEC_M;
+    let chunks: Vec<(usize, &[u8])> = input.chunks_exact(chunk_len).enumerate().collect();
+    zfec_chunks(&chunks, padding)
 }
 
-/// Bao stream extraction (verified) using bao-tree 4KB keyed groups.
-///
-/// `input` must be the Carbonado bao wrapper: [u64le content_len | response_bytes]
-/// The root `hash` is verified via keyed decode using format-derived key.
 pub fn bao(input: &[u8], hash: &[u8], format: u8) -> Result<Vec<u8>, CarbonadoError> {
     trace!("verifying (bao-tree 4KB keyed)");
     if input.len() < 8 {
-        return Err(CarbonadoError::StdIoError(std::io::Error::other(
-            "bao input too short",
-        )));
+        return Err(CarbonadoError::InvalidHeaderLength);
     }
     let clen_bytes: [u8; 8] = input[0..8]
         .try_into()
@@ -115,7 +178,7 @@ pub fn bao(input: &[u8], hash: &[u8], format: u8) -> Result<Vec<u8>, CarbonadoEr
     let response = &input[8..];
     let root = decode_bao_hash(hash)?;
     let tree = bao_tree::BaoTree::new(content_len, BAO_BLOCK_SIZE);
-    let key = bao_tree::blake3::derive_key("carbonado-v2/bao", &[format]);
+    let key = crate::crypto::carbonado_bao_key(format);
     let mut ob = EmptyOutboard { tree, root };
     let mut decoded = Vec::new();
     keyed_decode_ranges(
@@ -125,29 +188,10 @@ pub fn bao(input: &[u8], hash: &[u8], format: u8) -> Result<Vec<u8>, CarbonadoEr
         &mut ob,
         &key,
     )
-    .map_err(|e| {
-        // bao-tree DecodeError (hash mismatch/truncation etc.) mapped here.
-        // (Legacy BaoDecodeError variant is from pre-fork bao crate; not produced by v2 paths.)
-        CarbonadoError::StdIoError(std::io::Error::other(format!("bao-tree decode: {}", e)))
-    })?;
+    .map_err(map_decode_error)?;
     Ok(decoded)
 }
 
-// The old ecies() function was removed (clean cryptographic break to v2).
-// Decryption is now performed via crate::crypto::symmetric_decrypt (or _with_nonce).
-// The Format::Encrypted bit still controls whether symmetric decryption (AES-256-CTR + HMAC) is applied.
-
-/// Decompression using zstd
-pub fn decompress(input: &[u8]) -> Result<Vec<u8>, CarbonadoError> {
-    trace!("decompressing");
-    let decompressed =
-        zstd::decode_all(input).map_err(|err| CarbonadoError::ZstdError(err.to_string()))?;
-    Ok(decompressed)
-}
-
-/// Decode data from Carbonado format in reverse order: `bao -> zfec -> symmetric_decrypt (internal nonce) -> decompress(zstd)`
-///
-/// The first parameter is the 32-byte symmetric master key (not a secret key in the asymmetric sense — this is the v2 symmetric design).
 pub fn decode(
     master_key: &[u8],
     hash: &[u8],
@@ -155,137 +199,50 @@ pub fn decode(
     padding: u32,
     format: u8,
 ) -> Result<Vec<u8>, CarbonadoError> {
-    let format = Format::from(format);
-
-    let verified = if format.contains(Format::Bao) {
-        bao(input, hash, format.bits())?
-    } else {
-        input.to_owned()
-    };
-
-    let decoded = if format.contains(Format::Zfec) {
-        zfec(&verified, padding)?
-    } else {
-        verified
-    };
-
-    let decrypted = if format.contains(Format::Encrypted) {
-        crate::crypto::symmetric_decrypt(master_key, &decoded)?
-    } else {
-        decoded
-    };
-
-    let decompressed = if format.contains(Format::Snappy) {
-        decompress(&decrypted)?
-    } else {
-        decrypted
-    };
-
-    Ok(decompressed)
+    stream_decode_buffer(master_key, hash, input, padding, format)
 }
 
-/// Extract a 1KB slice of a Bao stream at a specific index.
-///
-/// This helps for periodic verification.
-/// Delegates to verify_slice (which uses BAO_BLOCK_SIZE + pre-order traversal to
-/// extract logical data by skipping parent hash pairs in the 4KB-group response).
-/// Returns *raw logical inner data bytes* (the pre-bao content at offset), **not**
-/// a self-contained verifiable bao sub-proof. Callers must use only on blobs
-/// produced with Bao bit set; no key/format validation performed here (see scrub too).
-pub fn extract_slice(encoded: &[u8], index: u32) -> Result<Vec<u8>, CarbonadoError> {
-    // Use the shared logic so extract also correctly handles 4KB groups keyed bao responses.
-    // Returns raw logical inner data bytes at the slice offset (not a self-contained bao proof).
-    verify_slice(encoded, index, 1)
+pub fn decode_outboard(
+    master_key: &[u8],
+    hash: &[u8],
+    main: &[u8],
+    bao_outboard: Option<&[u8]>,
+    fec_parity: Option<&[u8]>,
+    padding: u32,
+    format: u8,
+) -> Result<Vec<u8>, CarbonadoError> {
+    stream_decode_outboard_buffer(
+        master_key,
+        hash,
+        main,
+        bao_outboard,
+        fec_parity,
+        padding,
+        format,
+        None,
+    )
 }
 
-/// Verify a number of 1KB slices of a Bao stream starting at a specific index.
-///
-/// With u32 indices this is now limited only by the u32 `bytes_verifiable` / `encoded_len`
-/// fields (and available memory), removing the previous artificial ~64 MiB cap for
-/// FEC-protected segments.
-///
-/// Uses the BaoTree at BAO_BLOCK_SIZE (4KB groups) + pre-order nodes to skip parent
-/// hash pairs (64B) and extract only leaf data groups at logical byte offsets (no
-/// validation here; unkeyed walk). Enables scrub recovery of good zfec chunks.
-/// Call only on blobs produced under Bao (format-unaware; see scrub for format param).
-/// Full verified decode via bao() uses keyed path. 1KB slices sit on top of the groups.
-///
-/// NOTE: this always performs a full pre-order walk and materializes the logical
-/// content bytes up to the requested range (O(N) alloc for small slice on large
-/// input). scrub calls it per-chunk (8x). Not smallest change to optimize; see
-/// TODO(perf) and plan for future seek.
-pub fn verify_slice(input: &[u8], index: u32, count: u32) -> Result<Vec<u8>, CarbonadoError> {
-    let slice_start = (index as u64) * (SLICE_LEN as u64);
-    let slice_len = (count as u64) * (SLICE_LEN as u64);
-    trace!("Verify slice start: {slice_start} len: {slice_len}");
-
-    // Use pre_order nodes + chunk sizes to read only data groups at the BAO_BLOCK_SIZE
-    // leaf level, skip parents (always 64B). Collects leaf data in order -> linear zfec
-    // bytes for scrub recovery. This correctly supports 4KB groups (block log=2) on top
-    // of which 1KB SLICE_LENs sit.
-    // NOTE: full walk materializes (see fn doc). scrub rescans per chunk. TODO(perf) seek.
-    if input.len() < 8 {
-        return Err(CarbonadoError::InvalidHeaderLength);
-    }
-    let clen_bytes: [u8; 8] = input[0..8]
-        .try_into()
-        .map_err(|_| CarbonadoError::InvalidHeaderLength)?;
-    let content_len = u64::from_le_bytes(clen_bytes);
-    let response = &input[8..];
-    let tree = bao_tree::BaoTree::new(content_len, BAO_BLOCK_SIZE);
-    let mut cursor = Cursor::new(response);
-    let mut content = vec![];
-    // Use the exact same chunks iter as encode (authoritative for response byte order/layout):
-    // Parents always 64B; Leaves give exact data size (group or partial).
-    let ranges = ChunkRanges::all();
-    for item in tree.ranges_pre_order_chunks_iter_ref(&ranges, 0) {
-        match item {
-            BaoChunk::Parent { .. } => {
-                let mut skip = [0u8; 64];
-                let _ = cursor.read_exact(&mut skip);
-            }
-            BaoChunk::Leaf { size, .. } => {
-                let mut sz = size as u64;
-                let remain = content_len.saturating_sub(content.len() as u64);
-                if sz > remain {
-                    sz = remain;
-                }
-                let mut d = vec![0u8; sz as usize];
-                if cursor.read_exact(&mut d).is_err() {
-                    break;
-                }
-                content.extend(d);
-                if content.len() as u64 >= content_len {
-                    break;
-                }
-            }
-        }
-    }
-    // Do not fallback to response (would mix 64B parent hashes into data for caller/scrub)
-    // Trim any partial over-read from last group on truncated blobs.
-    if (content.len() as u64) > content_len {
-        content.truncate(content_len as usize);
-    }
-    let start = slice_start as usize;
-    let end = (start + slice_len as usize).min(content.len());
-    if start < content.len() {
-        return Ok(content[start..end].to_vec());
-    }
-    Ok(vec![])
+pub fn extract_slice(
+    encoded: &[u8],
+    index: u32,
+    hash: &[u8],
+    format: u8,
+) -> Result<Vec<u8>, CarbonadoError> {
+    verify_slice(encoded, index, 1, hash, format)
 }
 
-/// Scrub zfec-encoded data (requires Bao bit for slice-based candidate extraction + recovery; Zfec-only formats return ScrubRequiresBao).
-/// Returns an error when either valid data cannot be provided, or data is already valid.
-///
-/// If data is already valid, the error message "Data does not need to be scrubbed." is returned.
-/// This helps nodes prevent unnecessary writes for periodic scrubbing.
-///
-/// Recovery uses Reed-Solomon (4 data + 4 parity) over the 8 shards. To tolerate
-/// corruption (including distributed "chaos" affecting some shards' data areas), we
-/// try subsets of extracted candidate shards (via bao slice extraction) until we find
-/// a reconstruction whose re-encode (zfec+keyed-bao) matches the known hash. This makes
-/// scrub fully deterministic (RS has no rand) and reliable for >8KB.
-/// `format` must match the one used at encode (for keyed bao); caller responsible (see EncodeInfo + Format).
+pub fn verify_slice(
+    input: &[u8],
+    index: u32,
+    count: u32,
+    hash: &[u8],
+    format: u8,
+) -> Result<Vec<u8>, CarbonadoError> {
+    trace!("verify_slice seekable index={index} count={count} format=0x{format:02x}");
+    verify_slice_inboard_seekable(input, index, count, hash, format)
+}
+
 pub fn scrub(
     input: &[u8],
     hash: &[u8],
@@ -294,17 +251,13 @@ pub fn scrub(
 ) -> Result<Vec<u8>, CarbonadoError> {
     let fmt = Format::from(format);
     if !fmt.contains(Format::Bao) {
-        // scrub recovery uses Bao slice extraction for candidate shards; not applicable/supported for pure Zfec (levels 8/10, which have no verifiability for scrub).
         return Err(CarbonadoError::ScrubRequiresBao);
     }
     let hash = decode_bao_hash(hash)?;
     let chunk_size = encode_info.chunk_len;
     let padding = encode_info.padding_len;
-    let slices_per_chunk = chunk_size / SLICE_LEN as u32;
+    let slices_per_chunk = chunk_size / SLICE_LEN;
 
-    // Use caller-supplied format (the bits for the Bao+Zfec pipeline that produced this
-    // verifiable blob) so that keyed bao() and re-bao use the matching key (format-derived).
-    // Callers must pass the same format used at encode time for the bao step.
     match bao(input, hash.as_bytes(), format) {
         Ok(_decoded) => Err(CarbonadoError::UnnecessaryScrub),
         Err(e) => {
@@ -313,10 +266,11 @@ pub fn scrub(
 
             for i in 0..FEC_M {
                 let slice_index = (i as u32) * slices_per_chunk;
-                match verify_slice(input, slice_index, slices_per_chunk) {
-                    Ok(chunk) => chunks.push((i, chunk)),
+                match extract_slice_inboard_for_scrub(input, slice_index, slices_per_chunk) {
+                    Ok(chunk) if chunk.len() == chunk_size as usize => chunks.push((i, chunk)),
+                    Ok(_) => debug!("Chunk {i} wrong length after seekable slice extract"),
                     Err(e) => {
-                        debug!("At least one chunk was bad, at chunk index {i}. Error was: {e}.");
+                        debug!("At least one chunk was bad, at chunk index {i}. Error was: {e}.")
                     }
                 }
             }
@@ -326,27 +280,24 @@ pub fn scrub(
                 chunks.len()
             );
 
-            // Robust recovery: search subsets (C(<=8, >=4) is tiny) of candidates.
-            // Only correct clean shards will lead to re-encode producing the target hash.
-            // Fixes cases where >4 extracted but some leaf-data tainted (num==total no-op avoided).
             let mut recovered: Option<Vec<u8>> = None;
             let n = chunks.len();
             for mask in 0..(1usize << n) {
                 if mask.count_ones() < FEC_K as u32 {
                     continue;
                 }
-                let mut sel: Vec<(usize, Vec<u8>)> = vec![];
+                let mut sel: Vec<(usize, &[u8])> = vec![];
                 for (j, c) in chunks.iter().enumerate().take(n) {
                     if (mask & (1 << j)) != 0 {
-                        sel.push(c.clone());
+                        sel.push((c.0, &c.1));
                     }
                 }
-                if let Ok(cand_inner) = zfec_chunks(sel, padding) {
-                    let (scrubbed, sp, _) = encoding::zfec(&cand_inner)?;
+                if let Ok(cand_inner) = zfec_chunks(&sel, padding) {
+                    let (scrubbed, sp, _) = encoding::encode_inboard_buffer(&cand_inner)?;
                     if sp != padding {
                         continue;
                     }
-                    if let Ok((verif, got_h)) = encoding::bao(&scrubbed, format) {
+                    if let Ok((verif, got_h)) = encoding::bao_inboard_buffer(&scrubbed, format) {
                         if got_h == hash && verif.len() == input.len() {
                             recovered = Some(verif);
                             break;
@@ -355,15 +306,97 @@ pub fn scrub(
                 }
             }
 
-            let verifiable = match recovered {
-                Some(v) => v,
-                None => {
-                    // Could not find a viable set of >=4 good shards among candidates.
-                    return Err(CarbonadoError::InvalidScrubbedHash);
-                }
-            };
-
-            Ok(verifiable)
+            match recovered {
+                Some(v) => Ok(v),
+                None => Err(CarbonadoError::InvalidScrubbedHash),
+            }
         }
     }
+}
+
+pub fn scrub_outboard(
+    bare: &[u8],
+    bao_outboard: Option<&[u8]>,
+    fec_parity: Option<&[u8]>,
+    encode_info: &EncodeInfo,
+    format: u8,
+    hash: &[u8],
+) -> Result<Vec<u8>, CarbonadoError> {
+    let fmt = Format::from(format);
+    if !fmt.contains(Format::Bao) {
+        return Err(CarbonadoError::ScrubRequiresBao);
+    }
+
+    let good = if let Some(ob) = bao_outboard {
+        bao_with_outboard(bare, ob, hash, format).is_ok()
+    } else {
+        return Err(CarbonadoError::MissingBaoOutboard);
+    };
+
+    if good {
+        return Err(CarbonadoError::UnnecessaryScrub);
+    }
+
+    let padding = encode_info.padding_len;
+    let recovered_bare = if fmt.contains(Format::Zfec) {
+        let Some(ob) = bao_outboard else {
+            return Err(CarbonadoError::MissingBaoOutboard);
+        };
+        let Some(par) = fec_parity else {
+            return Err(CarbonadoError::MissingFecParity);
+        };
+
+        let input_len_for_pad = bare.len();
+        let (calc_pad, chunk_len) = crate::utils::calc_padding_len(input_len_for_pad);
+        let pad = if padding != 0 { padding } else { calc_pad };
+        let shard_len = chunk_len as usize;
+        if !par.len().is_multiple_of(shard_len) || (par.len() / shard_len) != (FEC_M - FEC_K) {
+            return Err(CarbonadoError::UnevenZfecChunks);
+        }
+
+        let mut chunks: Vec<(usize, Vec<u8>)> = vec![];
+        for i in 0..FEC_K {
+            let start = i * shard_len;
+            let end = start + shard_len;
+            if end <= bare.len() {
+                chunks.push((i, bare[start..end].to_vec()));
+            }
+        }
+        for j in 0..(FEC_M - FEC_K) {
+            let start = j * shard_len;
+            let end = (start + shard_len).min(par.len());
+            if end > start {
+                chunks.push((FEC_K + j, par[start..end].to_vec()));
+            }
+        }
+
+        let n = chunks.len();
+        let mut recovered: Option<Vec<u8>> = None;
+        for mask in 0..(1usize << n) {
+            if mask.count_ones() < FEC_K as u32 {
+                continue;
+            }
+            let mut sel: Vec<(usize, &[u8])> = vec![];
+            for (j, c) in chunks.iter().enumerate().take(n) {
+                if (mask & (1 << j)) != 0 {
+                    sel.push((c.0, &c.1));
+                }
+            }
+            if let Ok(cand_inner) = zfec_chunks(&sel, pad) {
+                if bao_with_outboard(&cand_inner, ob, hash, format).is_ok() {
+                    recovered = Some(cand_inner);
+                    break;
+                }
+            }
+        }
+
+        match recovered {
+            Some(v) => v,
+            None => return Err(CarbonadoError::InvalidScrubbedHash),
+        }
+    } else {
+        return Err(CarbonadoError::InvalidScrubbedHash);
+    };
+
+    Ok(recovered_bare)
 }

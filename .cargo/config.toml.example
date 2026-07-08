@@ -1,0 +1,10 @@
+# Optional local development overrides (copy to `.cargo/config.toml`).
+#
+# Faster iteration: use a sibling checkout of the keyed bao-tree fork instead of
+# fetching from git on every clean build.
+#
+#   just setup-bao-tree
+#   cp .cargo/config.toml.example .cargo/config.toml
+
+[patch."https://github.com/SurmountSystems/bao-tree.git"]
+bao-tree = { path = "../bao-tree" }

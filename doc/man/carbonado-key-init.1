@@ -1,0 +1,19 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH carbonado-key-init 1  "carbonado-key-init " 
+.SH NAME
+carbonado\-key\-init \- Generate a new English BIP39 mnemonic and save it (24 words by default)
+.SH SYNOPSIS
+\fBcarbonado\-key\-init\fR [\fB\-\-words\fR] [\fB\-\-force\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+Generate a new English BIP39 mnemonic and save it (24 words by default)
+.SH OPTIONS
+.TP
+\fB\-\-words\fR \fI<WORDS>\fR [default: 24]
+Word count: 12, 15, 18, 21, or 24
+.TP
+\fB\-\-force\fR
+Overwrite existing mnemonic at `carbonado key path`
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help

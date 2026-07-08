@@ -1,0 +1,19 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH carbonado-key-import 1  "carbonado-key-import " 
+.SH NAME
+carbonado\-key\-import \- Import an existing English BIP39 mnemonic (words as separate arguments)
+.SH SYNOPSIS
+\fBcarbonado\-key\-import\fR [\fB\-\-force\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIWORDS\fR> 
+.SH DESCRIPTION
+Import an existing English BIP39 mnemonic (words as separate arguments)
+.SH OPTIONS
+.TP
+\fB\-\-force\fR
+Overwrite existing mnemonic at `carbonado key path`
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+<\fIWORDS\fR>
+Mnemonic words (e.g. `carbonado key import abandon abandon ... about`)

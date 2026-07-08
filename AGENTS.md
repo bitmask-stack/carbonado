@@ -2,11 +2,11 @@
 
 **Project:** Carbonado (bitmask-stack/carbonado)  
 **Mission:** Apocalypse-resistant archival format for consensus-critical data, with a focus on Bitcoin quantum resistance.  
-**Current Status (as of 2026-06-27):** Major cryptographic rewrite (symmetric v2) complete. 4KB keyed Bao integrated. FEC overhauled to reed-solomon-erasure (deterministic RS 4/8; recovers any 4/8 shards for ~50% when aligned to shards, plus distributed via scrub search + bao oracle). Version bumped to 2.0.0 with new MAGIC `CARBONADO20\n`. Comprehensive v1-vs-v2 changes + every-decision rationales documented in new "v1 vs v2: Changes and Rationales" section below. Outboard mode still in progress (see §11). All core invariants upheld.
+**Current Status (as of 2026-07):** First public **2.0.0** release. Symmetric v2 stack (`CARBONADO20\n`, AES-256-CTR + HMAC-SHA512 EtM) stable. **P1:** `SLICE_LEN=4096`, keyed 4 KiB Bao groups, seekable slice verify (`verify_slice_inboard_seekable`, `verify_slice_outboard`). **P2:** streaming-first encode/decode (`encode_stream`, `stream_encode_*`, `stream_decode_*`). **P3:** segment sharding (`encode_shard_stream`, `decode_shards_stream`, multi-segment `FilepackEntry`). **P4:** Adamantine 1.0 directory archives (`encode_directory` / `decode_directory`, rkyv `FilepackManifest` v2, inboard c14/c15 catalog, heterogeneous bare segment mains, centralized Bao bundle; see §7.1). FEC: reed-solomon-erasure RS 4/8. Full high-level `file::` outboard + `scrub_outboard` + low-level complete. All core invariants upheld. §11 stabilization plans completed (see [CHANGELOG.md](CHANGELOG.md)).
 
-**Versioning note during the overhaul**: The crate is currently at 0.7.0. This entire v2 symmetric stack (new Header, nonce model, SLH sidecars, removal of all ECIES/secp/nostr material) is still under active development. Until a 1.0 release (or an explicit stability declaration), the public API surface — especially `EncodeInfo`, `Header` construction details, and the exact set of exported types — is considered fluid. Breaking changes to these types are expected as the design is finalized. Language such as "this would require a minor version bump" should only be used once we have declared the v2 format and high-level API stable. Until then, such changes are simply part of finishing the current development series.
+**Versioning note (2.0.0 release)**: The crate is at **2.0.0** — symmetric format stable under `CARBONADO20\n` magic, with streaming, seekable slices, and sharding shipped in this release. Directory archives were redesigned to Adamantine 1.0 in the unreleased **2.1.0** line (§7.1; clean break from dev `ADAMANTINE2\n`). The public API (EncodeInfo, Header, outboard variants, stream module, etc.) is stable under semver. The previous "fluid" period during the v2 overhaul (when at 0.7.x) has ended; see section 11 for history. See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
-See section 11 (v2.0 Plans) for the stabilization steps, including bumping to 2.0.0, new MAGICNO, FEC replacement, and inboard/outboard modes. Once 2.0 ships, the "fluid" note above no longer applies.
+See section 11 (v2.0 Plans, completed) for the stabilization steps (2.0.0 + CARBONADO20\n + FEC + full in/outboard). Outboard (file:: + scrub_outboard) is complete.
 
 ---
 
@@ -100,7 +100,7 @@ Violating this rule has caused repeated confusion and rework.
 
 ### 2.1 Core Encryption + Integrity (Symmetric: AES-256-CTR + HMAC-SHA512 EtM)
 
-**Important**: The main Carbonado container uses only symmetric cryptography. SLH-DSA (see §2.3) is used exclusively for *sidecar* signatures and is not part of the per-segment format. This keeps the core container length-preserving, hardware-accelerated, and only Grover-resistant (as appropriate for symmetric crypto).
+**Important**: The main Carbonado container uses only symmetric cryptography for its per-segment encryption layer. The optional hybrid paranoia layer (see below) places an inner (secp+ChaCha AEAD) inside an outer symmetric (AES-CTR + HMAC EtM) — the visible container is still wrapped by our symmetric primitives. SLH-DSA (see §2.3) is used exclusively for *sidecar* signatures and is not part of the per-segment format. This keeps the core container length-preserving, hardware-accelerated, and only Grover-resistant (as appropriate for symmetric crypto).
 
 ### v1 vs v2: Changes and Rationales (Normative Summary)
 
@@ -122,13 +122,14 @@ The overarching principle is a **clean cryptographic break** (see §1). v1 ECIES
 | Nonce / IV           | GCM IV (often content-derived or small) | 16B random from getrandom (high-level: 1 per archive) | CTR requires unique nonce per key (catastrophic reuse otherwise). Random + getrandom is simplest correct CSPRNG usage. |
 | Header               | ~160B with secp pubkey + Schnorr sig   | 177B: MAGIC + payload_nonce + header_mac (64B) + bao hash + slh_pk + format + u32 chunk + lengths + meta | Separate header_mac (header-auth subkey) for integrity of public metadata. No secret key material. slh_pk moved to header (sig stays sidecar). |
 | Post-Quantum sigs    | None (or ad-hoc)                        | SLH-DSA (SHAKE-128s) **sidecars only** (`<hash>.cXX.slh`) | Sidecars preserve content-addressing and avoid bloat. libbitcoinpqc dogfooding per Surmount/BIP-360 mission. |
-| Forward Error Correction | zfec 4/8 (non-deterministic scrub for >~8KB, vulnerable to hits across all 8 chunks) | reed-solomon-erasure (RS 4/8): deterministic encode, reproducible scrub, better tolerance for distributed corruption ("chaos rays") while keeping 4/8 model | RS (BCH subclass) for pure determinism (critical for scrub re-encode + bao hash compare) and stronger erasure properties against partial corruption in every shard. Kept 4/8 for storage model ("application RAID"), alignment with 1KB slices/4KB Bao groups, and user intuition. |
+| Forward Error Correction | zfec 4/8 (non-deterministic scrub for >~8KB, vulnerable to hits across all 8 chunks) | reed-solomon-erasure (RS 4/8): deterministic encode, reproducible scrub, better tolerance for distributed corruption ("chaos rays") while keeping 4/8 model | RS (BCH subclass) for pure determinism (critical for scrub re-encode + bao hash compare) and stronger erasure properties against partial corruption in every shard. Kept 4/8 for storage model ("application RAID"), alignment with 4 KiB slices/Bao leaves, and user intuition. |
 | Verifiability (Bao)  | bao 0.12/0.13 (1KB groups)             | bao-tree fork: 4KB groups (BlockSize log=2) + keyed on format byte | 4KB aligns with disk sectors + reduces tree overhead. Keyed roots make Bao hash multi-dimensional (commits to Format pipeline for markets). |
-| Slice / chunk counts | u16 limits (~64MiB FEC cap)            | u32 (theoretical ~4GiB+ per segment)               | Removed artificial caps for large archives while keeping SLICE_LEN=1024. |
+| Slice / chunk counts | u16 limits (~64MiB FEC cap)            | u32 (theoretical ~4GiB+ per segment)               | Removed artificial caps for large archives. P1: `SLICE_LEN=4096` (one slice = one 4 KiB Bao leaf). |
 | Passphrase KDF       | Argon2id wrapper inside library        | Removed; caller responsibility (Argon2id recommended outside) | Keeps container security contract simple. Master key is 32/64B high-entropy material. |
 | Magic number         | CARBONADO01 or similar (ECIES)         | CARBONADO20\n (stable v2); 02 was dev transitional | Signals official stabilized 2.0 format. Old magic → clear external migration error. |
 | Version              | Pre-0.7 (ECIES)                        | 2.0.0 (post-FEC + docs stabilization)              | Marks end of fluid dev period. API now stable for semver. |
 | Dependencies         | ecies + secp + ...                      | aes+ctr+hmac+sha2 + reed-solomon-erasure + bao-tree fork + libbitcoinpqc (optional pqc) | Clean break removal of ECIES-only crates. Hardware-accel friendly. |
+| Optional hybrid layer | (the only encryption was the ECIES hybrid) | Pure symmetric is default. Added *optional* inner secp256k1-ECDH + ChaCha20-Poly1305 AEAD wrapped by outer AES-CTR + HMAC-EtM (via new hybrid_* and ecc_aead_* APIs) | "Maximal paranoia" defense-in-depth: different cipher families, different key-gen (ECDH+derive vs pure HMAC labels), HMAC + AEAD. See dedicated rationale below. Pure sym path and Encrypted bit semantics unchanged for normal use. secp here is *not* for the main container (no pubkeys in headers etc.). |
 
 #### Detailed Decision Rationales
 
@@ -178,10 +179,10 @@ The overarching principle is a **clean cryptographic break** (see §1). v1 ECIES
 - **Why**:
   - Determinism required for reliable scrub (re-encode + compare bao root).
   - RS provides strong erasure coding: any 4/8 shards sufficient; better tolerance for partial/distributed "chaos ray" corruption within the shard model.
-  - Kept exact 4/8 + concat layout + alignment (FEC_K * SLICE_LEN) to preserve storage model ("application RAID"), 1KB/4KB geometry, and user expectations.
+  - Kept exact 4/8 + concat layout + alignment (FEC_K * SLICE_LEN) to preserve storage model ("application RAID"), 4 KiB slice/Bao-leaf geometry, and user expectations.
   - Overhead ~2x same; reproducible for content addressing.
 - Not finer-grained per-byte (would change on-disk + storage model; not required).
-- See §11.1 in plan docs + updated status.
+- See CHANGELOG.md and §7 CHIPs tracker for RS FEC rationale and status.
 
 **Bao Verifiability**
 - 1KB fixed groups → 4KB (BlockSize log=2) + keyed on format byte ("carbonado-v2/bao" + format).
@@ -199,6 +200,21 @@ The overarching principle is a **clean cryptographic break** (see §1). v1 ECIES
 - u16 → u32 for verifiable/chunk slice counts: remove ~64MiB artificial cap.
 - New magic `CARBONADO20\n` + v2.0.0: Signals stable post-overhaul format. Dev used 02.
 - No v1 decode ever: explicit per clean-break rule.
+
+**Hybrid paranoia layer (defense-in-depth addition)**
+- Added (optional) `ecc_aead_encrypt` / `hybrid_*` etc. in `crypto`:
+  - Inner: ephemeral secp256k1 ECDH + ChaCha20-Poly1305 (standard AEAD).
+  - Wrap: feed the inner blob as plaintext into our existing `symmetric_encrypt_with_nonce` (AES-CTR + 64B HMAC EtM under master via derive_subkey).
+- The high-level `file::encode` / `encoding::encode` `Encrypted` paths continue to do *pure* symmetric only. Hybrid is used explicitly by callers who supply recipient secp material.
+- **Why double everything** (first-principles):
+  - Different cipher families (block CTR stream vs stream ChaCha) reduce risk of a single catastrophic break or implementation flaw affecting all data.
+  - Different key derivation paths: pure HMAC labels vs. ECDH shared secret fed through derive_subkey again ("doubling up on symmetric key generation mechanisms").
+  - Different integrity primitives: HMAC-SHA512 EtM + Poly1305 (AEAD).
+  - Ephemeral ECDH gives per-blob forward secrecy on the inner layer (useful even if outer master is long-lived).
+  - Even though secp ECDH is classically broken by large quantum computers, the *outer* AES+HMAC layer (which is what the container format presents) retains its symmetric security properties. The hybrid is "ECC wrapped inside our symmetric".
+  - Matches the user's explicit request for "doubling up on ciphers, symmetric key generation mechanisms, and incorporating both HMAC and AEAD approaches" for "maximal paranoia".
+- Composition with pipeline and Header: the output of hybrid_* is the equivalent of an "encrypt" step result. Callers feed it to FEC/Bao stages and (if using Header) use the outer nonce + master for Header construction, typically with the Encrypted bit *clear* so that standard decode does not attempt a second pure-symmetric decrypt. The master still protects header_mac and the outer EtM.
+- Invariant preserved: no secret key material in headers; clean separation; pure-sym path untouched.
 
 **What Was Preserved (Non-Crypto Properties)**
 - Pipeline ordering (with FEC now generalized).
@@ -242,11 +258,12 @@ It is the 16-byte AES-CTR nonce/IV for the *high-level symmetric encryption path
 - **Key derivation**:
   - All subkeys (AES key material, payload MAC key, header MAC key) are derived with `derive_subkey(master, label)`:
     - `HMAC-SHA512(master, "carbonado-v2/" || label)` → 64 bytes.
-  - Current registered labels (must be unique and documented):
-    - `aes-ctr` → first 32 bytes used as AES-256 key (second 32 bytes discarded for this label).
-    - `etm-hmac` → full 64 bytes used as HMAC-SHA512 key for payload EtM.
-    - `header-auth` → full 64 bytes used as HMAC-SHA512 key for Header MAC.
+  - Registered labels (must be unique and documented — see **Subkey Label Registry** above):
+    - `aes-ctr`, `etm-hmac`, `header-auth` (master-key derived)
+    - `ecc-chacha-poly` (hybrid: ECDH shared secret as PRF input)
+    - `slh-dsa-seed`, `slh-dsa-seed-2` (convenience `slh_sign` only; not container security)
   - Domain separation via the `carbonado-v2/` prefix + explicit label prevents cross-use.
+  - Keyed Bao uses `blake3::derive_key("carbonado-v2/bao", &[format])` — **not** `derive_subkey`.
 
 **Note on HMAC-SHA512 choice (documented 2026 session)**:  
 With a 256-bit (32-byte) master key, the security of subkey derivation is capped at ~256 bits regardless of whether HMAC-SHA256 or HMAC-SHA512 is used (PRF security follows the entropy of the input key). HMAC-SHA512 was retained for output size convenience (nice 64-byte results) and historical alignment with the "full HMAC-SHA512" mandate from the original design goals, not because it provides higher security than SHA256 would at this entropy level. Future minimality audits could consider HMAC-SHA256 if 32-byte tags were ever acceptable.
@@ -254,10 +271,18 @@ With a 256-bit (32-byte) master key, the security of subkey derivation is capped
 ### 2.2 Header Authentication (separate from payload)
 
 - Every v2 Header is authenticated with `compute_header_mac(master_key, auth_data)`.
-- `auth_data` = MAGIC || payload_nonce || bao_hash || format || chunk_index || encoded_len || padding_len || metadata.
-- Uses the `header-auth` derived subkey.
+- **Formula (normative):**
+  ```text
+  header_mac = HMAC-SHA512(header-auth subkey, auth_data)
+  ```
+- `auth_data` = `MAGICNO` || `payload_nonce` || `bao_hash` || `slh_public_key` || `format` || `chunk_index` (u32 LE) || `encoded_len` || `padding_len` || `metadata`
+  - `MAGICNO` is `b"CARBONADO20\n"` (12 bytes).
+- **No separate domain string** (e.g. no `carbonado-v2-header`). The leading `MAGICNO` in `auth_data` **is** the domain binding for header MAC.
+- Uses the `header-auth` derived subkey (`derive_subkey(master, "header-auth")`).
 - Verification happens in `file::decode` before any payload decryption or processing.
 - This gives integrity/authenticity of the container metadata independently of the payload EtM.
+
+**Breaking change (2.0.x maintenance):** Earlier dev builds prefixed `b"carbonado-v2-header"` before `auth_data`. Current normative construction MACs `auth_data` directly. All archives produced after this fix use the new formula.
 
 ### 2.3 Post-Quantum Signatures (SLH-DSA / SPHINCS+)
 
@@ -367,15 +392,136 @@ This model is intentional and matches standard practice for encrypted container 
 
 Violating the rule "no secret key material ever appears in the Header or any other unauthenticated location" would be a critical bug.
 
+#### `header_mac` is an authentication tag, not a secret (common misconception)
+
+The 64-byte `header_mac` field **is stored in the cleartext header on disk** (bytes 28–91 of the 177-byte wire layout). This is **correct and intentional**.
+
+| Concept | Secret? | Role |
+|---------|---------|------|
+| Master key (32 B) | **Yes** — never on disk | Root of all subkey derivation |
+| `header-auth` subkey (64 B derived) | **Yes** — never on disk | HMAC key for header metadata |
+| `header_mac` (64 B tag) | **No** — public like any MAC/AEAD tag | Proves `auth_data` was not tampered with under the master |
+| `payload_nonce` (16 B) | **No** — public in CTR/AEAD designs | Unique IV for AES-CTR; useless without AES subkey |
+| Payload EtM tag (64 B, in body when encrypted) | **No** — prepended to ciphertext | Proves body integrity under `etm-hmac` subkey |
+
+**Why storing the MAC in the header is safe:** HMAC outputs are pseudorandom tags, not key material. Knowing `header_mac` does not let an attacker recover the master key, derive subkeys, or forge a valid tag for *modified* metadata without possessing the master key. Forgery resistance follows from the PRF property of HMAC-SHA512 under a secret `header-auth` subkey.
+
+**What would be a critical bug:** placing the master key, any derived subkey, or plaintext inside the header (or anywhere unauthenticated).
+
+#### Two-layer integrity model (header vs body)
+
+Carbonado uses **separate** authentication for metadata and payload:
+
+```text
+Layer 1 — Header MAC (metadata):
+  header_mac = HMAC-SHA512(header-auth subkey, auth_data)
+  Verified in file::decode before any body processing.
+
+Layer 2 — Payload EtM (body, when Encrypted bit set):
+  tag = HMAC-SHA512(etm-hmac subkey, "carbonado-v2-etm" || nonce || ciphertext)
+  Verified before AES-CTR decryption.
+
+Layer 3 — Keyed Bao (body, when Bao bit set):
+  Merkle root keyed on format byte; slice verify without full decode.
+  Independent of header MAC; binds processed body to format pipeline.
+```
+
+Layers can combine. An encrypted+verifiable archive (e.g. c5, c15) uses header MAC + payload EtM + keyed Bao.
+
+#### Threat model by master-key scenario
+
+**Encrypted archive with a secret high-entropy master key**
+
+- Header and `header_mac` are world-readable; payload ciphertext is opaque.
+- Attacker cannot decrypt without the master key.
+- Attacker cannot undetectably alter header fields (format, lengths, Bao hash, chunk index) — MAC verify fails.
+- Attacker learns routing metadata (size, format, outer hash) — by design for storage/indexing.
+
+**Public / unencrypted archive with conventional zero master (`[0u8; 32]`)**
+
+- The CLI and library default to all-zero master when `--master` is omitted (public formats only).
+- Anyone can compute valid `header_mac` values for metadata they choose, because the “key” is public.
+- Header MAC is then **consistency checking for tooling**, not anti-malicious protection against strangers.
+- For public verifiable formats (c4–c7, c12–c14), **body integrity** against third parties relies on **keyed Bao** (and FEC), optionally **SLH-DSA sidecars** for long-term authenticity — not on header MAC secrecy.
+
+**Implication for system designers:** If you need metadata integrity verifiable by third parties without sharing a symmetric master, use SLH-DSA (or another asymmetric signature) over the Bao root or a manifest — not encryption of the header MAC field.
+
 ---
 
 ### Subkey Label Registry (normative)
 
-- `aes-ctr`
-- `etm-hmac`
-- `header-auth`
+All HMAC-SHA512 subkeys use: `HMAC-SHA512(master, "carbonado-v2/" || label)` → 64 bytes.
 
-No other labels may be used without updating this registry and the implementation.
+| Label | Scope | Usage |
+|-------|-------|-------|
+| `aes-ctr` | Master-key derived | First 32 bytes → AES-256-CTR key for payload encryption |
+| `etm-hmac` | Master-key derived | Full 64 bytes → HMAC-SHA512 key for payload EtM |
+| `header-auth` | Master-key derived | Full 64 bytes → HMAC-SHA512 key for Header `header_mac` |
+| `ecc-chacha-poly` | **Hybrid only**: ECDH shared secret bytes as PRF input (not master key) | First 32 bytes → ChaCha20-Poly1305 key for inner AEAD blob |
+| `slh-dsa-seed` | Convenience wrapper (`slh_sign` only) | First 64 bytes of stretched entropy for SLH-DSA keygen |
+| `slh-dsa-seed-2` | Convenience wrapper (`slh_sign` only) | Second 64 bytes of stretched entropy for SLH-DSA keygen |
+
+**Not HMAC subkeys (separate KDF):**
+
+| Context string | KDF | Usage |
+|----------------|-----|-------|
+| `carbonado-v2/bao` | `blake3::derive_key("carbonado-v2/bao", &[format_byte])` | 32-byte keyed-Bao BLAKE3 key; public API: `crypto::carbonado_bao_key` |
+
+**Payload EtM domain (not a subkey label):**
+
+| String | Usage |
+|--------|-------|
+| `carbonado-v2-etm` | Prepended to EtM MAC input: `HMAC-SHA512(etm-hmac subkey, "carbonado-v2-etm" \|\| nonce \|\| ciphertext)`. Kept because payload blobs have no natural Carbonado header prefix (distinct from header MAC, which binds via leading `MAGICNO` in `auth_data`). |
+
+No other labels or domain strings may be used without updating this registry and the implementation.
+
+### Header MAC construction (normative summary)
+
+```text
+header_mac = HMAC-SHA512( derive_subkey(master, "header-auth"), auth_data )
+auth_data  = MAGICNO || payload_nonce || bao_hash || slh_public_key || format
+             || chunk_index_u32_le || encoded_len || padding_len || metadata
+```
+
+### Payload EtM (normative summary)
+
+```text
+tag = HMAC-SHA512( derive_subkey(master, "etm-hmac"), "carbonado-v2-etm" || nonce || ciphertext )
+```
+
+Implemented in `crypto.rs` (`symmetric_*`) and `stream/crypto_stream.rs` (streaming paths). Tag verified before decryption.
+
+### Keyed Bao KDF (normative summary)
+
+```text
+bao_key = blake3::derive_key("carbonado-v2/bao", &[format_byte])
+root    = keyed BLAKE3 Merkle root over processed body (4 KiB leaves, `BAO_BLOCK_SIZE`)
+```
+
+Separate from HMAC subkeys. Roots commit to the exact format pipeline (c0–c15). See `tests/bao_keyed_contract.rs`.
+
+### Hybrid paranoia layer (normative summary)
+
+Optional defense-in-depth APIs in `crypto.rs` (`ecc_aead_*`, `hybrid_*`):
+
+1. **Inner**: Ephemeral secp256k1 ECDH → shared secret → `derive_subkey(shared_secret, "ecc-chacha-poly")` → ChaCha20-Poly1305 AEAD.
+   - Inner blob layout: `[33-byte compressed eph pubkey | 12-byte nonce | ciphertext+poly1305 tag]`
+2. **Outer**: Inner blob treated as plaintext → `symmetric_encrypt_with_nonce(master, outer_nonce, inner_blob)` (AES-256-CTR + HMAC-SHA512 EtM under master-derived subkeys).
+3. **Encrypted bit semantics**: High-level `file::encode` with `Encrypted` set uses **pure symmetric only**. Hybrid replaces the encrypt step explicitly; callers typically leave `Encrypted` clear and pass hybrid output through FEC/Bao. Master key still protects outer EtM and `header_mac`.
+4. **Verification order**: Outer EtM verified first; inner AEAD only on outer success.
+
+### SLH-DSA sidecar wire format
+
+- File naming convention: `<bao-root-hex>.cXX.slh`
+- On-disk layout (7860 bytes total):
+  - 4 bytes: `b"SLH1"` (`SLH1_MAGIC`)
+  - 7856 bytes: raw SLH-DSA-SHAKE-128s signature (`SLH1_SIGNATURE_LEN`)
+- Public key **not** in sidecar — stored in `Header.slh_public_key` (32 bytes).
+- Library helpers: `crypto::write_slh_sidecar`, `crypto::read_slh_sidecar`.
+
+### OTS stub limitations (`ots` feature)
+
+`ots::stamp_bao_root` / `verify_stamp` produce deterministic offline proofs (`CBOTSv1\0` magic inside a DER-like envelope). **Not production OpenTimestamps** — no network calendar submission. Suitable for CI, tests, and offline Bao-root binding until a real calendar client is integrated. See `src/ots.rs` rustdoc.
 
 ---
 
@@ -435,10 +581,10 @@ All key material separation is performed with:
 I = HMAC-SHA512(master, "carbonado-v2/" || label)
 ```
 
-Current registered labels (must be kept in sync with code):
-- `aes-ctr`
-- `etm-hmac`
-- `header-auth`
+Current registered labels (must be kept in sync with code — full table in **Subkey Label Registry**):
+- `aes-ctr`, `etm-hmac`, `header-auth` (master-key derived)
+- `ecc-chacha-poly` (hybrid inner AEAD)
+- `slh-dsa-seed`, `slh-dsa-seed-2` (SLH convenience only)
 
 **Rationale**:
 - HMAC-SHA512 is a secure PRF under standard assumptions.
@@ -499,11 +645,11 @@ Current registered labels (must be kept in sync with code):
 Per user request ("Yes, let's do that. u32."), the last remaining artificial u16 bookkeeping related to Bao slice counts and indices was widened:
 
 - `EncodeInfo.verifiable_slice_count` and `chunk_slice_count`: `u16` → `u32`
-- `extract_slice(index)`, `verify_slice(index, count)`: `u16` → `u32`
+- `extract_slice(index, hash, format)`, `verify_slice(index, count, hash, format)`: `u16` → `u32` (P1: keyed; require format byte + root hash)
 - Internal arithmetic in `scrub`
 - `InvalidVerifiableSliceCount` error payload
 
-`SLICE_LEN` remains `u16 = 1024` (it is simply the definition of a Bao slice; it was never the cap — the u16 *counts* were).
+`SLICE_LEN` is `u32 = 4096` (one 4 KiB Bao leaf; P1 clean break from 1 KiB slices).
 
 **Result**:
 - FEC-protected segments are now limited only by the existing u32 length fields (~4 GiB verifiable per segment).
@@ -512,7 +658,7 @@ Per user request ("Yes, let's do that. u32."), the last remaining artificial u16
 
 The change was made while still in the active 0.7 development series of the v2 cryptographic redesign (clean break), so it is treated as normal completion work rather than a post-stability semver event.
 
-All previous "Remaining u16 Bookkeeping Limits" text has been superseded by this widening. The only size-related `u16` left in the public API is the `SLICE_LEN` constant itself, which does not impose a total-size limit.
+All previous "Remaining u16 Bookkeeping Limits" text has been superseded by this widening. Slice indices/counts are `u32`; `SLICE_LEN` is `u32 = 4096`.
 
 These invariants are more important than any particular performance optimization.
 
@@ -588,17 +734,118 @@ We do **not** keep:
 
 | Topic                              | Status     | Location / Owner          | Notes |
 |------------------------------------|------------|---------------------------|-------|
-| v2 Container Header Format         | Drafting   | TBD                       | New symmetric-only header |
-| Nonce & Subkey Derivation Details  | Drafting   | TBD                       | Must include security arguments |
-| SLH-DSA Sidecar Nomenclature       | Drafting   | TBD                       | Content vs container separation |
-| Migration Guidance (External)      | Drafting   | TBD                       | How users move from v1 archives |
+| v2 Container Header Format         | Impl complete (2.0.0); CHIP deferred | AGENTS.md §2, `src/structs.rs` | 177-byte symmetric header; normative in-repo |
+| Nonce & Subkey Derivation Details  | Impl complete (2.0.0); CHIP deferred | AGENTS.md §2.1 | HMAC-SHA512 labels; security arguments in AGENTS |
+| SLH-DSA Sidecar Nomenclature       | Impl complete (2.0.0); CHIP deferred | AGENTS.md §2.3, `src/crypto.rs` | Sidecars only; `SLH1` magic |
+| Migration Guidance (External)      | Impl complete (2.0.0); CHIP deferred | AGENTS.md §1 | Clean break; no v1 ECIES decode |
 | Argon2id Parameter Recommendations | Superseded | 2026 session              | Removed from library; caller responsibility for KDF |
 | Test Matrix (linux + wasm + others) | Completed | 2026-05-30                | Explicit CI matrix: native, musl, aarch64, wasm32 (pqc on/off) |
-| v2.0 FEC Replacement (zfec -> reed-solomon-erasure) | Completed | 2026                      | RS 4/8 (k=4 data, 4 parity); det encode; tolerates any 4/8 shards (50% aligned); scrub combo search for distributed taints; see §11.1 and code |
-| Inboard / Outboard Modes           | Planned    | TBD                       | Bare public files for webservers + sidecar proofs (see §11.2) |
-| Carbonado 2.0 Magic + Version Bump | Planned    | TBD                       | New MAGICNO (CARBONADO20), crate 2.0.0, end of fluid dev (see §11.3) |
+| v2.0 FEC Replacement (zfec -> reed-solomon-erasure) | Completed | 2026                      | RS 4/8 (k=4 data, 4 parity); det encode; tolerates any 4/8 shards (50% aligned); scrub combo search for distributed taints; see CHANGELOG.md and code |
+| Inboard / Outboard Modes           | Completed  | 2026 (this run)           | High-level file:: + scrub_outboard + low-level; bare public + sidecars (.cXX.out/.par); header out-of-band for public. See CHANGELOG.md and code. |
+| Carbonado 2.0 Magic + Version Bump | Completed  | 2026                      | New MAGICNO (CARBONADO20\n), crate 2.0.0; fluid dev period ended. See CHANGELOG.md and status block above. |
+| Adamantine Directory Catalog v1.0   | Impl complete (2.1.0); CHIP deferred | carbonado 2.1.0 | Adamantine 1.0 + bundled Bao + heterogeneous segments; see §7.1 |
+| Unified `carbonado` CLI (file + dir) | Completed | carbonado 2.0.0            | `encode`/`decode` routes `.adam.c14`/`.adam.c15`; `--encrypted` for c15; see §7.1 |
 
 Update this table as work progresses. The real normative text lives in the CHIPs repo.
+
+### 7.1 Adamantine Directory Catalog v1.0 (impl complete in-repo; CHIP deferred)
+
+Implementation is complete in this repository (carbonado 2.1.0 directory redesign). External CHIP normative text drafting is explicitly deferred; behavior below reflects the shipped code. **Clean break:** dev `ADAMANTINE2\n` archives are rejected; nothing was published.
+
+Directory archives use **catalog format c14/c15 only** (public/encrypted). Per-file segments are **heterogeneous** c4/c6 (public) or c5/c7 (encrypted) selected by [`directory/format_policy`](src/directory/format_policy.rs) (`infer` heuristic: compressible → c6/c7, incompressible → c4/c5).
+
+**Adamantine wire envelope** (`src/adamantine.rs`):
+- Magic: `ADAMANTINE10\n` (13 bytes; version 1.0 encoded in magic, like `CARBONADO20\n`)
+- `ADAMANTINE1\n` / `ADAMANTINE2\n` rejected → `UnsupportedAdamantineVersion`
+- Header length: **19 bytes** (`ADAMANTINE_HEADER_LEN`)
+- `carbonado_fmt`: `0x0E` (c14) or `0x0F` (c15) — catalog encryption only
+- Flags: **u8** — bit 0 `REQUIRE_OTS` only (bits 1–7 reserved, must be zero → `InvalidAdamantineFlags`)
+- No separate version bytes; no `ENCRYPTED`/`SHARDED`/`INBOARD`/`CENTRALIZED_BAO` flags (layout is normative for v1.0)
+
+```text
+Offset  Size  Field
+0       13    magic            ADAMANTINE10\n
+13      1     carbonado_fmt    0x0E | 0x0F
+14      1     flags            u8 (bit0 REQUIRE_OTS = per-entry proofs required at decode; bits 1–7 reserved, must be 0)
+15      4     payload_len      u32 LE
+19      N     payload          see adamantine_payload
+```
+
+**Adamantine payload** (`src/adamantine_payload.rs`):
+```text
+[u32 LE rkyv_len][rkyv FilepackManifestWire][u32 LE bundle_len][concatenated segment bao_outboard blobs]
+```
+- DoS caps: `MAX_RKYV_PAYLOAD_LEN`, `MAX_BAO_BUNDLE_LEN`, `MAX_ADAMANTINE_PAYLOAD_LEN`
+- Optional future `u8` bundle version byte documented for streaming; v1 omits it
+
+**FilepackManifest v2** (`src/filepack_manifest.rs`):
+- `FILEPACK_MANIFEST_VERSION = 2`; v1 rejected
+- `format_level` = **catalog only** (c14 or c15); validated on decode
+- `FilepackEntry.segment_format` per entry (c4/c6/c5/c7); encode-time policy checks return `SegmentFormatMismatch`; decode maps wire violations to `InvalidFilepackManifest`
+- `SegmentRef.bao_outboard_offset` / `bao_outboard_len` index into Adam payload bundle
+- `catalog_bao_root` **not** in rkyv wire; bound from `.adam.c14`/`.adam.c15` filename via keyed Bao verify
+- `catalog_ots_proof` on API struct only — stored in **COTS file trailer** after inboard catalog bytes (does not affect Bao root)
+- Per-entry `ots_proof` in rkyv when `OtsPolicy.stamp_entries`; `REQUIRE_OTS` flag set when entry stamping enabled
+- `REQUIRE_OTS` applies to **entry proofs only**; catalog proof verified when present in COTS trailer
+- Legacy CBOR `filepack` (`src/filepack.rs`) remains **interop only**
+
+**Directory archive layout (fixed v1.0):**
+- **Catalog:** inboard headered `{catalog_root}.adam.c14` or `.adam.c15` (`CARBONADO20\n` + body); no `.out`/`.par`
+- **Segments:** bare mains `{seg_root}.c4`/`.c6`/`.c5`/`.c7` only; Bao outboard centralized in Adam payload bundle
+- **No** directory `.out`, `.par`, or `.ots` sidecar files
+- Catalog optional OTS: `[COTS][u32 LE len][proof]` appended after inboard catalog file bytes
+
+**Directory decode error taxonomy:** reserve `InvalidFilepackManifest` for rkyv wire + semantic validation (including `segment_format` vs catalog encryption mismatches on decode). `SegmentFormatMismatch` is **encode-time only** (policy / `DirectoryEncodeOptions`). Other decode variants: `InvalidAdamantineFlags`, `SegmentMainLenMismatch`, `ContentBlake3Mismatch`, `DirectoryLayoutMismatch` (non-inboard catalog or headered segment mains), `CatalogBaoRootMismatch`, `OtsProofRequired` (entry), `OtsVerificationFailed`, `InvalidOtsProof`.
+
+**Streaming + sharding:** large files shard via `encode_file_segments` / budget in `DirectoryEncodeOptions.segment_plaintext_budget` (default `DEFAULT_SEGMENT_PLAINTEXT_BUDGET`). Segment decode uses `decoding::decode_outboard` with Bao slices from bundle.
+
+**On-disk naming (directory mode)** — decimal suffixes:
+- Catalog: `{catalog_bao_root_64hex}.adam.c14` or `.adam.c15`
+- Segments: `{segment_bao_root_64hex}.c4`/`.c6`/`.c5`/`.c7` (heterogeneous per file)
+
+**Single-file CLI** continues hex suffixes: `{hash}.c{format:02x}` (e.g. `.c0e` for format 14).
+
+**Unified `carbonado` binary (directory):** `encode <dir>` defaults output to `{input}-archive/` (never `.`); `-o` required or uses that default. `--encrypted` for c15; no directory `--inboard`/`--outboard`/`--format`. `decode` routes `.adam.c14`/`.adam.c15` to `decode_directory`.
+
+### 7.2 CLI key material handling (`src/bin/carbonado.rs`)
+
+The `carbonado` binary is a thin wrapper over the library. It does **not** implement passphrase KDF, key files, or HSM integration. Key handling is deliberately minimal.
+
+#### Input: `--master <64 hex chars>`
+
+| Behavior | Detail |
+|----------|--------|
+| Format | Exactly 64 hexadecimal characters → 32 bytes (`parse_master`) |
+| Omitted | Defaults to **`[0u8; 32]`** (all zeros) — valid for public/unencrypted formats |
+| Required | When `Encrypted` bit is set (format odd: c1, c3, …, c15) or `--encrypted` directory mode |
+| Rejected | All-zero master on encrypted paths (`reject_zero_encrypted_master`) |
+| Not supported | Passphrases, key files, env vars, stdin prompts |
+
+#### In-process lifetime
+
+1. Clap parses `--master` into a `String` (hex digits live in heap until dropped).
+2. `parse_master` decodes into a stack-allocated `[u8; 32]`.
+3. The key is passed by reference (`&[u8; 32]`) into `encode_stream`, `decode_stream`, `encode_directory_with_options`, `stream_decode_outboard`, etc.
+4. **The binary does not call `zeroize` on the key array or the hex `String` when the command finishes.** Secrets may remain in process memory until overwritten by the OS allocator.
+
+#### Operational security implications (operator responsibility)
+
+| Risk | Mitigation |
+|------|------------|
+| Shell history / `ps` argv exposure | Prefer env-file wrappers, `read -s`, or a small helper that KDFs a passphrase and execs with minimal argv visibility |
+| Swap / core dumps | Use `mlock`/`zeroize` in your wrapper; the CLI does not mlock |
+| Shared CI runners | Do not pass production keys on the command line in logs |
+| Public archives | Omitting `--master` is intentional (zero key); see threat model above |
+
+#### Library contract vs CLI
+
+- **Library:** Accepts `&[u8; 32]` per call; does not retain caller keys after return. AGENTS §2.4: passphrase→key is caller responsibility (Argon2id recommended).
+- **CLI:** Only hex master keys; no KDF. For production, derive a 32-byte key in your application and pass hex to `--master`, or call the library API directly with a zeroized buffer.
+
+#### Directory vs single-file
+
+- **Single-file encrypted:** `--format` with `Encrypted` bit + `--master` required.
+- **Directory encrypted (c15):** `--encrypted --master` required; per-segment keys use the same master; directory outboard uses **embedded nonce** in bare mains (not header-path nonce per segment). See §7.1 directory encrypted outboard contract.
 
 ---
 
@@ -658,23 +905,28 @@ This tension is acknowledged but not resolved in the current design. Carbonado i
 
 ## 10. Current Rough Edges (as of this writing)
 
-**Updated after u32 slice verification widening (most recent work):**
+**Updated post v2.0 outboard + polish (TDD/docs/gate work):**
 
-- (FEC scrub non-determinism fixed by RS overhaul; re-encode now always bit-identical for good data; full recovery exercised via subset search on candidates + bao hash oracle.)
-- `Header::new` carries `#[allow(clippy::too_many_arguments)]` (legitimate for an authenticated header constructor, but still noisy).
-- No automatic zeroization of caller-supplied master keys (explicitly documented; callers are responsible).
-- High-level `file::encode` always emits `chunk_index = 0`. True large-file sharding remains an application concern (even though the format now supports it via u32 chunk_index).
-- The two `.expect()` calls in the hot symmetric crypto paths (after `derive_subkey`) are on programmer invariants, not attacker input, but they still exist.
-- AGENTS.md "Current Rough Edges" and some older work log entries need periodic pruning as items are completed.
+Remaining open (non-blocking for 2.0 core; documented):
 - WASM + libbitcoinpqc cross-compilation limitations remain (documented, not a code bug in Carbonado itself).
-- Bao crate: Code migrated to use local keyed bao-tree fork (../bao-tree) as default with 4KB chunk groups (BlockSize::from_chunk_log(2) == BAO_BLOCK_SIZE). Keyed roots commit to Format bitmask. Old bao=0.13 kept only for Hash type + reexport. 1KB SLICE_LEN kept on top of groups. Temporary fork until upstream. (See Cargo.toml, constants.rs, encoding/decoding.rs). CI workflows explicitly checkout the fork on branch 76-keyed-bao; dep uses default-features=false.
+- Bao crate: Code migrated to use local keyed bao-tree fork (../bao-tree) as default with 4KB chunk groups (BlockSize::from_chunk_log(2) == BAO_BLOCK_SIZE). Keyed roots commit to Format bitmask. `SLICE_LEN=4096`. Seekable APIs in `src/stream/`. Temporary fork until upstream. (See Cargo.toml, constants.rs, src/stream/). CI workflows explicitly checkout the fork on branch 76-keyed-bao; dep uses `validate` feature.
 - reed-solomon-erasure dep: upstream "looking for maintainers"; added Cargo note for periodic re-eval (no runtime issues, det, suitable).
+- (Perf note: inboard `verify_slice` is O(slice) memory but O(N) encoded-byte I/O; outboard slice verify is O(slice) time+memory; scrub pre-check still full `bao()` decode O(N) memory.)
+
+Addressed in this polish pass (removed from active list):
+- Header::new clippy allow + comments.
+- Zeroization documentation.
+- chunk_index=0 high-level behavior docs.
+- .expect() in symmetric hot paths (replaced; TDD coverage test added).
+- AGENTS rough edges list + §11 pruning (periodic hygiene).
+
+See prior entries in git history for full context of resolved items.
 
 All core cryptographic requirements from the original Surmount spec (symmetric AES-256-CTR + full HMAC-SHA512 EtM, SLH-DSA sidecars only, clean break, u32 chunk support, etc.) are now implemented and verified. Argon2id passphrase KDF was deliberately removed; callers derive high-entropy master keys outside the library (Argon2id recommended for passphrases).
 
 ---
 
-**Last updated:** After migration to 4KB Bao chunk groups using local keyed bao-tree fork (BlockSize log=2), with format-keyed roots for multi-dimensional naming. (4KB sectors default now active in encode/decode/bao wrappers.) Planning for v2.0 stabilization added (see section 11).
+**Last updated:** Post outboard completion + v2.0 final polish/gate (docs, TDD on rough edges like expect/Header/clippy, AGENTS prune, README expand, tests/clippy/fmt). See CHANGELOG.md + this §10 for status. (4KB keyed Bao, RS FEC, 2.0 magic stable.)
 
 Major items completed in this session:
 - Full symmetric v2 stack (AES-256-CTR + 64-byte HMAC-SHA512 EtM, header_mac, subkey derivation). Argon2id passphrase helper removed (callers must derive high-entropy master keys themselves).
@@ -683,108 +935,22 @@ Major items completed in this session:
 - `chunk_index` widened u8 → u32 in Header + full auth coverage
 - `payload_nonce` semantics fully documented
 - All u16 slice bookkeeping (`EncodeInfo`, `extract_slice`, `verify_slice`, `scrub`) widened to u32, removing the ~64 MiB FEC segment cap
-- Bao migrated from bao 0.13 (1KB fixed) to bao-tree fork with BAO_BLOCK_SIZE=from_chunk_log(2) for 4KB groups + keyed roots bound to format byte. SLICE_LEN kept at 1024. Prefix+response for size in verifiable.
+- Bao migrated from bao 0.13 (1KB fixed) to bao-tree fork with BAO_BLOCK_SIZE=from_chunk_log(2) for 4KB groups + keyed roots bound to format byte. P1: SLICE_LEN=4096, seekable slice module. Prefix+response for size in verifiable.
 - Theoretical max size calculation (≈17.18 billion GiB)
 - Extensive hardening of AGENTS.md, rustdocs, tests, CI, examples, and removal of all legacy ECIES/Nostr material
 - Full production verification gates passed repeatedly (strict clippy + tests)
 
-Current rough edges are listed in section 10 above (some will be addressed by the v2.0 plans in section 11). The cryptographic core required by the original Surmount specification is complete.
+Current rough edges are listed in section 10 above (some addressed via polish; remaining are documented limitations/deps). The cryptographic core + outboard required by the original Surmount specification + AGENTS is complete and gated.
 
 When in doubt, re-read the original Surmount Systems specification dated 2026-05-30 and this file. Do not re-introduce ECIES decode paths.
 
 ---
 
-## 11. v2.0 Plans (Stabilization + New Features)
+## 11. v2.0 Plans (Completed)
 
-These are the remaining items to officially release Carbonado as 2.0. Work here is **planning and documentation only** for now. No code changes that alter the on-disk format or public behavior until the plan is reviewed.
+All v2.0 stabilization items (2.0.0 + CARBONADO20\n magic, reed-solomon-erasure 4/8 FEC, full high-level `file::` outboard + `scrub_outboard` for bare public + sidecars + optional out-of-band Header, low-level) are complete. See [CHANGELOG.md](CHANGELOG.md) for release notes and historical rationale summary. See code (src/file.rs, src/decoding.rs, src/encoding.rs, tests/format.rs) and CHIPs tracker (section 7) for current state. Invariants in §11.4 below and AGENTS §2.1.5 are upheld.
 
-**Goal**: Declare the symmetric design (Header, crypto, keyed 4KB Bao) stable under a 2.0 release, with a clean new magic number, plus two major usability/architectural improvements.
-
-### 11.1 Replace zfec 4/8 with a Better Erasure Code
-
-**Current problems**:
-- zfec 4/8 gives exactly 2x overhead and tolerates loss of any 4 of 8 large chunks.
-- A "well placed" corruption that hits every chunk (possible with a single cosmic ray or bad sector in the wrong way) can make reconstruction impossible even if total bad bytes << 50%.
-- scrub path is non-deterministic for >~8KB (TODOs in decoding.rs). Re-encode + hash compare does not always work.
-- Not byte-granular for *any* positioned 50% bytes (coarse 4/8 shard model; distributed partials in >4 shards still irrecoverable). Search + bao enables recovery from corruptions leaving >=4 intact shards.
-- Not guaranteed bit-for-bit reproducible across runs/impls in all cases.
-
-**Requirements for replacement**:
-- Deterministically reproducible: identical input bytes + same parameters must produce identical output bytes (critical for scrub re-encode verification and content-addressing consistency).
-- Tolerate erasure of any 4 of 8 shards (~50% of FEC body if bytes confined to <=4 shards; distributed hits within limit via scrub candidate search). Stronger than old zfec for det + partials in practice.
-- Survive distributed corruption across what used to be the "8 chunks" (i.e. good erasure capability, not just detection).
-- Efficient and fast (encoding/decoding time and memory). Hardware-friendly where possible.
-- WASM compatible, preferably pure Rust or minimal deps (like current zfec-rs).
-- Systematic preferred (original data appears verbatim in the output for some modes).
-- Keep integration points: 4KB alignment friendly with BAO_BLOCK_SIZE and 1KB SLICE_LEN; calc_padding_len kept as-is to preserve 4KB/1KB/FEC_K alignment invariants (documented in utils.rs); scrub must become reliable (encode then compare bao hash).
-- Overhead: aim for same or better than 2x for equivalent resilience. Rate ~1/2.
-- The "Zfec" bit in Format keeps its position and semantics ("add forward error correction"). Internals change.
-- Must preserve non-crypto properties from section 1 (flat-file, pipeline ordering where it makes sense, WASM, etc.).
-
-**Candidate direction**: Reed-Solomon erasure coding (BCH subclass) via `reed-solomon-erasure` "5" crate (solid, no_std, det, no runtime rand, WASM ok, used widely). Chosen for: pure determinism (encode identical bytes), correct erasure math, minimal, aligns with 4/8 model + padding. Validated: tests cover det, recovery of 4/8 shards, distributed taints via candidate search in scrub, edges. (BCH direct not needed as RS is appropriate.)
-
-**Format impact**: This is a breaking change to the FEC layer. Combined with the 2.0 magic bump (below), old zfec-encoded segments will require external migration (decode with old crate version, re-encode with new).
-
-**Open questions**:
-- Exact parameters (k/m or equivalent rate + symbol size).
-- Whether to keep chunked storage model or move to finer symbols.
-- How scrub changes (hopefully simple re-encode + compare).
-- Performance on target hardware (Zen 5 etc.) with `RUSTFLAGS=-C target-cpu=native`.
-
-Add to todos when implementing: new dependency, replace encoding::zfec + decoding zfec paths + utils::calc_padding_len + scrub + tests + docs + benchmarks.
-
-**Implemented (2026)**: reed-solomon-erasure v5, 4/8 params preserved (FEC_K=4, FEC_M=8), padding unchanged (aligns; calc_padding not generalized - see utils.rs + AGENTS note for slice/FEC invariant reasons), scrub robustified with combo search over candidates (to handle tainted shards w/o no-op on all-present), all errors via FecError, full test matrix + det/recovery/chaos (incl rand+explicit 4-shard). Benchmarks use existing benches/ + RUSTFLAGS. Language aligned to actual (shard + search). No gaps for core. See /tmp/grok-impl-summary for evidence. 11.1 complete.
-
-### 11.2 Inboard and Outboard Modes
-
-Currently everything is "inboard": when Zfec or Bao bits are set, the resulting body contains the transformed data + embedded verification/erasure data in one flat file (after the Header).
-
-**Desired**:
-- Configurable outboard mode.
-- For public (non-Encrypted) files: the main stored/served bytes on disk can be the bare original data (or post-compress(zstd-20) if compression requested), exactly as the file would exist without Carbonado.
-- Verification data (Bao outboard hashes) and/or FEC parity live in separate side files (e.g. named after the bao hash + .cXX + .out or conventional extensions).
-- This is excellent for webservers: a public c4/c6/c12/c14 archive can be served directly via static HTTP with no wrapper bytes in the response body. Verifiers download the bare file + the outboard sidecar(s).
-- Encrypted formats probably stay inboard (or the outboard data would still be paired with the encrypted main file).
-
-**Impact areas to plan**:
-- New or extended encode APIs: e.g. `encode(..., outboard: bool)` or separate `encode_outboard` / return type that includes main_bytes + optional outboard_bytes + fec_parity.
-- Decoding must accept bare data + outboard proof when operating in that mode.
-- Header: for bare outboard public case, perhaps the Header is stored out-of-band too, or a tiny manifest. The bao hash (keyed on format) still names the result of the pipeline.
-- For Bao step: leverage the existing outboard support in bao-tree (PreOrderOutboard / PostOrder*, create_keyed, etc.) instead of prefixing the response into the main body.
-- For Zfec/FEC: parity can be produced as separate chunks/files.
-- Format bitmask stays the same. The "Bao" bit means "verifiability is present" (whether inboard or outboard is a storage choice).
-- Content addressability: the root bao hash still refers to the specific (data + pipeline) even if stored outboard.
-- file::encode / file::decode + low-level encoding::encode need variants or flags.
-- Tests, examples, README, and storage frontends (web, S3, p2p) must understand sidecars.
-- When outboard + no compression + no encryption + no FEC: the "Carbonado file" on disk can literally be the user's original bytes (with sidecar for any verifiability).
-
-**Preserved invariants**:
-- Flat file for the primary data artifact when outboard bare mode is used.
-- Bao-based streaming verification still works (using outboard data + the bare file).
-- 4KB groups + 1KB slices continue.
-- Header (when present) authenticated before use.
-- Multi-dimensional naming via keyed bao hash.
-
-**Benefits**: Public data can be directly usable by ordinary tools/webservers while still getting the durability/verifiability of Carbonado when the sidecars are kept.
-
-Add to todos when implementing: API design for modes, changes to encoding/decoding/file modules, updates to EncodeInfo/Header usage for outboard cases, new tests for bare roundtrips.
-
-### 11.3 Official 2.0 Release + New Magic Number
-
-- Bump crate version from 0.7.0 to 2.0.0 in Cargo.toml.
-- MAGICNO is now b"CARBONADO20\n" (2.0). (Done.)
-- Update the constant docs, all parsing sites, AGENTS (Header layout, invariants list), README, examples, tests.
-- Old magic (02 or anything else) must produce clear "use older version for migration" error (already the pattern).
-- Update the intro versioning note and "Current Status".
-- The 2.0 release marks the end of the "fluid API during overhaul" period. After this, semver rules apply for breaking changes.
-- The three items in this section (new FEC, in/outboard, version+magic) should ship together or in coordinated 2.0.x releases so that on-disk artifacts created under 2.0 are stable.
-- SLH1 sidecar magic stays as-is (independent).
-
-**Rationale for new magic**: Clearly signals "this is the stabilized Carbonado v2 format". Even though crypto-v2 work used 02, the official named 2.0 gets its own identifier. Makes it trivial for tools to detect "pre-2.0 dev format".
-
-Update Cargo description and any "0.7" references.
-
-### 11.4 Invariants That Must Survive These Changes
+### 11.4 Invariants That Must Survive (Normative)
 
 (See also section 2.1.5.)
 - Clean break from v1 ECIES (no decode paths ever).
@@ -798,10 +964,10 @@ Update Cargo description and any "0.7" references.
 
 ### 11.5 CHIPs / Spec Work
 
-The real normative details for the new FEC parameters, exact outboard on-disk layout for sidecars, and the 2.0 magic + header compatibility rules belong in the CHIPs repo. Update the tracker table below when drafts exist.
+The real normative details for FEC parameters, outboard sidecar on-disk layout, and 2.0 magic + header rules belong in the CHIPs repo. Update section 7 table when drafts exist.
 
 Update the table in section 7 as work progresses.
 
 ---
 
-When these are implemented, prune this section 11 and move any retained notes into the main architecture or rough edges as appropriate. The final gate (see top of file) must pass against the full spec + AGENTS rules before declaring 2.0 done.
+Section 11 pruned post-completion. Retained only the invariants and CHIPs note for ongoing reference. Historical planning summarized in CHANGELOG.md. The final gate must pass against full spec + every AGENTS rule.

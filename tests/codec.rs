@@ -88,12 +88,24 @@ fn codec(path: &str) -> Result<()> {
     );
 
     info!("Verifying stream against hash: {hash}...");
-    verify_slice(&encoded, 0, encode_info.verifiable_slice_count)?;
+    verify_slice(
+        &encoded,
+        0,
+        encode_info.verifiable_slice_count,
+        hash.as_bytes(),
+        15,
+    )?;
 
     // Exercise extract_slice and verify returning logical data (post-zfec for this level).
     // For bao+zfec, full count verify returns exactly the zfec bytes (skipping 64B parents).
-    let _ = extract_slice(&encoded, 0);
-    let verified_full = verify_slice(&encoded, 0, encode_info.verifiable_slice_count)?;
+    let _ = extract_slice(&encoded, 0, hash.as_bytes(), 15);
+    let verified_full = verify_slice(
+        &encoded,
+        0,
+        encode_info.verifiable_slice_count,
+        hash.as_bytes(),
+        15,
+    )?;
     assert_eq!(
         verified_full.len() as u32,
         encode_info.bytes_ecc,
@@ -102,8 +114,14 @@ fn codec(path: &str) -> Result<()> {
     assert_eq!(encode_info.bytes_verifiable, encoded.len() as u32);
 
     // Strengthen: use level 4 (Bao only) where logical data == original input for content check.
-    let Encoded(encoded4, _hash4, ei4) = encode(&sym_key, &input, 4)?;
-    let vslice = verify_slice(&encoded4, 0, 1.min(ei4.verifiable_slice_count))?;
+    let Encoded(encoded4, hash4, ei4) = encode(&sym_key, &input, 4)?;
+    let vslice = verify_slice(
+        &encoded4,
+        0,
+        1.min(ei4.verifiable_slice_count),
+        hash4.as_bytes(),
+        4,
+    )?;
     let n = vslice.len().min(input.len());
     assert_eq!(
         &vslice[..n],
@@ -114,11 +132,11 @@ fn codec(path: &str) -> Result<()> {
     // Minimal edge coverage for BAO_BLOCK_SIZE geometry (per review):  <1 group, exact, +partial.
     for &sz in &[100usize, 4095, 4096, 4100] {
         let tiny = vec![0xABu8; sz];
-        let Encoded(e, _h, _ei) = encode(&sym_key, &tiny, 4)?; // Bao only; logical==tiny
-        let got = verify_slice(&e, 0, 1)?;
+        let Encoded(e, h, _ei) = encode(&sym_key, &tiny, 4)?; // Bao only; logical==tiny
+        let got = verify_slice(&e, 0, 1, h.as_bytes(), 4)?;
         let want = &tiny[0..got.len().min(tiny.len())];
         assert_eq!(&got[..], want, "edge size {} verify content", sz);
-        let _ = extract_slice(&e, 0);
+        let _ = extract_slice(&e, 0, h.as_bytes(), 4);
     }
 
     info!("Decoding Carbonado bytes");
@@ -208,7 +226,13 @@ fn fec_robustness() -> Result<()> {
             // edges on slice counts etc already covered somewhat
             if level & 4 != 0 {
                 // has bao; assert on return (was discard) for strength + content sanity
-                let v = verify_slice(&e1, 0, ei1.verifiable_slice_count.min(1))?;
+                let v = verify_slice(
+                    &e1,
+                    0,
+                    ei1.verifiable_slice_count.min(1),
+                    h1.as_bytes(),
+                    level,
+                )?;
                 let _ = v.len(); // exercised + non-zero for non-empty cases
             }
         }
@@ -485,7 +509,7 @@ fn all_formats_matrix_roundtrips() -> Result<()> {
     // Short bao prefix (<8 bytes, after u64 content len prefix expected) for verify/decode paths.
     // Covers bao error paths (InvalidHeaderLength) on malformed short bodies (not just header magic).
     let short_bao = vec![0u8; 4];
-    let err_bao = verify_slice(&short_bao, 0, 1).unwrap_err();
+    let err_bao = verify_slice(&short_bao, 0, 1, &[0u8; 32], 4).unwrap_err();
     assert!(matches!(err_bao, CarbonadoError::InvalidHeaderLength));
 
     Ok(())

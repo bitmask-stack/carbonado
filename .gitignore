@@ -1,3 +1,24 @@
 /target
 /Cargo.lock
 *.7z
+
+# Carbonado encode artifacts when CLI `-o` is omitted (defaults to `.`)
+recovered.bin
+recovered_dir/
+/*.c[0-9]
+/*.c[0-9][0-9]
+/*.c[0-9a-f][0-9a-f]
+/*.c[0-9a-f][0-9a-f].out
+/*.c[0-9a-f][0-9a-f].par
+/*.c[0-9].out
+/*.c[0-9].par
+/*.c[0-9][0-9].out
+/*.c[0-9][0-9].par
+/*.adam.c[0-9]
+/*.adam.c[0-9][0-9]
+/*.adam.c[0-9].out
+/*.adam.c[0-9].par
+/*.adam.c[0-9][0-9].out
+/*.adam.c[0-9][0-9].par
+/*.adam.c[0-9].ots
+/*.adam.c[0-9][0-9].ots

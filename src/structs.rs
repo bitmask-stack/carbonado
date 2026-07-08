@@ -26,8 +26,8 @@ pub struct EncodeInfo {
     pub bytes_verifiable: u32,
     /// The total amount of file amplification. 2.0x is typical for 4/8 FEC (RS) encoding, the others are pretty minimal, at roughly 1.1x.
     pub amplification_factor: f32,
-    /// The amount of padding added to input data in order to align it with Bao slice size (1KB) and 4/8 FEC chunk size (4KB).
-    /// (Bao tree groups are now 4KB via bao-tree; 1KB slices remain the unit for extract/verify.)
+    /// The amount of padding added to input data in order to align it with Bao slice size (4 KiB, `SLICE_LEN`) and 4/8 FEC chunk size.
+    /// One slice equals one 4 KiB Bao leaf (`BAO_BLOCK_SIZE`).
     pub padding_len: u32,
     /// How many bytes are in each FEC chunk.
     pub chunk_len: u32,
@@ -43,3 +43,19 @@ pub struct EncodeInfo {
 /// The bao hash (when Bao bit set) is now a keyed blake3 root (via bao-tree 4KB groups)
 /// that commits to the format byte used during encoding.
 pub struct Encoded(pub Vec<u8>, pub bao::Hash, pub EncodeInfo);
+
+/// Result of outboard encoding (for public non-Encrypted formats requesting outboard storage).
+/// main: bare bytes (post-compress if any; the primary on-disk artifact for outboard)
+/// bao_outboard: optional sidecar for Bao (e.g. <hash>.cXX.out)
+/// fec_parity: optional sidecar for Zfec outboard
+/// hash: keyed bao root (commits to exact format/c number)
+/// info: encode stats (note bytes_verifiable reflects bare size in outboard)
+///
+/// Encrypted outboard uses the same artifact split (bare ciphertext main + sidecars). See AGENTS §11.2.
+pub struct OutboardEncoded {
+    pub main: Vec<u8>,
+    pub bao_outboard: Option<Vec<u8>>,
+    pub fec_parity: Option<Vec<u8>>,
+    pub hash: bao::Hash,
+    pub info: EncodeInfo,
+}

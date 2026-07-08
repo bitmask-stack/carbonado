@@ -8,7 +8,7 @@
 //! - Never reuse a master key across unrelated datasets without rotation.
 //! - See AGENTS.md §2 for full invariants, nonce rules, and recommendations.
 
-use carbonado::{decode, encode};
+use carbonado::{constants, decode, decode_outboard, encode, encode_outboard};
 use getrandom::getrandom;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -48,6 +48,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(recovered, plaintext);
     println!("Roundtrip successful!");
     println!("Recovered {} bytes", recovered.len());
+
+    // Minimal outboard public demo (bare main + sidecars for !Encrypted; use file:: for headered public too).
+    // For webserving: serve bare main directly + sidecars (<hash>.cXX.out etc). Encrypted paths stay inboard (use file::decode).
+    // Sidecars: bao_outboard for verification (keyed on format), fec_parity for recovery if Zfec bit.
+    // Directory archives use Adamantine + FilepackManifest catalogs; see examples/dir_archival.rs.
+    // See README "Outboard usage", tests/format.rs for full matrix + error cases, AGENTS for invariants.
+    let oenc = encode_outboard(&master_key, plaintext, 4 /* Bao public */)?;
+    let bare = oenc.main;
+    assert!(
+        !bare.starts_with(constants::MAGICNO),
+        "public outboard main is bare"
+    );
+    let rec_bare = decode_outboard(
+        &master_key,
+        oenc.hash.as_bytes(),
+        &bare,
+        oenc.bao_outboard.as_deref(),
+        oenc.fec_parity.as_deref(),
+        oenc.info.padding_len,
+        4,
+    )?;
+    assert_eq!(rec_bare, plaintext);
+    println!(
+        "Outboard public bare roundtrip ok ({} bytes bare)",
+        bare.len()
+    );
 
     Ok(())
 }

@@ -6,10 +6,9 @@ use serde::{Deserialize, Serialize};
 /// 12 bytes: "CARBONADO", version 20, plus a newline character.
 pub const MAGICNO: &[u8; 12] = b"CARBONADO20\n";
 
-/// Bao slice length for extract/verify (content chunks). Remains 1KB even when using
-/// 4KB chunk groups (BlockSize log=2) for the Bao tree via bao-tree crate. Slices
-/// are always 1024-byte content units on top of the group size.
-pub const SLICE_LEN: u16 = 1024;
+/// Bao slice length for extract/verify (content chunks). One 4KB slice equals one
+/// Bao leaf at `BAO_BLOCK_SIZE` (BlockSize log=2) — the verifiable/FEC geometry unit.
+pub const SLICE_LEN: u32 = 4096;
 
 /// Default Bao tree block size for 4KB chunk groups (aligns with SSD/HDD sectors,
 /// reduces tree overhead, improves max segment size). Uses the local keyed bao-tree fork.

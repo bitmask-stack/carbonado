@@ -1,0 +1,31 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH carbonado-encode 1  "carbonado-encode " 
+.SH NAME
+carbonado\-encode \- Encode a file or directory into a Carbonado archive
+.SH SYNOPSIS
+\fBcarbonado\-encode\fR [\fB\-f\fR|\fB\-\-format\fR] [\fB\-\-outboard\fR] [\fB\-\-encrypted\fR] [\fB\-\-master\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIINPUT\fR> 
+.SH DESCRIPTION
+Encode a file or directory into a Carbonado archive
+.SH OPTIONS
+.TP
+\fB\-f\fR, \fB\-\-format\fR \fI<LEVEL>\fR [default: 14]
+Format level 0–15 (default 14 = public verifiable; odd values = encrypted)
+.TP
+\fB\-\-outboard\fR
+Single\-file only: bare main + `.out`/`.par` sidecars (default single\-file is inboard)
+.TP
+\fB\-\-encrypted\fR
+Directory only: encrypted catalog c15 and segment formats c5/c7 (auto\-creates BIP39 seed if needed)
+.TP
+\fB\-\-master\fR \fI<HEX>\fR
+32\-byte master key as 64 hex chars (overrides stored BIP39 seed)
+.TP
+\fB\-o\fR, \fB\-\-output\fR \fI<DIR>\fR
+Output directory [single\-file default: . ; directory default: {input}\-archive/]
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+<\fIINPUT\fR>
+Input file or directory

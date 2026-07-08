@@ -34,7 +34,8 @@ pub fn decode_bao_hash(hash: &[u8]) -> Result<Hash, CarbonadoError> {
 /// Calculate padding (find a length that divides evenly both by FEC_K and Bao SLICE_LEN, then find the difference).
 ///
 /// Returns (padding_len, chunk_size).
-/// Kept specific to FEC_K*SLICE (not generalized) to preserve alignment invariant for 1KB slices + 4-shard RS striping + 4KB Bao groups (plan todo noted in AGENTS; change would affect extract/scrub geometry).
+/// Kept specific to FEC_K*SLICE (not generalized) to preserve alignment invariant for
+/// 4KB slices + 4-shard RS striping + 4KB Bao leaf groups.
 pub fn calc_padding_len(input_len: usize) -> (u32, u32) {
     let input_len = input_len as f64;
     let overlap_constant = SLICE_LEN as f64 * FEC_K as f64;

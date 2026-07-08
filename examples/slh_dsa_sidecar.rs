@@ -7,7 +7,9 @@
 //!
 //! See AGENTS.md §2.3 for the exact sidecar format and security model.
 
-use carbonado::crypto::{slh_dsa_generate_keypair, slh_dsa_sign, slh_dsa_verify};
+use carbonado::crypto::{
+    read_slh_sidecar, slh_dsa_generate_keypair, slh_dsa_sign, slh_dsa_verify, write_slh_sidecar,
+};
 use carbonado::file::{encode, Header};
 use getrandom::getrandom;
 
@@ -54,16 +56,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         signature.bytes.len()
     );
 
-    // === 4. (Optional but recommended) Persist the sidecar ===
-    // A real implementation would write something like:
-    //   <bao-hash>.c15.slh
-    // containing: b"SLH1" (4 bytes) + signature (7856 bytes).
-    //
-    // The 32-byte SLH-DSA public key now lives in the Carbonado Header
-    // (header.slh_public_key) of the referenced archive. The sidecar only
-    // carries the signature (over the Bao hash or a higher-level manifest).
-    //
-    // For this example we just keep everything in memory.
+    // === 4. Persist the sidecar (SLH1 magic + 7856-byte signature) ===
+    let sidecar_path =
+        std::env::temp_dir().join(format!("carbonado-slh-example-{}.slh", std::process::id()));
+    write_slh_sidecar(&sidecar_path, &signature.bytes)?;
+    let sidecar_sig = read_slh_sidecar(&sidecar_path)?;
+    assert_eq!(sidecar_sig, signature.bytes);
+    println!(
+        "Wrote SLH-DSA sidecar to {} ({} bytes on disk)",
+        sidecar_path.display(),
+        4 + signature.bytes.len()
+    );
+    // Production naming: <bao-hash-hex>.c15.slh
+    // The 32-byte SLH-DSA public key lives in Header.slh_public_key; the sidecar
+    // carries only the signature over the Bao hash (or a higher-level manifest).
 
     // === 5. Verification (done by anyone who has the public key) ===
     let valid = slh_dsa_verify(&keypair.public_key, message_to_sign, &signature)?;
