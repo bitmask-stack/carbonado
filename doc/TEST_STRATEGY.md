@@ -34,8 +34,8 @@ Bitmask: `Encrypted(1) | Snappy(2) | Bao(4) | Zfec(8)`.
 | **T1** | `stream_encode_buffer` all 16 (proptest) | Done — `tests/streaming.rs` |
 | **T2** | Scrub all Bao+Zfec (c12–c15) light + distributed | **New** — `tests/fec_scrub_matrix.rs` |
 | **T3** | Outboard scrub c12/c14/c15 | **New** — `tests/fec_scrub_matrix.rs` |
-| **T4** | Outboard roundtrip all 16 | Partial — `tests/format.rs` (extend) |
-| **T5** | `encode_stream`/`decode_stream` format sweep | Partial — single c14 smoke |
+| **T4** | Outboard roundtrip all 16 | Done — `tests/format.rs::outboard_and_keyed_c_number` |
+| **T5** | `encode_stream`/`decode_stream` format sweep | Done — `tests/streaming.rs::file_stream_format_sweep` |
 | **T6** | Directory heterogeneous c4–c7 + catalog c14/c15 | Done — `tests/directory_archive.rs` (28) |
 | **T7** | Sharding × FEC × scrub per segment | **New** — `tests/shard_fec_scrub.rs` |
 
@@ -96,10 +96,10 @@ Carbonado uses **reed-solomon-erasure 4/8**: any **4 of 8** shards reconstruct t
 
 ### P1 — Matrix completion (this plan)
 
-1. Extend `tests/format.rs` — outboard roundtrip all 16 formats
-2. Extend `tests/streaming.rs` — outboard stream parity for c6/c7/c13/c15
-3. `encode_stream` format sweep (c0, c4, c8, c12, c14, c15)
-4. Sharding: c15 encrypted multi-shard + outboard sharding (if supported)
+1. ~~Extend `tests/format.rs` — outboard roundtrip all 16 formats~~ **Done**
+2. ~~Extend `tests/streaming.rs` — outboard stream parity for c6/c7/c13/c15~~ **Done**
+3. ~~`encode_stream` format sweep (c0, c4, c8, c12, c14, c15)~~ **Done**
+4. ~~Sharding: c15 encrypted multi-shard + outboard sharding (if supported)~~ **Done** (outboard sharding documented as unsupported)
 
 ### P2 — FEC / scrub depth
 

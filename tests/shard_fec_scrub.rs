@@ -6,9 +6,9 @@ use std::io::Cursor;
 
 use anyhow::Result;
 use carbonado::{
-    error::CarbonadoError, scrub, stream::{
-        decode_shards_stream, encode_shard_stream, ShardEncodeResult, ShardSource,
-    },
+    error::CarbonadoError,
+    scrub,
+    stream::{decode_shards_stream, encode_shard_stream, ShardEncodeResult, ShardSource},
 };
 use common::corruption::InboardShardLayout;
 

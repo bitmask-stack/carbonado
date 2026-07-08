@@ -59,7 +59,10 @@ fn distributed_knockout_recovers_up_to_four_shards_public_bao_zfec() -> Result<(
                 "must stay within RS recovery: {:?}",
                 report.shards_touched
             );
-            assert!(report.positions.len() >= 4, "knockouts spread across stream");
+            assert!(
+                report.positions.len() >= 4,
+                "knockouts spread across stream"
+            );
             assert!(
                 scrub(&orig, hash_bytes, &info, level).is_err(),
                 "sanity: pristine must not scrub for {} size {}",
@@ -96,13 +99,7 @@ fn encrypted_distributed_knockout_roundtrip_content() -> Result<()> {
 
         let layout = InboardShardLayout::from_encode_info(orig.len(), info.chunk_len);
         let mut corrupted = orig.clone();
-        scattered_stream_knockout(
-            &mut corrupted,
-            &layout,
-            80,
-            4,
-            &mut rng,
-        );
+        scattered_stream_knockout(&mut corrupted, &layout, 80, 4, &mut rng);
 
         let recovered = scrub(&corrupted, hash_bytes, &info, level)?;
         assert_eq!(recovered, orig);

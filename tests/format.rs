@@ -1,3 +1,5 @@
+mod common;
+
 use std::{fs::OpenOptions, io::Write, path::PathBuf};
 
 use anyhow::Result;
@@ -9,6 +11,7 @@ use carbonado::{
     filepack, scrub, scrub_outboard,
     structs::{Encoded, OutboardEncoded},
 };
+use common::format_matrix::ALL_FORMAT_LEVELS;
 use log::{debug, info, trace};
 use rand::RngCore;
 use wasm_bindgen_test::wasm_bindgen_test_configure;
@@ -195,17 +198,22 @@ fn scrub_specific_errors() -> Result<()> {
     Ok(())
 }
 
-// Test outboard roundtrips for public formats + c# commitment in keyed bao (different c produce different roots).
-// Expanded per review: all public levels incl Zfec-only, 0-byte, error cases, OutboardEncoded, filepack.
+// Outboard roundtrip for all 16 formats (c0–c15) + c# commitment, 0-byte, and error paths.
 #[test]
 fn outboard_and_keyed_c_number() -> Result<()> {
     let _ = pretty_env_logger::try_init();
-    let mut key = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut key);
+    const PUBLIC_MASTER: [u8; 32] = [0u8; 32];
     let input = b"outboard test payload for bare + sidecar verification and c# binding";
 
-    // all public levels (0/2/4/6/8/10/12/14) for outboard
-    for &level in &[0u8, 2, 4, 6, 8, 10, 12, 14] {
+    // All 16 format levels (c0–c15): zero master for public, random for encrypted.
+    for &level in &ALL_FORMAT_LEVELS {
+        let key = if level & 1 != 0 {
+            let mut k = [0u8; 32];
+            rand::thread_rng().fill_bytes(&mut k);
+            k
+        } else {
+            PUBLIC_MASTER
+        };
         let oenc: OutboardEncoded = encode_outboard(&key, input, level)?;
         let (main, bao_ob, fec_par, h, ei) = (
             oenc.main,
@@ -214,7 +222,6 @@ fn outboard_and_keyed_c_number() -> Result<()> {
             oenc.hash,
             oenc.info,
         );
-        let _ = (main.len(), input.len());
         if (level & 0b100) != 0 {
             assert!(
                 bao_ob.is_some(),
@@ -222,7 +229,26 @@ fn outboard_and_keyed_c_number() -> Result<()> {
                 level
             );
         }
-        // decode outboard roundtrip (uses correct padding from ei)
+        if (level & 0b1000) != 0 {
+            assert!(
+                fec_par.is_some(),
+                "zfec bit requires parity sidecar for level {}",
+                level
+            );
+        }
+        if (level & 0b1) != 0 {
+            assert!(
+                !main.starts_with(carbonado::constants::MAGICNO),
+                "encrypted outboard main must be bare ciphertext for c{}",
+                level
+            );
+        } else {
+            assert!(
+                !main.starts_with(carbonado::constants::MAGICNO),
+                "public outboard main must be bare (no header prefix) for c{}",
+                level
+            );
+        }
         let rec = decode_outboard(
             &key,
             h.as_bytes(),
@@ -235,11 +261,11 @@ fn outboard_and_keyed_c_number() -> Result<()> {
         assert_eq!(rec, input, "outboard roundtrip for c{}", level);
     }
 
-    // 0-byte input
+    // 0-byte input (public c4, zero master)
     let empty: &[u8] = &[];
-    let o0 = encode_outboard(&key, empty, 4)?;
+    let o0 = encode_outboard(&PUBLIC_MASTER, empty, 4)?;
     let rec0 = decode_outboard(
-        &key,
+        &PUBLIC_MASTER,
         o0.hash.as_bytes(),
         &o0.main,
         o0.bao_outboard.as_deref(),
@@ -249,36 +275,18 @@ fn outboard_and_keyed_c_number() -> Result<()> {
     )?;
     assert_eq!(rec0, empty);
 
-    // c# commitment proven
-    let o4 = encode_outboard(&key, input, 4)?;
-    let o6 = encode_outboard(&key, input, 6)?;
+    // c# commitment proven (public, zero master)
+    let o4 = encode_outboard(&PUBLIC_MASTER, input, 4)?;
+    let o6 = encode_outboard(&PUBLIC_MASTER, input, 6)?;
     assert_ne!(
         o4.hash, o6.hash,
         "different c must yield different keyed roots"
     );
 
-    // encrypted outboard (level 5 = enc + bao): bare main + bao sidecar, embedded nonce in main
-    let oenc_e = encode_outboard(&key, input, 5)?;
-    assert!(
-        oenc_e.bao_outboard.is_some(),
-        "encrypted outboard with bao bit requires sidecar"
-    );
-    assert!(!oenc_e.main.starts_with(carbonado::constants::MAGICNO));
-    let rec_e = decode_outboard(
-        &key,
-        oenc_e.hash.as_bytes(),
-        &oenc_e.main,
-        oenc_e.bao_outboard.as_deref(),
-        oenc_e.fec_parity.as_deref(),
-        oenc_e.info.padding_len,
-        5,
-    )?;
-    assert_eq!(rec_e, input, "encrypted outboard roundtrip c5");
-
-    // error paths: missing sidecars for bao/zfec outboard
-    let o_bao = encode_outboard(&key, input, 4)?; // bao no zfec
+    // error paths: missing sidecars for bao/zfec outboard (public, zero master)
+    let o_bao = encode_outboard(&PUBLIC_MASTER, input, 4)?; // bao no zfec
     let err_bao = decode_outboard(
-        &key,
+        &PUBLIC_MASTER,
         o_bao.hash.as_bytes(),
         &o_bao.main,
         None,
@@ -289,9 +297,9 @@ fn outboard_and_keyed_c_number() -> Result<()> {
     .unwrap_err();
     assert!(matches!(err_bao, CarbonadoError::MissingBaoOutboard));
 
-    let o_z = encode_outboard(&key, input, 8)?; // zfec no bao (public zfec-only)
+    let o_z = encode_outboard(&PUBLIC_MASTER, input, 8)?; // zfec no bao (public zfec-only)
     let err_z = decode_outboard(
-        &key,
+        &PUBLIC_MASTER,
         o_z.hash.as_bytes(),
         &o_z.main,
         None,
@@ -307,7 +315,7 @@ fn outboard_and_keyed_c_number() -> Result<()> {
         if !good_ob.is_empty() {
             good_ob[0] ^= 0xff;
             let err_verify = decode_outboard(
-                &key,
+                &PUBLIC_MASTER,
                 o4.hash.as_bytes(),
                 &o4.main,
                 Some(good_ob.as_slice()),

@@ -4,8 +4,8 @@ mod common;
 
 use anyhow::Result;
 use carbonado::{
-    decode, decode_outboard, encode, encode_outboard, error::CarbonadoError, scrub,
-    scrub_outboard, structs::Encoded,
+    decode, decode_outboard, encode, encode_outboard, error::CarbonadoError, scrub, scrub_outboard,
+    structs::Encoded,
 };
 use common::corruption::{flip_byte, InboardShardLayout};
 use common::format_matrix::{bao_zfec_levels, format_label, public_zfec_levels};

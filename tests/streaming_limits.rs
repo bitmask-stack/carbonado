@@ -10,7 +10,7 @@ use std::io::Cursor;
 
 use carbonado::constants::FEC_M;
 use carbonado::stream::fec::{encode_inboard_buffer, FecInboardEncoder};
-use carbonado::stream::{stream_encode_buffer, stream_decode_buffer};
+use carbonado::stream::{stream_decode_buffer, stream_encode_buffer};
 
 /// Inboard encode currently stages the full pre-FEC body before `encode_inboard_buffer`.
 /// Peak memory is O(input) per segment, not O(stripe).
@@ -50,15 +50,12 @@ fn bao_zfec_encode_root_depends_on_full_staged_body() {
     let (body, hash1, info1) = stream_encode_buffer(&[0u8; 32], input, 12).expect("encode");
     let (body2, hash2, _) = stream_encode_buffer(&[0u8; 32], input, 12).expect("re-encode");
     assert_eq!(body, body2);
-    assert_eq!(hash1, hash2, "deterministic keyed root requires full body hash tree");
-    let dec = stream_decode_buffer(
-        &[0u8; 32],
-        hash1.as_bytes(),
-        &body,
-        info1.padding_len,
-        12,
-    )
-    .expect("decode");
+    assert_eq!(
+        hash1, hash2,
+        "deterministic keyed root requires full body hash tree"
+    );
+    let dec = stream_decode_buffer(&[0u8; 32], hash1.as_bytes(), &body, info1.padding_len, 12)
+        .expect("decode");
     assert_eq!(dec, input);
 }
 
@@ -66,7 +63,10 @@ fn bao_zfec_encode_root_depends_on_full_staged_body() {
 /// shards — inherently serial per archive. Document expected shard count.
 #[test]
 fn fec_stripe_shard_count_is_eight() {
-    assert_eq!(FEC_M, 8, "RS 4/8 model: 8 shards per stripe (4 data + 4 parity)");
+    assert_eq!(
+        FEC_M, 8,
+        "RS 4/8 model: 8 shards per stripe (4 data + 4 parity)"
+    );
 }
 
 /// Aspirational: when streaming decode avoids full-body buffer, this bound should tighten.
@@ -76,8 +76,7 @@ fn fec_stripe_shard_count_is_eight() {
 fn stream_decode_should_not_materialize_full_body() {
     let size = 8 * 1024 * 1024;
     let data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
-    let (encoded, hash, info) =
-        stream_encode_buffer(&[0u8; 32], &data, 14).expect("encode");
+    let (encoded, hash, info) = stream_encode_buffer(&[0u8; 32], &data, 14).expect("encode");
     let _decoded =
         stream_decode_buffer(&[0u8; 32], hash.as_bytes(), &encoded, info.padding_len, 14)
             .expect("decode");
