@@ -143,7 +143,7 @@ fn header_rejects_bad_magic() -> Result<()> {
     Ok(())
 }
 
-/// Exercise specific scrub errors for Zfec formats: ScrubRequiresBao for no-Bao Zfec (9/11 etc),
+/// Exercise specific scrub errors for Zfec formats: ScrubRequiresVerification for no-Bao Zfec (9/11 etc),
 /// and InvalidScrubbedHash for irrecoverable (exercises error paths unconditionally).
 #[test]
 fn scrub_specific_errors() -> Result<()> {
@@ -157,22 +157,22 @@ fn scrub_specific_errors() -> Result<()> {
     let mut key = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut key);
 
-    // Levels 9,11 = Encrypted?+Zfec (no Bao) -> scrub must return ScrubRequiresBao
+    // Levels 9,11 = Encrypted?+Zfec (no Bao) -> scrub must return ScrubRequiresVerification
     for &level in &[9u8, 11] {
         let Encoded(e, h, ei) = encode(&key, input, level)?;
         let err = scrub(&e, h.as_bytes(), &ei, level).unwrap_err();
         assert!(
-            matches!(err, CarbonadoError::ScrubRequiresBao),
-            "level {} (Zfec no Bao) must error ScrubRequiresBao",
+            matches!(err, CarbonadoError::ScrubRequiresVerification),
+            "level {} (Zfec no Bao) must error ScrubRequiresVerification",
             level
         );
     }
 
-    // Level 8/10 also no bao zfec (non E), same
+    // Level 8/10 also no bao fec (non E), same
     for &level in &[8u8, 10] {
         let Encoded(e, h, ei) = encode(&key, input, level)?;
         let err = scrub(&e, h.as_bytes(), &ei, level).unwrap_err();
-        assert!(matches!(err, CarbonadoError::ScrubRequiresBao));
+        assert!(matches!(err, CarbonadoError::ScrubRequiresVerification));
     }
 
     // For a Bao+Zfec, make irrecoverable (>4 shards) -> InvalidScrubbedHash
@@ -217,7 +217,7 @@ fn outboard_and_keyed_c_number() -> Result<()> {
         let oenc: OutboardEncoded = encode_outboard(&key, input, level)?;
         let (main, bao_ob, fec_par, h, ei) = (
             oenc.main,
-            oenc.bao_outboard,
+            oenc.verification_outboard,
             oenc.fec_parity,
             oenc.hash,
             oenc.info,
@@ -232,7 +232,7 @@ fn outboard_and_keyed_c_number() -> Result<()> {
         if (level & 0b1000) != 0 {
             assert!(
                 fec_par.is_some(),
-                "zfec bit requires parity sidecar for level {}",
+                "fec bit requires parity sidecar for level {}",
                 level
             );
         }
@@ -268,7 +268,7 @@ fn outboard_and_keyed_c_number() -> Result<()> {
         &PUBLIC_MASTER,
         o0.hash.as_bytes(),
         &o0.main,
-        o0.bao_outboard.as_deref(),
+        o0.verification_outboard.as_deref(),
         o0.fec_parity.as_deref(),
         o0.info.padding_len,
         4,
@@ -283,8 +283,8 @@ fn outboard_and_keyed_c_number() -> Result<()> {
         "different c must yield different keyed roots"
     );
 
-    // error paths: missing sidecars for bao/zfec outboard (public, zero master)
-    let o_bao = encode_outboard(&PUBLIC_MASTER, input, 4)?; // bao no zfec
+    // error paths: missing sidecars for bao/fec outboard (public, zero master)
+    let o_bao = encode_outboard(&PUBLIC_MASTER, input, 4)?; // bao no fec
     let err_bao = decode_outboard(
         &PUBLIC_MASTER,
         o_bao.hash.as_bytes(),
@@ -295,9 +295,12 @@ fn outboard_and_keyed_c_number() -> Result<()> {
         4,
     )
     .unwrap_err();
-    assert!(matches!(err_bao, CarbonadoError::MissingBaoOutboard));
+    assert!(matches!(
+        err_bao,
+        CarbonadoError::MissingVerificationOutboard
+    ));
 
-    let o_z = encode_outboard(&PUBLIC_MASTER, input, 8)?; // zfec no bao (public zfec-only)
+    let o_z = encode_outboard(&PUBLIC_MASTER, input, 8)?; // fec no bao (public fec-only)
     let err_z = decode_outboard(
         &PUBLIC_MASTER,
         o_z.hash.as_bytes(),
@@ -311,7 +314,7 @@ fn outboard_and_keyed_c_number() -> Result<()> {
     assert!(matches!(err_z, CarbonadoError::MissingFecParity));
 
     // tampered sidecar (flip byte in a real ob if present) -> verification error (strict)
-    if let Some(mut good_ob) = o4.bao_outboard.clone() {
+    if let Some(mut good_ob) = o4.verification_outboard.clone() {
         if !good_ob.is_empty() {
             good_ob[0] ^= 0xff;
             let err_verify = decode_outboard(
@@ -386,7 +389,7 @@ fn file_outboard_high_level_bare_and_header() -> Result<()> {
         assert_eq!(oenc.info.bytes_verifiable, oenc.main.len() as u32);
         if (level & 0b100) != 0 {
             assert!(
-                oenc.bao_outboard.is_some(),
+                oenc.verification_outboard.is_some(),
                 "bao requires sidecar in file outboard c{}",
                 level
             );
@@ -399,7 +402,7 @@ fn file_outboard_high_level_bare_and_header() -> Result<()> {
             hdr.hash.as_bytes(),
             Some(&hbytes),
             &oenc.main,
-            oenc.bao_outboard.as_deref(),
+            oenc.verification_outboard.as_deref(),
             oenc.fec_parity.as_deref(),
             oenc.info.padding_len,
             level,
@@ -416,7 +419,7 @@ fn file_outboard_high_level_bare_and_header() -> Result<()> {
             oenc.hash.as_bytes(),
             None,
             &oenc.main,
-            oenc.bao_outboard.as_deref(),
+            oenc.verification_outboard.as_deref(),
             oenc.fec_parity.as_deref(),
             oenc.info.padding_len,
             level,
@@ -439,7 +442,7 @@ fn file_outboard_high_level_bare_and_header() -> Result<()> {
         o0.hash.as_bytes(),
         h0_bytes.as_deref(),
         &o0.main,
-        o0.bao_outboard.as_deref(),
+        o0.verification_outboard.as_deref(),
         o0.fec_parity.as_deref(),
         o0.info.padding_len,
         4,
@@ -459,7 +462,7 @@ fn file_outboard_high_level_bare_and_header() -> Result<()> {
     assert!(he_opt.is_some());
     let hdr_e = he_opt.unwrap();
     assert!(
-        oe.bao_outboard.is_some(),
+        oe.verification_outboard.is_some(),
         "encrypted file outboard requires bao sidecar for c5"
     );
     assert!(
@@ -477,7 +480,7 @@ fn file_outboard_high_level_bare_and_header() -> Result<()> {
         hdr_e.hash.as_bytes(),
         Some(&hbytes),
         &oe.main,
-        oe.bao_outboard.as_deref(),
+        oe.verification_outboard.as_deref(),
         oe.fec_parity.as_deref(),
         oe.info.padding_len,
         5,
@@ -490,7 +493,7 @@ fn file_outboard_high_level_bare_and_header() -> Result<()> {
         oe.hash.as_bytes(),
         None,
         &oe.main,
-        oe.bao_outboard.as_deref(),
+        oe.verification_outboard.as_deref(),
         oe.fec_parity.as_deref(),
         oe.info.padding_len,
         5,
@@ -515,7 +518,7 @@ fn file_outboard_high_level_bare_and_header() -> Result<()> {
     )
     .unwrap_err();
     assert!(
-        matches!(err, CarbonadoError::MissingBaoOutboard),
+        matches!(err, CarbonadoError::MissingVerificationOutboard),
         "specific missing error, not generic"
     );
 
@@ -528,12 +531,12 @@ fn scrub_outboard_bare_sidecars() -> Result<()> {
     let _ = pretty_env_logger::try_init();
     let mut key = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut key);
-    let input = b"scrub outboard TDD: bare main + bao_ob + fec_par for public zfec+bao";
+    let input = b"scrub outboard TDD: bare main + bao_ob + fec_par for public fec+bao";
 
     // Use level 12 = Bao + Zfec (public) ; outboard bare + sidecars
     let oenc: OutboardEncoded = encode_outboard(&key, input, 12)?;
     let bare_main = oenc.main;
-    let bao_ob = oenc.bao_outboard.clone().expect("bao sidecar");
+    let bao_ob = oenc.verification_outboard.clone().expect("bao sidecar");
     let fec_par = oenc.fec_parity.clone().expect("fec parity");
     let h = oenc.hash;
     let ei = oenc.info.clone();
@@ -610,7 +613,7 @@ fn file_outboard_metadata_roundtrip_and_mac_binding() -> Result<()> {
         oenc.hash.as_bytes(),
         Some(&hdr.try_to_vec()?),
         &oenc.main,
-        oenc.bao_outboard.as_deref(),
+        oenc.verification_outboard.as_deref(),
         oenc.fec_parity.as_deref(),
         oenc.info.padding_len,
         4,
@@ -628,7 +631,7 @@ fn file_outboard_metadata_roundtrip_and_mac_binding() -> Result<()> {
         oenc.hash.as_bytes(),
         Some(&bad_hdr_bytes),
         &oenc.main,
-        oenc.bao_outboard.as_deref(),
+        oenc.verification_outboard.as_deref(),
         None,
         oenc.info.padding_len,
         4,

@@ -37,13 +37,18 @@ pub fn decode_bao_hash(hash: &[u8]) -> Result<Hash, CarbonadoError> {
 /// Kept specific to FEC_K*SLICE (not generalized) to preserve alignment invariant for
 /// 4KB slices + 4-shard RS striping + 4KB Bao leaf groups.
 pub fn calc_padding_len(input_len: usize) -> (u32, u32) {
-    let input_len = input_len as f64;
-    let overlap_constant = SLICE_LEN as f64 * FEC_K as f64;
-    let target_size = (input_len / overlap_constant).ceil() * overlap_constant;
-    let padding_len = target_size - input_len;
-    let chunk_size = target_size / FEC_K as f64;
-    trace!("input_len: {input_len:.0}, target_size: {target_size:.0}, padding_len: {padding_len:.0}, chunk_size: {chunk_size:.0}");
-    (padding_len as u32, chunk_size as u32)
+    if input_len == 0 {
+        return (0, 0);
+    }
+    let stripe = (SLICE_LEN as u64) * (FEC_K as u64);
+    let input = input_len as u64;
+    let target_size = input.div_ceil(stripe) * stripe;
+    let padding_len = (target_size - input) as u32;
+    let chunk_size = (target_size / FEC_K as u64) as u32;
+    trace!(
+        "input_len: {input}, target_size: {target_size}, padding_len: {padding_len}, chunk_size: {chunk_size}"
+    );
+    (padding_len, chunk_size)
 }
 
 #[derive(Clone, Debug)]

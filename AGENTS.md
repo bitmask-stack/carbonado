@@ -2,11 +2,16 @@
 
 **Project:** Carbonado (bitmask-stack/carbonado)  
 **Mission:** Apocalypse-resistant archival format for consensus-critical data, with a focus on Bitcoin quantum resistance.  
-**Current Status (as of 2026-07):** First public **2.0.0** release. Symmetric v2 stack (`CARBONADO20\n`, AES-256-CTR + HMAC-SHA512 EtM) stable. **P1:** `SLICE_LEN=4096`, keyed 4 KiB Bao groups, seekable slice verify (`verify_slice_inboard_seekable`, `verify_slice_outboard`). **P2:** streaming-first encode/decode (`encode_stream`, `stream_encode_*`, `stream_decode_*`). **P3:** segment sharding (`encode_shard_stream`, `decode_shards_stream`, multi-segment `FilepackEntry`). **P4:** Adamantine 1.0 directory archives (`encode_directory` / `decode_directory`, rkyv `FilepackManifest` v2, inboard c14/c15 catalog, heterogeneous bare segment mains, centralized Bao bundle; see §7.1). FEC: reed-solomon-erasure RS 4/8. Full high-level `file::` outboard + `scrub_outboard` + low-level complete. All core invariants upheld. §11 stabilization plans completed (see [CHANGELOG.md](CHANGELOG.md)).
+**Current Status (as of 2026-07):** Symmetric v2 stack (`CARBONADO20\n`, AES-256-CTR + HMAC-SHA512 EtM) stable. **P1:** `SLICE_LEN=4096`, keyed 4 KiB Bao groups, seekable slice verify. **P2:** streaming-first encode/decode. **P3:** segment sharding. **P4:** Adamantine 1.0 directory archives (see §7.1). FEC: reed-solomon-erasure RS 4/8. Outboard + scrub complete.
 
-**Versioning note (2.0.0 release)**: The crate is at **2.0.0** — symmetric format stable under `CARBONADO20\n` magic, with streaming, seekable slices, and sharding shipped in this release. Directory archives were redesigned to Adamantine 1.0 in the unreleased **2.1.0** line (§7.1; clean break from dev `ADAMANTINE2\n`). The public API (EncodeInfo, Header, outboard variants, stream module, etc.) is stable under semver. The previous "fluid" period during the v2 overhaul (when at 0.7.x) has ended; see section 11 for history. See [CHANGELOG.md](CHANGELOG.md) for release notes.
+**Unified streaming stack (three independent axes — do not conflate):**
+| Axis | Status |
+|------|--------|
+| **Streaming / memory** | Phase 1 fused sync path shipped (`SeekableSpool`, streaming EtM, stripe FEC). **M1:** non-FEC verification (c6) uses `SeekWriteAt` (O(chunk) RAM); FEC verification retains O(FEC body) shard buffers under segment-wide RS geometry (`finish_into` avoids a second full logical `Vec`). Residuals: FEC O(segment body), O(sidecar) outboard verify, async encoded-body spool. See [doc/STREAMING_PARALLELISM.md](doc/STREAMING_PARALLELISM.md). **Not** the same as Bao slice/stream verification. |
+| **Concurrency** | Phase 2 optional `async` / `stream_decode_async` (disk spool bridge; WASM `NotImplemented`). |
+| **Parallelism** | Phase 3 `parallel` feature (default on): `std::thread::scope` RS parity; WASM serial at runtime. No rayon; Tokio is not the CPU-parallel story. |
 
-See section 11 (v2.0 Plans, completed) for the stabilization steps (2.0.0 + CARBONADO20\n + FEC + full in/outboard). Outboard (file:: + scrub_outboard) is complete.
+**PQC:** `bitcoinpqc` 0.4, SLH-DSA-**SHA2**-128s sidecars only (`SLH_DSA_SHA2_128S`). Dev SHAKE-128s sidecars are incompatible — re-sign.
 
 ---
 
@@ -56,9 +61,9 @@ These rules were added because the same misunderstandings have caused significan
 3. **The `Header` Replacement Rule** (see expanded section below)
 
 4. **Never Claim Completion While Spec-Mandated Components Are Stubs**
-   - The core of the new design consists of the symmetric primitives (AES-256-CTR + full HMAC-SHA512 EtM with domain-separated subkeys) plus **SLH-DSA sidecars via libbitcoinpqc** for post-quantum signatures. SLH-DSA is asymmetric by nature and is deliberately kept outside the main (symmetric) container as sidecars only. Key derivation from passphrases (e.g. Argon2id) is the caller's responsibility before supplying a 32-byte master key.
+   - The core of the new design consists of the symmetric primitives (AES-256-CTR + full HMAC-SHA512 EtM with domain-separated subkeys) plus **SLH-DSA sidecars via bitcoinpqc** for post-quantum signatures. SLH-DSA is asymmetric by nature and is deliberately kept outside the main (symmetric) container as sidecars only. Key derivation from passphrases (e.g. Argon2id) is the caller's responsibility before supplying a 32-byte master key.
    - Do not mark work "final", "complete", or run "end-to-end verification" passes while any of those pillars remain placeholder functions or comments only.
-   - If libbitcoinpqc is listed as a dependency and the spec calls for SLH-DSA sidecars, real functions + minimal wiring + tests are required before any "done" language.
+   - If bitcoinpqc is listed as a dependency and the spec calls for SLH-DSA sidecars, real functions + minimal wiring + tests are required before any "done" language.
    - When in doubt, grep for `NotImplemented`, `slh_`, `placeholder`, and "stub" before claiming progress.
 
 5. **Production Ready Bar (Zero Tolerance for Shortcuts)**
@@ -121,14 +126,14 @@ The overarching principle is a **clean cryptographic break** (see §1). v1 ECIES
 | Key derivation       | ECDH + direct splits                    | HMAC-SHA512 BIP-32-style with domain labels (`aes-ctr`, `etm-hmac`, `header-auth`) | PRF security, domain separation, key independence. No simple splits. All key material from one 32/64B master. |
 | Nonce / IV           | GCM IV (often content-derived or small) | 16B random from getrandom (high-level: 1 per archive) | CTR requires unique nonce per key (catastrophic reuse otherwise). Random + getrandom is simplest correct CSPRNG usage. |
 | Header               | ~160B with secp pubkey + Schnorr sig   | 177B: MAGIC + payload_nonce + header_mac (64B) + bao hash + slh_pk + format + u32 chunk + lengths + meta | Separate header_mac (header-auth subkey) for integrity of public metadata. No secret key material. slh_pk moved to header (sig stays sidecar). |
-| Post-Quantum sigs    | None (or ad-hoc)                        | SLH-DSA (SHAKE-128s) **sidecars only** (`<hash>.cXX.slh`) | Sidecars preserve content-addressing and avoid bloat. libbitcoinpqc dogfooding per Surmount/BIP-360 mission. |
+| Post-Quantum sigs    | None (or ad-hoc)                        | SLH-DSA (SHA2-128s) **sidecars only** (`<hash>.cXX.slh`) | Sidecars preserve content-addressing and avoid bloat. bitcoinpqc 0.4 dogfooding per Surmount/BIP-360 mission. |
 | Forward Error Correction | zfec 4/8 (non-deterministic scrub for >~8KB, vulnerable to hits across all 8 chunks) | reed-solomon-erasure (RS 4/8): deterministic encode, reproducible scrub, better tolerance for distributed corruption ("chaos rays") while keeping 4/8 model | RS (BCH subclass) for pure determinism (critical for scrub re-encode + bao hash compare) and stronger erasure properties against partial corruption in every shard. Kept 4/8 for storage model ("application RAID"), alignment with 4 KiB slices/Bao leaves, and user intuition. |
 | Verifiability (Bao)  | bao 0.12/0.13 (1KB groups)             | bao-tree fork: 4KB groups (BlockSize log=2) + keyed on format byte | 4KB aligns with disk sectors + reduces tree overhead. Keyed roots make Bao hash multi-dimensional (commits to Format pipeline for markets). |
 | Slice / chunk counts | u16 limits (~64MiB FEC cap)            | u32 (theoretical ~4GiB+ per segment)               | Removed artificial caps for large archives. P1: `SLICE_LEN=4096` (one slice = one 4 KiB Bao leaf). |
 | Passphrase KDF       | Argon2id wrapper inside library        | Removed; caller responsibility (Argon2id recommended outside) | Keeps container security contract simple. Master key is 32/64B high-entropy material. |
 | Magic number         | CARBONADO01 or similar (ECIES)         | CARBONADO20\n (stable v2); 02 was dev transitional | Signals official stabilized 2.0 format. Old magic → clear external migration error. |
 | Version              | Pre-0.7 (ECIES)                        | 2.0.0 (post-FEC + docs stabilization)              | Marks end of fluid dev period. API now stable for semver. |
-| Dependencies         | ecies + secp + ...                      | aes+ctr+hmac+sha2 + reed-solomon-erasure + bao-tree fork + libbitcoinpqc (optional pqc) | Clean break removal of ECIES-only crates. Hardware-accel friendly. |
+| Dependencies         | ecies + secp + ...                      | aes+ctr+hmac+sha2 + reed-solomon-erasure + bao-tree fork + bitcoinpqc (optional pqc) | Clean break removal of ECIES-only crates. Hardware-accel friendly. |
 | Optional hybrid layer | (the only encryption was the ECIES hybrid) | Pure symmetric is default. Added *optional* inner secp256k1-ECDH + ChaCha20-Poly1305 AEAD wrapped by outer AES-CTR + HMAC-EtM (via new hybrid_* and ecc_aead_* APIs) | "Maximal paranoia" defense-in-depth: different cipher families, different key-gen (ECDH+derive vs pure HMAC labels), HMAC + AEAD. See dedicated rationale below. Pure sym path and Encrypted bit semantics unchanged for normal use. secp here is *not* for the main container (no pubkeys in headers etc.). |
 
 #### Detailed Decision Rationales
@@ -185,13 +190,13 @@ The overarching principle is a **clean cryptographic break** (see §1). v1 ECIES
 - See CHANGELOG.md and §7 CHIPs tracker for RS FEC rationale and status.
 
 **Bao Verifiability**
-- 1KB fixed groups → 4KB (BlockSize log=2) + keyed on format byte ("carbonado-v2/bao" + format).
+- 1KB fixed groups → 4KB (BlockSize log=2) + keyed on format byte ("carbonado-v2/verification" + format).
 - **Why**: 4KB = disk sector friendly, lower tree overhead for small/large files. Keyed roots make outer hash commit to the exact Format pipeline (multi-dimensional naming useful for markets: encrypted vs public variants produce distinguishable roots).
 - Root still over body only; header_mac binds metadata.
 - See "Keyed Bao idea" and 2.1.5.
 
 **SLH-DSA Post-Quantum Signatures**
-- v2: libbitcoinpqc (FIPS-205 SHAKE-128s), **sidecars only** (`<hash>.cXX.slh`), 32B public key stored in main Header.
+- v2: bitcoinpqc (FIPS-205 SLH-DSA-SHA2-128s), **sidecars only** (`<hash>.cXX.slh`), 32B public key stored in main Header.
 - **Why**: Sidecars keep per-segment containers small and content-addressable. Sign the Bao root of the *processed container* (multi-dimensional). Matches Surmount quantum-resistance mission (Grover-resistant symmetric + hash-based PQ sigs).
 - Entropy: 128B+ for keygen. `SecretKey` zeroizes.
 
@@ -263,7 +268,7 @@ It is the 16-byte AES-CTR nonce/IV for the *high-level symmetric encryption path
     - `ecc-chacha-poly` (hybrid: ECDH shared secret as PRF input)
     - `slh-dsa-seed`, `slh-dsa-seed-2` (convenience `slh_sign` only; not container security)
   - Domain separation via the `carbonado-v2/` prefix + explicit label prevents cross-use.
-  - Keyed Bao uses `blake3::derive_key("carbonado-v2/bao", &[format])` — **not** `derive_subkey`.
+  - Keyed Bao uses `blake3::derive_key("carbonado-v2/verification", &[format])` — **not** `derive_subkey`.
 
 **Note on HMAC-SHA512 choice (documented 2026 session)**:  
 With a 256-bit (32-byte) master key, the security of subkey derivation is capped at ~256 bits regardless of whether HMAC-SHA256 or HMAC-SHA512 is used (PRF security follows the entropy of the input key). HMAC-SHA512 was retained for output size convenience (nice 64-byte results) and historical alignment with the "full HMAC-SHA512" mandate from the original design goals, not because it provides higher security than SHA256 would at this entropy level. Future minimality audits could consider HMAC-SHA256 if 32-byte tags were ever acceptable.
@@ -286,12 +291,13 @@ With a 256-bit (32-byte) master key, the security of subkey derivation is capped
 
 ### 2.3 Post-Quantum Signatures (SLH-DSA / SPHINCS+)
 
-- Provided exclusively via the `libbitcoinpqc` crate (FIPS-205 SLH-DSA-SHAKE-128s parameter set).
+- Provided exclusively via the `bitcoinpqc` crate (FIPS-205 **SLH-DSA-SHA2-128s** parameter set; `Algorithm::SLH_DSA_SHA2_128S`).
 - **Only as sidecars**. Never embedded inside per-segment `.c14d` / `.c15` Carbonado containers.
+- **Parameter-set note:** Wire sizes match SHAKE-128s (32 B pk / 64 B sk / 7856 B sig) but the algorithms are **cryptographically incompatible**. Any sidecars produced under older SHAKE-128s builds must be re-signed under SHA2-128s.
 - Intended use: signing manifests, catalogs, checkpoints, or high-level collections of Carbonado files.
 - Sidecar format (updated per 2026-05-30 design clarification):
   - 4 bytes: `b"SLH1"` (versioned magic for this sidecar scheme).
-  - 7856 bytes: SLH-DSA signature (raw, SHAKE-128s) **only** — the public key is no longer duplicated here.
+  - 7856 bytes: SLH-DSA signature (raw, SHA2-128s) **only** — the public key is no longer duplicated here.
   - The 32-byte SLH-DSA public key **must** be stored in the main Carbonado `Header.slh_public_key` field of the referenced archive segment (or provided out-of-band alongside the signature).
   - The signature is over: the 32-byte Bao root hash of the target Carbonado container (or a higher-level manifest/catalog structure).
 
@@ -308,8 +314,8 @@ This is why the signature should not be viewed as a simple "CID substitute" for 
 
 Higher-level systems that want plaintext-level content addressing are expected to layer their own naming scheme on top (e.g. via manifests or catalogs that are themselves signed).
   - Optional future extension: include a domain string or the full filename for binding.
-- Key sizes (SLH_DSA_128S): 32B public, 64B secret, 7856B signature.
-- Entropy for keygen: minimum 128 bytes of fresh randomness passed to `libbitcoinpqc::generate_keypair`.
+- Key sizes (SLH-DSA-SHA2-128s): 32B public, 64B secret, 7856B signature.
+- Entropy for keygen: minimum 128 bytes of fresh randomness passed to `bitcoinpqc::generate_keypair`.
 - SLH-DSA operations must zeroize secret key material on drop (the crate's `SecretKey` already does this).
 - In the library: thin, well-documented wrappers in `crypto.rs` (`slh_dsa_*` functions) + re-exports of the necessary `bitcoinpqc` types for advanced callers. No automatic signing inside `file::encode`.
 
@@ -327,13 +333,13 @@ This design keeps the container format's security contract simple and explicit: 
 
 - `NotImplemented` must only be used for genuinely unimplemented optional features.
 - All real crypto failures (bad key length, authentication failure, PQC errors, randomness failure, KDF failure) must have specific, actionable `CarbonadoError` variants.
-- PQC errors from `libbitcoinpqc::PqcError` are mapped to dedicated variants (added 2026-05-30).
+- PQC errors from `bitcoinpqc::PqcError` are mapped to dedicated variants (added 2026-05-30).
 
 ### 2.6 Hardware Acceleration & Implementation Notes
 
 - AES path: relies on the `aes` crate (AES-NI / VAES when `target-cpu=native` or appropriate target features).
 - HMAC-SHA512: relies on `sha2` crate (SHA-NI acceleration on supported x86 CPUs).
-- SLH-DSA (SHAKE-128s): acceleration is limited to general CPU performance and the underlying Keccak implementation; not SHA-NI (SHAKE is Keccak-based).
+- SLH-DSA (SHA2-128s): acceleration follows the host SHA-2 implementation in `bitcoinpqc` / underlying C; not tied to Carbonado's AES-NI/VAES path.
 - All production benchmarks must be run with `RUSTFLAGS="-C target-cpu=native"`.
 
 ### 2.7 Invariants That Must Never Be Violated
@@ -465,7 +471,7 @@ All HMAC-SHA512 subkeys use: `HMAC-SHA512(master, "carbonado-v2/" || label)` →
 
 | Context string | KDF | Usage |
 |----------------|-----|-------|
-| `carbonado-v2/bao` | `blake3::derive_key("carbonado-v2/bao", &[format_byte])` | 32-byte keyed-Bao BLAKE3 key; public API: `crypto::carbonado_bao_key` |
+| `carbonado-v2/verification` | `blake3::derive_key("carbonado-v2/verification", &[format_byte])` | 32-byte keyed-Bao BLAKE3 key; public API: `crypto::carbonado_verification_key` |
 
 **Payload EtM domain (not a subkey label):**
 
@@ -494,7 +500,7 @@ Implemented in `crypto.rs` (`symmetric_*`) and `stream/crypto_stream.rs` (stream
 ### Keyed Bao KDF (normative summary)
 
 ```text
-bao_key = blake3::derive_key("carbonado-v2/bao", &[format_byte])
+bao_key = blake3::derive_key("carbonado-v2/verification", &[format_byte])
 root    = keyed BLAKE3 Merkle root over processed body (4 KiB leaves, `BAO_BLOCK_SIZE`)
 ```
 
@@ -515,7 +521,7 @@ Optional defense-in-depth APIs in `crypto.rs` (`ecc_aead_*`, `hybrid_*`):
 - File naming convention: `<bao-root-hex>.cXX.slh`
 - On-disk layout (7860 bytes total):
   - 4 bytes: `b"SLH1"` (`SLH1_MAGIC`)
-  - 7856 bytes: raw SLH-DSA-SHAKE-128s signature (`SLH1_SIGNATURE_LEN`)
+  - 7856 bytes: raw SLH-DSA-SHA2-128s signature (`SLH1_SIGNATURE_LEN`)
 - Public key **not** in sidecar — stored in `Header.slh_public_key` (32 bytes).
 - Library helpers: `crypto::write_slh_sidecar`, `crypto::read_slh_sidecar`.
 
@@ -665,7 +671,7 @@ These invariants are more important than any particular performance optimization
 ### 2.1.6 Quantum Resistance Posture
 
 - Symmetric primitives (AES-256-CTR + HMAC-SHA512): Grover gives only quadratic speedup → still strong (~128-bit security).
-- Post-quantum signatures: Provided via `libbitcoinpqc` (SLH-DSA / SPHINCS+) as **sidecar** signatures only. This matches the project's broader Bitcoin quantum-resistance mission (BIP-360 related work).
+- Post-quantum signatures: Provided via `bitcoinpqc` (SLH-DSA / SPHINCS+) as **sidecar** signatures only. This matches the project's broader Bitcoin quantum-resistance mission (BIP-360 related work).
 - No attempt is made to make the per-segment encryption itself post-quantum (that would require much larger overhead and different primitives). The design philosophy is "quantum-resistant where it matters most for the Surmount mission" (signatures for long-term authenticity) while keeping the bulk encryption efficient and hardware-accelerated.
 
 ---
@@ -752,7 +758,7 @@ Update this table as work progresses. The real normative text lives in the CHIPs
 
 Implementation is complete in this repository (carbonado 2.1.0 directory redesign). External CHIP normative text drafting is explicitly deferred; behavior below reflects the shipped code. **Clean break:** dev `ADAMANTINE2\n` archives are rejected; nothing was published.
 
-Directory archives use **catalog format c14/c15 only** (public/encrypted). Per-file segments are **heterogeneous** c4/c6 (public) or c5/c7 (encrypted) selected by [`directory/format_policy`](src/directory/format_policy.rs) (`infer` heuristic: compressible → c6/c7, incompressible → c4/c5).
+Directory archives use **catalog format c14/c15 only** (public/encrypted). Per-file segments are **heterogeneous** c12/c14 (public) or c13/c15 (encrypted) selected by [`directory/format_policy`](src/directory/format_policy.rs) (`infer` heuristic: compressible → c14/c15, incompressible → c12/c13). Legacy c4–c7 segment formats are rejected at encode/decode.
 
 **Adamantine wire envelope** (`src/adamantine.rs`):
 - Magic: `ADAMANTINE10\n` (13 bytes; version 1.0 encoded in magic, like `CARBONADO20\n`)
@@ -773,7 +779,7 @@ Offset  Size  Field
 
 **Adamantine payload** (`src/adamantine_payload.rs`):
 ```text
-[u32 LE rkyv_len][rkyv FilepackManifestWire][u32 LE bundle_len][concatenated segment bao_outboard blobs]
+[u32 LE rkyv_len][rkyv FilepackManifestWire][u32 LE bundle_len][per-segment verification_outboard + fec_parity blobs]
 ```
 - DoS caps: `MAX_RKYV_PAYLOAD_LEN`, `MAX_BAO_BUNDLE_LEN`, `MAX_ADAMANTINE_PAYLOAD_LEN`
 - Optional future `u8` bundle version byte documented for streaming; v1 omits it
@@ -781,8 +787,8 @@ Offset  Size  Field
 **FilepackManifest v2** (`src/filepack_manifest.rs`):
 - `FILEPACK_MANIFEST_VERSION = 2`; v1 rejected
 - `format_level` = **catalog only** (c14 or c15); validated on decode
-- `FilepackEntry.segment_format` per entry (c4/c6/c5/c7); encode-time policy checks return `SegmentFormatMismatch`; decode maps wire violations to `InvalidFilepackManifest`
-- `SegmentRef.bao_outboard_offset` / `bao_outboard_len` index into Adam payload bundle
+- `FilepackEntry.segment_format` per entry (c12/c14/c13/c15); encode-time policy checks return `SegmentFormatMismatch`; decode maps wire violations to `InvalidFilepackManifest`
+- `SegmentRef.verification_outboard_offset` / `verification_outboard_len` and `fec_parity_offset` / `fec_parity_len` index into Adam payload bundle (0/0 FEC fields when absent)
 - `catalog_bao_root` **not** in rkyv wire; bound from `.adam.c14`/`.adam.c15` filename via keyed Bao verify
 - `catalog_ots_proof` on API struct only — stored in **COTS file trailer** after inboard catalog bytes (does not affect Bao root)
 - Per-entry `ots_proof` in rkyv when `OtsPolicy.stamp_entries`; `REQUIRE_OTS` flag set when entry stamping enabled
@@ -791,17 +797,19 @@ Offset  Size  Field
 
 **Directory archive layout (fixed v1.0):**
 - **Catalog:** inboard headered `{catalog_root}.adam.c14` or `.adam.c15` (`CARBONADO20\n` + body); no `.out`/`.par`
-- **Segments:** bare mains `{seg_root}.c4`/`.c6`/`.c5`/`.c7` only; Bao outboard centralized in Adam payload bundle
+- **Segments:** bare mains `{seg_root}.c12`/`.c14`/`.c13`/`.c15` only; verification outboard + FEC parity centralized in Adam payload bundle
 - **No** directory `.out`, `.par`, or `.ots` sidecar files
+- **Scrub:** directory segments are FEC-capable (c12–c15). Slice verification + FEC parity from the centralized bundle; `scrub_outboard` recovers corrupt bare mains within the RS 4/8 budget (≤4 shard taints). `MissingFecParity` when `Format::Fec` is set, `main_len > 0`, and `fec_parity_len` is zero (zero-byte mains use empty FEC slice at decode).
+- **Decode extract:** `decode_directory` requires an empty or trusted output tree; see `file::decode_directory` rustdoc (TOCTOU if `outdir` contains symlinks).
 - Catalog optional OTS: `[COTS][u32 LE len][proof]` appended after inboard catalog file bytes
 
 **Directory decode error taxonomy:** reserve `InvalidFilepackManifest` for rkyv wire + semantic validation (including `segment_format` vs catalog encryption mismatches on decode). `SegmentFormatMismatch` is **encode-time only** (policy / `DirectoryEncodeOptions`). Other decode variants: `InvalidAdamantineFlags`, `SegmentMainLenMismatch`, `ContentBlake3Mismatch`, `DirectoryLayoutMismatch` (non-inboard catalog or headered segment mains), `CatalogBaoRootMismatch`, `OtsProofRequired` (entry), `OtsVerificationFailed`, `InvalidOtsProof`.
 
-**Streaming + sharding:** large files shard via `encode_file_segments` / budget in `DirectoryEncodeOptions.segment_plaintext_budget` (default `DEFAULT_SEGMENT_PLAINTEXT_BUDGET`). Segment decode uses `decoding::decode_outboard` with Bao slices from bundle.
+**Streaming + sharding:** large files shard via `encode_file_segments` / budget in `DirectoryEncodeOptions.segment_plaintext_budget` (default `DEFAULT_SEGMENT_PLAINTEXT_BUDGET`). Segment decode uses `decoding::decode_outboard` with verification + FEC parity slices from bundle.
 
 **On-disk naming (directory mode)** — decimal suffixes:
 - Catalog: `{catalog_bao_root_64hex}.adam.c14` or `.adam.c15`
-- Segments: `{segment_bao_root_64hex}.c4`/`.c6`/`.c5`/`.c7` (heterogeneous per file)
+- Segments: `{segment_bao_root_64hex}.c12`/`.c14`/`.c13`/`.c15` (heterogeneous per file)
 
 **Single-file CLI** continues hex suffixes: `{hash}.c{format:02x}` (e.g. `.c0e` for format 14).
 
@@ -907,11 +915,12 @@ This tension is acknowledged but not resolved in the current design. Carbonado i
 
 **Updated post v2.0 outboard + polish (TDD/docs/gate work):**
 
-Remaining open (non-blocking for 2.0 core; documented):
-- WASM + libbitcoinpqc cross-compilation limitations remain (documented, not a code bug in Carbonado itself).
-- Bao crate: Code migrated to use local keyed bao-tree fork (../bao-tree) as default with 4KB chunk groups (BlockSize::from_chunk_log(2) == BAO_BLOCK_SIZE). Keyed roots commit to Format bitmask. `SLICE_LEN=4096`. Seekable APIs in `src/stream/`. Temporary fork until upstream. (See Cargo.toml, constants.rs, src/stream/). CI workflows explicitly checkout the fork on branch 76-keyed-bao; dep uses `validate` feature.
-- reed-solomon-erasure dep: upstream "looking for maintainers"; added Cargo note for periodic re-eval (no runtime issues, det, suitable).
-- (Perf note: inboard `verify_slice` is O(slice) memory but O(N) encoded-byte I/O; outboard slice verify is O(slice) time+memory; scrub pre-check still full `bao()` decode O(N) memory.)
+Remaining open (documented; active work called out):
+- **Pipeline memory residual (hard-break track):** fused encode/decode is O(chunk) spool + O(stripe) FEC encode; non-FEC verification decode is O(chunk) via `SeekWriteAt`; FEC verification decode retains O(FEC body) shard buffers (`FecInboardWriteAt`); outboard verify uses `PostOrderOutboard` + `ReadAt` (O(hash pair) per node); `stream_decode_async` fully spools encoded body to disk. Distinct from Bao **slice** verification (already O(slice) memory). See [doc/STREAMING_PARALLELISM.md](doc/STREAMING_PARALLELISM.md).
+- **WASM:** `cargo clippy --target wasm32-unknown-unknown --no-default-features` is green (CI `lint-wasm`). **wasm32 + `pqc` probe (2026-07-08):** pointing global `CC_wasm32-unknown-unknown` at `libbitcoinpqc-bindings/wasm/clang-wasm32.sh` breaks **`zstd-sys`** (it tries to assemble `huf_decompress_amd64.S` with the wasm clang). Residual is build-env / dep CC scoping — not Carbonado crypto logic. Keep CI wasm lint **no-pqc** until bitcoinpqc (or zstd) wasm build is isolated.
+- Bao crate: Surmount keyed bao-tree fork (`76-keyed-bao`), 4 KiB groups, `default-features = false` (no tokio/fs on wasm). Temporary until upstream.
+- reed-solomon-erasure: upstream "looking for maintainers"; periodic re-eval (no runtime issues).
+- (Perf: inboard `verify_slice` is O(slice) memory but O(N) encoded-byte I/O; outboard slice verify is O(slice) time+memory; scrub pre-check uses `verify_inboard_keyed` with O(1) retained decode memory (S5).)
 
 Addressed in this polish pass (removed from active list):
 - Header::new clippy allow + comments.
@@ -930,7 +939,7 @@ All core cryptographic requirements from the original Surmount spec (symmetric A
 
 Major items completed in this session:
 - Full symmetric v2 stack (AES-256-CTR + 64-byte HMAC-SHA512 EtM, header_mac, subkey derivation). Argon2id passphrase helper removed (callers must derive high-entropy master keys themselves).
-- Real libbitcoinpqc SLH-DSA (keygen/sign/verify + convenience wrappers) as sidecars only
+- Real bitcoinpqc SLH-DSA (keygen/sign/verify + convenience wrappers) as sidecars only
 - SLH-DSA public key moved into main `Header` (signature remains sidecar-only)
 - `chunk_index` widened u8 → u32 in Header + full auth coverage
 - `payload_nonce` semantics fully documented

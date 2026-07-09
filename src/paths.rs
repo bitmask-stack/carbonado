@@ -1,7 +1,7 @@
 //! On-disk artifact path helpers (format/hash parsing, archive layout detection).
 //!
 //! Used by the `carbonado` CLI and [`crate::file::decode_directory`]. Directory archives
-//! use inboard `.adam.c14`/`.adam.c15` catalogs and decimal segment suffixes `c4`–`c7`;
+//! use inboard `.adam.c14`/`.adam.c15` catalogs and decimal segment suffixes `c12`–`c15`;
 //! single-file outboard uses hex `c{fmt:02x}` plus optional `.out`/`.par` sidecars.
 //!
 //! Decimal suffix parsing tries longest match first (`15` down to `0`) so e.g. `.c14` resolves

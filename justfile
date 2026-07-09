@@ -194,8 +194,17 @@ _lint-source:
 lint-wasm:
     cargo clippy --target wasm32-unknown-unknown --no-default-features --features "" -- -D warnings
 
+# Default features (includes `parallel`), serial FEC regression, then full feature matrix.
 test:
+    cargo test
+    cargo test --no-default-features --features "pqc,ots,cli" --test serial_fec_path
     cargo test --all-features
+
+test-serial:
+    cargo test --no-default-features --features "pqc,ots,cli" --test serial_fec_path
+
+test-parallel:
+    cargo test --test parallel_determinism
 
 # Focused smoke: slices, streaming, sharding, bao-tree contract (also in `just test`).
 test-smoke:

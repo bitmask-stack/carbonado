@@ -29,9 +29,11 @@ use std::collections::BTreeMap;
 use rkyv::rancor::Error as RkyvError;
 use rkyv::{Archive, Deserialize, Serialize};
 
+use crate::constants::{Format, FEC_K, FEC_M};
 use crate::directory::format_policy::validate_segment_format_for_catalog;
 use crate::error::CarbonadoError;
 use crate::filepack::{self, FilepackCborEntry, Packed};
+use crate::utils::calc_padding_len;
 
 /// FilepackManifest wire schema version (v2).
 pub const FILEPACK_MANIFEST_VERSION: u32 = 2;
@@ -60,6 +62,12 @@ pub const MAX_RKYV_PAYLOAD_LEN: usize = 16 * 1024 * 1024;
 /// Maximum outboard segments per file entry (DoS guard).
 pub const MAX_SEGMENTS_PER_ENTRY: usize = 10_000;
 
+/// Maximum total segment refs across all entries (DoS guard for bundle validation).
+pub const MAX_TOTAL_SEGMENT_REFS: usize = 1_000_000;
+
+/// Maximum bare segment main bytes (DoS guard; aligned with bundle caps).
+pub const MAX_SEGMENT_MAIN_LEN: u64 = 256 * 1024 * 1024;
+
 /// Reference to one bare segment main shard for a file entry.
 #[derive(Archive, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[rkyv(derive(Debug, PartialEq, Eq))]
@@ -70,10 +78,14 @@ pub struct SegmentRef {
     pub chunk_index: u32,
     /// Length of the bare main artifact for this segment.
     pub main_len: u64,
-    /// Byte offset of this segment's Bao outboard blob in the Adamantine payload bundle.
-    pub bao_outboard_offset: u32,
-    /// Length of this segment's Bao outboard blob in the Adamantine payload bundle.
-    pub bao_outboard_len: u32,
+    /// Byte offset of this segment's verification outboard blob in the Adamantine payload bundle.
+    pub verification_outboard_offset: u32,
+    /// Length of this segment's verification outboard blob in the Adamantine payload bundle.
+    pub verification_outboard_len: u32,
+    /// Byte offset of this segment's FEC parity blob in the Adamantine payload bundle (0 when absent).
+    pub fec_parity_offset: u32,
+    /// Length of this segment's FEC parity blob in the Adamantine payload bundle (0 when absent).
+    pub fec_parity_len: u32,
 }
 
 /// A single file entry in a directory catalog.
@@ -84,7 +96,7 @@ pub struct FilepackEntry {
     pub rel_path: String,
     /// BLAKE3 digest of the original file content (pre-Carbonado).
     pub content_blake3: [u8; 32],
-    /// Carbonado format for this file's segment mains (c4/c6 public or c5/c7 encrypted).
+    /// Carbonado format for this file's segment mains (c12/c14 public or c13/c15 encrypted).
     pub segment_format: u8,
     /// Segment references (sorted by `chunk_index`, contiguous from 0).
     pub segments: Vec<SegmentRef>,
@@ -402,6 +414,10 @@ impl FilepackManifest {
                 },
             )?;
             Self::validate_segments(&entry.segments)?;
+            let seg_fmt = Format::from(entry.segment_format);
+            for seg in &entry.segments {
+                validate_segment_bundle_semantics(seg_fmt, seg, &entry.rel_path)?;
+            }
             if let Some(proof) = &entry.ots_proof {
                 if proof.len() > MAX_OTS_PROOF_LEN {
                     return Err(CarbonadoError::InvalidFilepackManifest(format!(
@@ -421,25 +437,83 @@ impl FilepackManifest {
         Ok(())
     }
 
-    /// Validate Bao bundle offsets against the decoded bundle length.
+    /// Validate bundle offsets (verification + FEC parity) against decoded bundle length.
     pub fn validate_bao_bundle_refs(&self, bundle_len: usize) -> Result<(), CarbonadoError> {
+        let mut ranges: Vec<(u32, u32, String)> = Vec::new();
+        let mut segment_ref_count = 0usize;
+
         for entry in &self.entries {
+            let seg_fmt = Format::from(entry.segment_format);
             for seg in &entry.segments {
-                let end = seg
-                    .bao_outboard_offset
-                    .checked_add(seg.bao_outboard_len)
+                segment_ref_count = segment_ref_count.saturating_add(1);
+                if segment_ref_count > MAX_TOTAL_SEGMENT_REFS {
+                    return Err(CarbonadoError::InvalidFilepackManifest(format!(
+                        "segment ref count exceeds maximum {MAX_TOTAL_SEGMENT_REFS}"
+                    )));
+                }
+                validate_segment_bundle_semantics(seg_fmt, seg, &entry.rel_path)?;
+
+                let ver_end = seg
+                    .verification_outboard_offset
+                    .checked_add(seg.verification_outboard_len)
                     .ok_or_else(|| {
                         CarbonadoError::InvalidFilepackManifest(
-                            "bao_outboard offset overflow".into(),
+                            "verification_outboard offset overflow".into(),
                         )
                     })?;
-                if end as usize > bundle_len {
+                if ver_end as usize > bundle_len {
                     return Err(CarbonadoError::InvalidFilepackManifest(format!(
-                        "bao_outboard range for {} chunk {} exceeds bundle length {bundle_len}",
+                        "verification_outboard range for {} chunk {} exceeds bundle length {bundle_len}",
                         entry.rel_path, seg.chunk_index
                     )));
                 }
+
+                let fec_end = seg
+                    .fec_parity_offset
+                    .checked_add(seg.fec_parity_len)
+                    .ok_or_else(|| {
+                        CarbonadoError::InvalidFilepackManifest("fec_parity offset overflow".into())
+                    })?;
+                if fec_end as usize > bundle_len {
+                    return Err(CarbonadoError::InvalidFilepackManifest(format!(
+                        "fec_parity range for {} chunk {} exceeds bundle length {bundle_len}",
+                        entry.rel_path, seg.chunk_index
+                    )));
+                }
+
+                if seg.verification_outboard_len > 0 {
+                    ranges.push((
+                        seg.verification_outboard_offset,
+                        ver_end,
+                        format!(
+                            "{} chunk {} verification_outboard",
+                            entry.rel_path, seg.chunk_index
+                        ),
+                    ));
+                }
+                if seg.fec_parity_len > 0 {
+                    ranges.push((
+                        seg.fec_parity_offset,
+                        fec_end,
+                        format!("{} chunk {} fec_parity", entry.rel_path, seg.chunk_index),
+                    ));
+                }
             }
+        }
+
+        ranges.sort_by_key(|(off, _, _)| *off);
+        let mut high_water: u32 = 0;
+        let mut prev_label: Option<&str> = None;
+        for (off, end, label) in &ranges {
+            if *off < high_water {
+                return Err(CarbonadoError::InvalidFilepackManifest(format!(
+                    "bundle ranges overlap: {} vs {}",
+                    prev_label.unwrap_or("(prior range)"),
+                    label
+                )));
+            }
+            high_water = *end;
+            prev_label = Some(label.as_str());
         }
         Ok(())
     }
@@ -554,9 +628,89 @@ impl FilepackManifest {
 
 use std::path::Path;
 
+/// Expected FEC parity sidecar length for a bare main of `main_len` bytes (0 when empty).
+pub fn expected_fec_parity_len(main_len: u64) -> u32 {
+    if main_len == 0 {
+        return 0;
+    }
+    let (_, chunk_len) = calc_padding_len(main_len as usize);
+    (FEC_M - FEC_K) as u32 * chunk_len
+}
+
+fn validate_segment_bundle_semantics(
+    seg_fmt: Format,
+    seg: &SegmentRef,
+    rel_path: &str,
+) -> Result<(), CarbonadoError> {
+    if seg.main_len > MAX_SEGMENT_MAIN_LEN {
+        return Err(CarbonadoError::InvalidFilepackManifest(format!(
+            "main_len for {rel_path} chunk {} exceeds maximum {MAX_SEGMENT_MAIN_LEN}",
+            seg.chunk_index
+        )));
+    }
+
+    if seg_fmt.contains(Format::Fec) {
+        if seg.main_len > 0 && seg.fec_parity_len == 0 {
+            return Err(CarbonadoError::MissingFecParity);
+        }
+        if seg.main_len > 0 {
+            let expected = expected_fec_parity_len(seg.main_len);
+            if seg.fec_parity_len != expected {
+                return Err(CarbonadoError::InvalidFilepackManifest(format!(
+                    "fec_parity_len for {rel_path} chunk {} must be {expected} (encode geometry), got {}",
+                    seg.chunk_index, seg.fec_parity_len
+                )));
+            }
+        } else if seg.fec_parity_len != 0 {
+            return Err(CarbonadoError::InvalidFilepackManifest(format!(
+                "fec_parity present for {rel_path} chunk {} with zero main_len",
+                seg.chunk_index
+            )));
+        }
+    } else if seg.fec_parity_len != 0 {
+        return Err(CarbonadoError::InvalidFilepackManifest(format!(
+            "fec_parity present for {rel_path} chunk {} but segment format lacks FEC",
+            seg.chunk_index
+        )));
+    }
+
+    if seg.fec_parity_len > 0 {
+        let expected_fec_off = seg
+            .verification_outboard_offset
+            .checked_add(seg.verification_outboard_len)
+            .ok_or_else(|| {
+                CarbonadoError::InvalidFilepackManifest(
+                    "verification_outboard offset overflow".into(),
+                )
+            })?;
+        if seg.fec_parity_offset != expected_fec_off {
+            return Err(CarbonadoError::InvalidFilepackManifest(format!(
+                "fec_parity_offset for {rel_path} chunk {} must follow verification_outboard contiguously",
+                seg.chunk_index
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_segment_ref(main_len: u64, chunk_index: u32, root_byte: u8) -> SegmentRef {
+        let ver_len = if main_len > 0 { 64 } else { 0 };
+        let fec_len = expected_fec_parity_len(main_len);
+        SegmentRef {
+            segment_bao_root: [root_byte; 32],
+            chunk_index,
+            main_len,
+            verification_outboard_offset: 0,
+            verification_outboard_len: ver_len,
+            fec_parity_offset: ver_len,
+            fec_parity_len: fec_len,
+        }
+    }
 
     fn sample_manifest() -> FilepackManifest {
         FilepackManifest {
@@ -568,13 +722,7 @@ mod tests {
                 rel_path: "a.txt".into(),
                 content_blake3: [2u8; 32],
                 segment_format: crate::directory::format_policy::SEGMENT_FORMAT_PUBLIC_COMPRESSED,
-                segments: vec![SegmentRef {
-                    segment_bao_root: [3u8; 32],
-                    chunk_index: 0,
-                    main_len: 42,
-                    bao_outboard_offset: 0,
-                    bao_outboard_len: 0,
-                }],
+                segments: vec![sample_segment_ref(42, 0, 3)],
                 ots_proof: None,
             }],
         }
@@ -592,13 +740,9 @@ mod tests {
     #[test]
     fn filepack_manifest_multi_segment_roundtrip() {
         let mut manifest = sample_manifest();
-        manifest.entries[0].segments.push(SegmentRef {
-            segment_bao_root: [4u8; 32],
-            chunk_index: 1,
-            main_len: 99,
-            bao_outboard_offset: 0,
-            bao_outboard_len: 0,
-        });
+        manifest.entries[0]
+            .segments
+            .push(sample_segment_ref(99, 1, 4));
         let bytes = manifest.to_bytes().expect("to_bytes");
         let decoded = FilepackManifest::from_bytes_with_root(&bytes, manifest.catalog_bao_root)
             .expect("from_bytes");
@@ -619,13 +763,7 @@ mod tests {
             rel_path: "0.txt".into(),
             content_blake3: [0u8; 32],
             segment_format: crate::directory::format_policy::SEGMENT_FORMAT_PUBLIC_COMPRESSED,
-            segments: vec![SegmentRef {
-                segment_bao_root: [0u8; 32],
-                chunk_index: 0,
-                main_len: 1,
-                bao_outboard_offset: 0,
-                bao_outboard_len: 0,
-            }],
+            segments: vec![sample_segment_ref(1, 0, 0)],
             ots_proof: None,
         });
         let err = manifest.validate().unwrap_err();
@@ -642,8 +780,10 @@ mod tests {
             segment_bao_root: [5u8; 32],
             chunk_index: 2,
             main_len: 10,
-            bao_outboard_offset: 0,
-            bao_outboard_len: 0,
+            verification_outboard_offset: 0,
+            verification_outboard_len: 0,
+            fec_parity_offset: 0,
+            fec_parity_len: 0,
         });
         let err = manifest.validate().unwrap_err();
         assert!(
@@ -702,6 +842,238 @@ mod tests {
             matches!(err, CarbonadoError::InvalidFilepackManifest(ref msg) if msg.contains("c14 or c15")),
             "got {err:?}"
         );
+    }
+
+    #[test]
+    fn validate_bao_bundle_refs_missing_fec_parity() {
+        let manifest = FilepackManifest {
+            version: FILEPACK_MANIFEST_VERSION,
+            format_level: FILEPACK_MANIFEST_FORMAT_LEVEL_PUBLIC,
+            catalog_bao_root: [1u8; 32],
+            catalog_ots_proof: None,
+            entries: vec![FilepackEntry {
+                rel_path: "a.txt".into(),
+                content_blake3: [2u8; 32],
+                segment_format: crate::directory::format_policy::SEGMENT_FORMAT_PUBLIC_COMPRESSED,
+                segments: vec![SegmentRef {
+                    segment_bao_root: [3u8; 32],
+                    chunk_index: 0,
+                    main_len: 42,
+                    verification_outboard_offset: 0,
+                    verification_outboard_len: 8,
+                    fec_parity_offset: 0,
+                    fec_parity_len: 0,
+                }],
+                ots_proof: None,
+            }],
+        };
+        let err = manifest.validate_bao_bundle_refs(64).unwrap_err();
+        assert!(
+            matches!(err, CarbonadoError::MissingFecParity),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_bao_bundle_refs_rejects_cross_segment_overlap() {
+        let fec_len = expected_fec_parity_len(100);
+        let manifest = FilepackManifest {
+            version: FILEPACK_MANIFEST_VERSION,
+            format_level: FILEPACK_MANIFEST_FORMAT_LEVEL_PUBLIC,
+            catalog_bao_root: [1u8; 32],
+            catalog_ots_proof: None,
+            entries: vec![FilepackEntry {
+                rel_path: "a.txt".into(),
+                content_blake3: [2u8; 32],
+                segment_format: crate::directory::format_policy::SEGMENT_FORMAT_PUBLIC_COMPRESSED,
+                segments: vec![
+                    SegmentRef {
+                        segment_bao_root: [3u8; 32],
+                        chunk_index: 0,
+                        main_len: 100,
+                        verification_outboard_offset: 0,
+                        verification_outboard_len: 64,
+                        fec_parity_offset: 64,
+                        fec_parity_len: fec_len,
+                    },
+                    SegmentRef {
+                        segment_bao_root: [4u8; 32],
+                        chunk_index: 1,
+                        main_len: 100,
+                        verification_outboard_offset: 32,
+                        verification_outboard_len: 64,
+                        fec_parity_offset: 96,
+                        fec_parity_len: fec_len,
+                    },
+                ],
+                ots_proof: None,
+            }],
+        };
+        let err = manifest.validate_bao_bundle_refs(1_000_000).unwrap_err();
+        assert!(
+            matches!(err, CarbonadoError::InvalidFilepackManifest(ref m) if m.contains("bundle ranges overlap")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_bao_bundle_refs_scales_with_many_ranges() {
+        let fec_len = expected_fec_parity_len(64);
+        let ver_len = 32u32;
+        let range_stride = ver_len + fec_len;
+        let segment_count = 2000usize;
+        let mut segments = Vec::with_capacity(segment_count);
+        let mut bundle_cursor = 0u32;
+        for i in 0..segment_count {
+            let ver_off = bundle_cursor;
+            bundle_cursor = bundle_cursor.saturating_add(ver_len);
+            let fec_off = bundle_cursor;
+            bundle_cursor = bundle_cursor.saturating_add(fec_len);
+            segments.push(SegmentRef {
+                segment_bao_root: [i as u8; 32],
+                chunk_index: i as u32,
+                main_len: 64,
+                verification_outboard_offset: ver_off,
+                verification_outboard_len: ver_len,
+                fec_parity_offset: fec_off,
+                fec_parity_len: fec_len,
+            });
+        }
+        let manifest = FilepackManifest {
+            version: FILEPACK_MANIFEST_VERSION,
+            format_level: FILEPACK_MANIFEST_FORMAT_LEVEL_PUBLIC,
+            catalog_bao_root: [1u8; 32],
+            catalog_ots_proof: None,
+            entries: vec![FilepackEntry {
+                rel_path: "many.txt".into(),
+                content_blake3: [2u8; 32],
+                segment_format: crate::directory::format_policy::SEGMENT_FORMAT_PUBLIC_COMPRESSED,
+                segments,
+                ots_proof: None,
+            }],
+        };
+        let bundle_len = (segment_count as u32 * range_stride) as usize;
+        manifest
+            .validate_bao_bundle_refs(bundle_len)
+            .unwrap_or_else(|e| panic!("many contiguous ranges must validate: {e:?}"));
+    }
+
+    #[test]
+    fn validate_bao_bundle_refs_rejects_fec_geometry_mismatch() {
+        let mut manifest = sample_manifest();
+        manifest.entries[0].segments[0].fec_parity_len = 1;
+        let err = manifest.validate_bao_bundle_refs(1_000_000).unwrap_err();
+        assert!(
+            matches!(err, CarbonadoError::InvalidFilepackManifest(ref m) if m.contains("fec_parity_len")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_bao_bundle_refs_rejects_fec_on_non_fec_format() {
+        let manifest = FilepackManifest {
+            version: FILEPACK_MANIFEST_VERSION,
+            format_level: FILEPACK_MANIFEST_FORMAT_LEVEL_PUBLIC,
+            catalog_bao_root: [1u8; 32],
+            catalog_ots_proof: None,
+            entries: vec![FilepackEntry {
+                rel_path: "a.txt".into(),
+                content_blake3: [2u8; 32],
+                segment_format: 0x04,
+                segments: vec![SegmentRef {
+                    segment_bao_root: [3u8; 32],
+                    chunk_index: 0,
+                    main_len: 10,
+                    verification_outboard_offset: 0,
+                    verification_outboard_len: 8,
+                    fec_parity_offset: 8,
+                    fec_parity_len: 16,
+                }],
+                ots_proof: None,
+            }],
+        };
+        let err = manifest.validate().unwrap_err();
+        assert!(
+            matches!(err, CarbonadoError::InvalidFilepackManifest(ref m) if m.contains("c4–c7")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_zero_length_verification_outboard_for_nonempty_main() {
+        let mut manifest = sample_manifest();
+        manifest.entries[0].segments[0].verification_outboard_len = 0;
+        manifest.entries[0].segments[0].fec_parity_offset = 0;
+        manifest
+            .validate()
+            .expect("zero-length outboard is valid for small Bao trees");
+    }
+
+    #[test]
+    fn decode_outboard_rejects_missing_verification_outboard() {
+        use crate::decoding::decode_outboard;
+        use crate::directory::format_policy::SEGMENT_FORMAT_PUBLIC_COMPRESSED;
+        use crate::encoding::encode_outboard;
+
+        let payload = b"payload";
+        let oenc = encode_outboard(&[0u8; 32], payload, SEGMENT_FORMAT_PUBLIC_COMPRESSED)
+            .expect("encode_outboard");
+        let err = decode_outboard(
+            &[0u8; 32],
+            oenc.hash.as_bytes(),
+            &oenc.main,
+            None,
+            oenc.fec_parity.as_deref(),
+            oenc.info.padding_len,
+            SEGMENT_FORMAT_PUBLIC_COMPRESSED,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, CarbonadoError::MissingVerificationOutboard),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn encode_outboard_empty_verification_outboard_still_roundtrips() {
+        use crate::decoding::decode_outboard;
+        use crate::directory::format_policy::SEGMENT_FORMAT_PUBLIC_COMPRESSED;
+        use crate::encoding::encode_outboard;
+
+        let payload = b"payload";
+        let oenc = encode_outboard(&[0u8; 32], payload, SEGMENT_FORMAT_PUBLIC_COMPRESSED)
+            .expect("encode_outboard");
+        let ver = oenc.verification_outboard.as_deref().expect("Some");
+        assert_eq!(ver.len(), 0, "small payloads may have zero-length outboard");
+        let decoded = decode_outboard(
+            &[0u8; 32],
+            oenc.hash.as_bytes(),
+            &oenc.main,
+            Some(ver),
+            oenc.fec_parity.as_deref(),
+            oenc.info.padding_len,
+            SEGMENT_FORMAT_PUBLIC_COMPRESSED,
+        )
+        .expect("roundtrip");
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn validate_accepts_zero_byte_segment_refs() {
+        let manifest = FilepackManifest {
+            version: FILEPACK_MANIFEST_VERSION,
+            format_level: FILEPACK_MANIFEST_FORMAT_LEVEL_PUBLIC,
+            catalog_bao_root: [1u8; 32],
+            catalog_ots_proof: None,
+            entries: vec![FilepackEntry {
+                rel_path: "empty.txt".into(),
+                content_blake3: *blake3::hash(b"").as_bytes(),
+                segment_format: crate::directory::format_policy::SEGMENT_FORMAT_PUBLIC_COMPRESSED,
+                segments: vec![sample_segment_ref(0, 0, 5)],
+                ots_proof: None,
+            }],
+        };
+        manifest.validate().expect("zero-byte segment semantics");
     }
 
     #[test]

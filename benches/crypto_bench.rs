@@ -6,7 +6,7 @@
 //! - Public c14 outboard encode/decode (format 0x0E)
 //! - Directory archive encode (Adamantine + per-file c14)
 //! - Outboard scrub recovery (bare main + sidecars)
-//! - SLH-DSA (via libbitcoinpqc) keygen + sign + verify
+//! - SLH-DSA (via bitcoinpqc) keygen + sign + verify
 //!
 //! Run with hardware acceleration visible:
 //!   RUSTFLAGS="-C target-cpu=native" cargo bench --bench crypto_bench
@@ -97,7 +97,7 @@ fn bench_outboard_c14(c: &mut Criterion) {
             b.iter(|| {
                 let oenc =
                     encode_outboard(black_box(&master_key), black_box(&data), C14_FORMAT).unwrap();
-                let bao_ob = oenc.bao_outboard.as_deref();
+                let bao_ob = oenc.verification_outboard.as_deref();
                 let fec_par = oenc.fec_parity.as_deref();
                 let _ = decode_outboard(
                     black_box(&master_key),
@@ -153,7 +153,7 @@ fn bench_scrub_outboard(c: &mut Criterion) {
     let input = b"scrub bench fixture: bare c14 main + bao out + fec parity sidecars";
 
     let oenc = encode_outboard(&master_key, input, C14_FORMAT).unwrap();
-    let bao_ob = oenc.bao_outboard.clone().expect("bao sidecar");
+    let bao_ob = oenc.verification_outboard.clone().expect("bao sidecar");
     let fec_par = oenc.fec_parity.clone().expect("fec parity");
     let hash = oenc.hash;
     let info = oenc.info.clone();

@@ -2,7 +2,7 @@
 //! keyed BLAKE3 mode.
 //!
 //! These tests document and validate how Carbonado v2 uses the upstream keyed API:
-//! - Key: `blake3::derive_key("carbonado-v2/bao", &[format_byte])`
+//! - Key: `blake3::derive_key("carbonado-v2/verification", &[format_byte])`
 //! - Block size: `BlockSize::from_chunk_log(2)` (4 KiB leaves, `SLICE_LEN=4096`)
 //! - Entry points: `PostOrderMemOutboard::create_keyed`, `keyed_outboard_post_order`,
 //!   `keyed_encode_ranges_validated`, `keyed_decode_ranges`, `keyed_valid_ranges`
@@ -22,11 +22,11 @@ use bao_tree::{
     BaoTree, ChunkNum, ChunkRanges,
 };
 use carbonado::{
-    carbonado_bao_key,
+    carbonado_verification_key,
     constants::{BAO_BLOCK_SIZE, SLICE_LEN},
     decode_outboard, encode, encode_outboard,
     error::CarbonadoError,
-    stream::bao::{bao_inboard_buffer, bao_outboard_buffer},
+    stream::bao::{verification_inboard_buffer, verification_outboard_buffer},
     stream::encode::stream_encode_buffer,
     verify_slice, verify_slice_inboard_seekable, verify_slice_outboard,
 };
@@ -44,9 +44,9 @@ fn patterned(len: usize) -> Vec<u8> {
 #[test]
 fn carbonado_key_derivation_and_domain_separation() {
     let data = patterned(12_345);
-    let key4 = carbonado_bao_key(BAO_ONLY);
-    let key6 = carbonado_bao_key(0x06);
-    let key14 = carbonado_bao_key(C14);
+    let key4 = carbonado_verification_key(BAO_ONLY);
+    let key6 = carbonado_verification_key(0x06);
+    let key14 = carbonado_verification_key(C14);
 
     let root4 = PostOrderMemOutboard::create_keyed(&data, BAO_BLOCK_SIZE, &key4).root;
     let root6 = PostOrderMemOutboard::create_keyed(&data, BAO_BLOCK_SIZE, &key6).root;
@@ -63,7 +63,7 @@ fn carbonado_key_derivation_and_domain_separation() {
 fn bao_only_encode_root_matches_bao_tree_create_keyed() -> Result<()> {
     for &len in &[0usize, 1, 100, 4095, 4096, 4097, 8192, 50_000] {
         let input = patterned(len);
-        let key = carbonado_bao_key(BAO_ONLY);
+        let key = carbonado_verification_key(BAO_ONLY);
 
         let (_blob, hash, _info) = stream_encode_buffer(&[0u8; 32], &input, BAO_ONLY)?;
         let direct = PostOrderMemOutboard::create_keyed(&input, BAO_BLOCK_SIZE, &key);
@@ -89,12 +89,12 @@ fn encode_entry_points_agree_on_keyed_root() -> Result<()> {
 
     let from_encoding = encode(&master, &input, BAO_ONLY)?;
     let from_stream = stream_encode_buffer(&master, &input, BAO_ONLY)?;
-    let from_bao_helper = bao_inboard_buffer(&input, BAO_ONLY)?;
+    let from_bao_helper = verification_inboard_buffer(&input, BAO_ONLY)?;
 
     assert_eq!(from_encoding.1, from_stream.1);
     assert_eq!(from_encoding.1, from_bao_helper.1);
 
-    let key = carbonado_bao_key(BAO_ONLY);
+    let key = carbonado_verification_key(BAO_ONLY);
     let direct = PostOrderMemOutboard::create_keyed(&input, BAO_BLOCK_SIZE, &key);
     assert_eq!(from_encoding.1.as_bytes(), direct.root.as_bytes());
     Ok(())
@@ -104,11 +104,11 @@ fn encode_entry_points_agree_on_keyed_root() -> Result<()> {
 #[test]
 fn outboard_sidecar_matches_bao_tree_keyed_outboard() -> Result<()> {
     let input = patterned(22_000);
-    let key = carbonado_bao_key(BAO_ONLY);
+    let key = carbonado_verification_key(BAO_ONLY);
 
     let oenc = encode_outboard(&[0u8; 32], &input, BAO_ONLY)?;
     let bao_ob = oenc
-        .bao_outboard
+        .verification_outboard
         .as_ref()
         .expect("c4 requires .out sidecar");
     assert_eq!(
@@ -120,7 +120,7 @@ fn outboard_sidecar_matches_bao_tree_keyed_outboard() -> Result<()> {
     assert_eq!(oenc.hash.as_bytes(), direct.root.as_bytes());
     assert_eq!(bao_ob, &direct.data);
 
-    let (ob_buf, hash_buf) = bao_outboard_buffer(&input, BAO_ONLY)?;
+    let (ob_buf, hash_buf) = verification_outboard_buffer(&input, BAO_ONLY)?;
     assert_eq!(oenc.hash, hash_buf);
     assert_eq!(bao_ob, &ob_buf);
     Ok(())
@@ -130,7 +130,7 @@ fn outboard_sidecar_matches_bao_tree_keyed_outboard() -> Result<()> {
 #[test]
 fn keyed_encode_rejects_unkeyed_decode_ranges() -> Result<()> {
     let input = patterned(9_000);
-    let key = carbonado_bao_key(BAO_ONLY);
+    let key = carbonado_verification_key(BAO_ONLY);
     let outboard = PostOrderMemOutboard::create_keyed(&input, BAO_BLOCK_SIZE, &key);
     let mut encoded = Vec::new();
     keyed_encode_ranges_validated(&input, &outboard, &ChunkRanges::all(), &mut encoded, &key)?;
@@ -169,7 +169,7 @@ fn wrong_format_key_rejected_at_carbonado_layer() -> Result<()> {
     assert!(matches!(err, CarbonadoError::AuthenticationFailed));
 
     let oenc = encode_outboard(&master, input, C14)?;
-    let bao_ob = oenc.bao_outboard.as_ref().unwrap();
+    let bao_ob = oenc.verification_outboard.as_ref().unwrap();
     let err_ob = verify_slice_outboard(
         oenc.main.as_slice(),
         bao_ob,
@@ -191,8 +191,8 @@ fn keyed_valid_ranges_matches_verify_slice_outboard() -> Result<()> {
     let master = [9u8; 32];
     // c4 bao-only: bare main bytes align 1:1 with logical input slices.
     let oenc = encode_outboard(&master, &input, BAO_ONLY)?;
-    let bao_ob = oenc.bao_outboard.as_ref().unwrap();
-    let key = carbonado_bao_key(BAO_ONLY);
+    let bao_ob = oenc.verification_outboard.as_ref().unwrap();
+    let key = carbonado_verification_key(BAO_ONLY);
     let bare_len = oenc.main.len() as u64;
     let tree = BaoTree::new(bare_len, BAO_BLOCK_SIZE);
     let ob = PostOrderMemOutboard {
@@ -264,14 +264,14 @@ fn keyed_outboard_full_roundtrip_with_fec() -> Result<()> {
         &master,
         oenc.hash.as_bytes(),
         &oenc.main,
-        oenc.bao_outboard.as_deref(),
+        oenc.verification_outboard.as_deref(),
         oenc.fec_parity.as_deref(),
         oenc.info.padding_len,
         BAO_ZFEC,
     )?;
     assert_eq!(rec, input);
 
-    let key = carbonado_bao_key(BAO_ZFEC);
+    let key = carbonado_verification_key(BAO_ZFEC);
     let fec_body = &oenc.main;
     let direct = PostOrderMemOutboard::create_keyed(fec_body, BAO_BLOCK_SIZE, &key);
     assert_eq!(oenc.hash.as_bytes(), direct.root.as_bytes());

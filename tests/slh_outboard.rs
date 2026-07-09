@@ -1,7 +1,7 @@
 //! Phase 1B: SLH-DSA sidecar E2E (requires `pqc` feature).
 //!
 //! CI must run `cargo test --all-features` (or `--features pqc`) for this crate;
-//! `--no-default-features` skips all tests here (libbitcoinpqc is optional).
+//! `--no-default-features` skips all tests here (`bitcoinpqc` / `pqc` is optional).
 
 #![cfg(feature = "pqc")]
 
@@ -72,7 +72,7 @@ fn test_slh_outboard_sidecar_binds_header_public_key() {
         signed_hdr.hash.as_bytes(),
         Some(&hdr_bytes),
         &oenc.main,
-        oenc.bao_outboard.as_deref(),
+        oenc.verification_outboard.as_deref(),
         oenc.fec_parity.as_deref(),
         oenc.info.padding_len,
         14,
@@ -94,14 +94,14 @@ fn test_slh_outboard_sidecar_binds_header_public_key() {
     assert_eq!(&on_disk[..4], SLH1_MAGIC);
     let _ = fs::remove_file(&sidecar_path);
     let sig = Signature {
-        algorithm: Algorithm::SLH_DSA_128S,
+        algorithm: Algorithm::SLH_DSA_SHA2_128S,
         bytes: sig_bytes.to_vec(),
     };
     assert!(slh_dsa_verify(&keypair.public_key, bao_root, &sig).unwrap());
 
     // Header public key must match sidecar verifier.
     let hdr_pk = PublicKey {
-        algorithm: Algorithm::SLH_DSA_128S,
+        algorithm: Algorithm::SLH_DSA_SHA2_128S,
         bytes: signed_hdr.slh_public_key.to_vec(),
     };
     assert!(slh_dsa_verify(&hdr_pk, bao_root, &sig).unwrap());
@@ -114,7 +114,7 @@ fn test_slh_outboard_sidecar_binds_header_public_key() {
     // Negative: signature from key A must not verify with key B in header.
     let other_keypair = slh_dsa_generate_keypair(&slh_entropy()).unwrap();
     let wrong_hdr_pk = PublicKey {
-        algorithm: Algorithm::SLH_DSA_128S,
+        algorithm: Algorithm::SLH_DSA_SHA2_128S,
         bytes: slh_public_key_bytes(&other_keypair.public_key).to_vec(),
     };
     assert!(!slh_dsa_verify(&wrong_hdr_pk, bao_root, &sig).unwrap());
@@ -127,7 +127,7 @@ fn test_slh_outboard_sidecar_binds_header_public_key() {
         signed_hdr.hash.as_bytes(),
         Some(&bad_hdr_bytes),
         &oenc.main,
-        oenc.bao_outboard.as_deref(),
+        oenc.verification_outboard.as_deref(),
         oenc.fec_parity.as_deref(),
         oenc.info.padding_len,
         14,

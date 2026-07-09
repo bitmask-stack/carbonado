@@ -70,7 +70,7 @@ fn reject_bare_outboard_flags_on_headered(
     format: &Option<u8>,
     hash: &Option<String>,
     padding: u32,
-    bao_outboard: &Option<PathBuf>,
+    verification_outboard: &Option<PathBuf>,
     fec_parity: &Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if format.is_some() {
@@ -85,8 +85,8 @@ fn reject_bare_outboard_flags_on_headered(
     if padding != 0 {
         return Err("--padding is for bare outboard decode only".into());
     }
-    if bao_outboard.is_some() {
-        return Err("--bao-outboard is for bare outboard decode only".into());
+    if verification_outboard.is_some() {
+        return Err("--verification-outboard is for bare outboard decode only".into());
     }
     if fec_parity.is_some() {
         return Err("--fec-parity is for bare outboard decode only".into());
@@ -263,7 +263,7 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
             hash,
             format,
             padding,
-            bao_outboard,
+            verification_outboard,
             fec_parity,
         } => {
             let layout = detect_archive_layout(&input)?;
@@ -286,7 +286,7 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                         &format,
                         &hash,
                         padding,
-                        &bao_outboard,
+                        &verification_outboard,
                         &fec_parity,
                     )?;
                     let out_base = output.unwrap_or_else(|| PathBuf::from("recovered.bin"));
@@ -317,7 +317,7 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                         hash,
                         format,
                         padding,
-                        bao_outboard,
+                        verification_outboard,
                         fec_parity,
                     )?;
                     println!("decoded to {}", out_base.display());
@@ -364,8 +364,8 @@ fn stream_encode_outboard_cli(
     let mut bao_buf = Vec::new();
     let mut par_buf = Vec::new();
 
-    let bao_out = fmt.contains(Format::Bao).then_some(&mut bao_buf);
-    let par_out = fmt.contains(Format::Zfec).then_some(&mut par_buf);
+    let bao_out = fmt.contains(Format::Verification).then_some(&mut bao_buf);
+    let par_out = fmt.contains(Format::Fec).then_some(&mut par_buf);
 
     let mut payload_nonce = [0u8; 16];
     let (hash, info) = stream_encode_outboard(
@@ -381,12 +381,12 @@ fn stream_encode_outboard_cli(
 
     Ok(OutboardEncoded {
         main: main_buf.into_inner(),
-        bao_outboard: if fmt.contains(Format::Bao) {
+        verification_outboard: if fmt.contains(Format::Verification) {
             Some(bao_buf)
         } else {
             None
         },
-        fec_parity: if fmt.contains(Format::Zfec) {
+        fec_parity: if fmt.contains(Format::Fec) {
             Some(par_buf)
         } else {
             None
@@ -407,7 +407,7 @@ fn write_outboard_artifacts_from_oenc(
     let main_p = outdir.join(&main_name);
     File::create(&main_p)?.write_all(&res.main)?;
     println!("outboard bare: {}", main_p.display());
-    if let Some(ob) = &res.bao_outboard {
+    if let Some(ob) = &res.verification_outboard {
         let op = outdir.join(format!("{}.c{:02x}.out", hhex, format));
         File::create(&op)?.write_all(ob)?;
         println!("  + bao outboard: {}", op.display());
@@ -428,11 +428,11 @@ fn do_decode_outboard_streaming(
     hash: Option<String>,
     format: Option<u8>,
     padding: u32,
-    bao_outboard: Option<PathBuf>,
+    verification_outboard: Option<PathBuf>,
     fec_parity: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut main_f = File::open(input)?;
-    let ob_path = bao_outboard.unwrap_or_else(|| sidecar_sibling_path(input, "out"));
+    let ob_path = verification_outboard.unwrap_or_else(|| sidecar_sibling_path(input, "out"));
     let par_path = fec_parity.unwrap_or_else(|| sidecar_sibling_path(input, "par"));
 
     let bao_ob = if ob_path.exists() {

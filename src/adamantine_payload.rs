@@ -6,7 +6,7 @@
 //! [u32 LE rkyv_len]
 //! [rkyv FilepackManifestWire bytes]
 //! [u32 LE bundle_len]
-//! [concatenated segment bao_outboard blobs]
+//! [concatenated per-segment verification_outboard + fec_parity blobs]
 //! ```
 //!
 //! Catalog OpenTimestamps proofs (when present) are appended after the inboard
@@ -16,13 +16,16 @@
 //! An optional leading `u8` bundle version byte may be added in a future streaming revision;
 //! v1 omits it (bundle starts immediately after `bundle_len`).
 //!
-//! Segment [`SegmentRef::bao_outboard_offset`](crate::filepack_manifest::SegmentRef) /
-//! [`bao_outboard_len`](crate::filepack_manifest::SegmentRef) index into the bundle region.
+//! Per segment, the bundle region is `[verification_outboard bytes][fec_parity bytes]`, indexed by
+//! [`SegmentRef::verification_outboard_offset`](crate::filepack_manifest::SegmentRef) /
+//! [`verification_outboard_len`](crate::filepack_manifest::SegmentRef) and
+//! [`fec_parity_offset`](crate::filepack_manifest::SegmentRef) /
+//! [`fec_parity_len`](crate::filepack_manifest::SegmentRef) (0/0 when FEC absent).
 
 use crate::error::CarbonadoError;
 use crate::filepack_manifest::MAX_RKYV_PAYLOAD_LEN;
 
-/// Maximum bytes for the concatenated Bao outboard bundle (DoS guard).
+/// Maximum bytes for the concatenated verification + FEC parity bundle (DoS guard).
 pub const MAX_BAO_BUNDLE_LEN: usize = 256 * 1024 * 1024;
 
 /// Maximum total Adamantine payload (rkyv + bundle length prefix + bundle bytes).
@@ -130,22 +133,40 @@ pub fn build_adamantine_payload(rkyv: &[u8], bao_bundle: &[u8]) -> Result<Vec<u8
     Ok(out)
 }
 
-/// Extract one segment's Bao outboard slice from the bundle using manifest offsets.
-pub fn bao_slice_from_bundle(
+/// Extract one segment's verification outboard slice from the bundle using manifest offsets.
+pub fn verification_slice_from_bundle(
     bundle: &[u8],
     offset: u32,
     len: u32,
 ) -> Result<&[u8], CarbonadoError> {
+    bundle_slice_from_bundle(bundle, offset, len, "verification_outboard")
+}
+
+/// Extract one segment's FEC parity slice from the bundle using manifest offsets.
+pub fn fec_slice_from_bundle(
+    bundle: &[u8],
+    offset: u32,
+    len: u32,
+) -> Result<&[u8], CarbonadoError> {
+    bundle_slice_from_bundle(bundle, offset, len, "fec_parity")
+}
+
+fn bundle_slice_from_bundle<'a>(
+    bundle: &'a [u8],
+    offset: u32,
+    len: u32,
+    label: &str,
+) -> Result<&'a [u8], CarbonadoError> {
     let off = offset as usize;
     let ln = len as usize;
     let end = off
         .checked_add(ln)
-        .ok_or(CarbonadoError::InvalidFilepackManifest(
-            "bao_outboard offset overflow".into(),
-        ))?;
+        .ok_or(CarbonadoError::InvalidFilepackManifest(format!(
+            "{label} offset overflow"
+        )))?;
     if end > bundle.len() {
         return Err(CarbonadoError::InvalidFilepackManifest(format!(
-            "bao_outboard range {off}..{end} exceeds bundle length {}",
+            "{label} range {off}..{end} exceeds bundle length {}",
             bundle.len()
         )));
     }
@@ -190,9 +211,9 @@ mod tests {
     #[test]
     fn bao_slice_bounds_check() {
         let bundle = b"0123456789";
-        let slice = bao_slice_from_bundle(bundle, 2, 3).expect("slice");
+        let slice = verification_slice_from_bundle(bundle, 2, 3).expect("slice");
         assert_eq!(slice, b"234");
-        let err = bao_slice_from_bundle(bundle, 8, 4).unwrap_err();
+        let err = verification_slice_from_bundle(bundle, 8, 4).unwrap_err();
         assert!(matches!(err, CarbonadoError::InvalidFilepackManifest(_)));
     }
 }

@@ -29,7 +29,7 @@ fn large_payload_seekable_slices_without_full_decode() -> Result<()> {
     let mut key = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut key);
 
-    // Level 4 = Bao only: logical stream bytes == input (no zfec transform).
+    // Level 4 = Bao only: logical stream bytes == input (no fec transform).
     let encoded = encode(&key, &input, 4)?;
     let blob = &encoded.0;
     let hash = encoded.1;
@@ -59,7 +59,7 @@ fn tamper_outboard_parent_hash_fails_verification() -> Result<()> {
     let input = b"tamper outboard parent hash";
     let master_key = [0u8; 32];
     let oenc = encode_outboard(&master_key, input, C14)?;
-    let bao_ob = oenc.bao_outboard.as_ref().expect("bao sidecar");
+    let bao_ob = oenc.verification_outboard.as_ref().expect("bao sidecar");
     let hash = oenc.hash;
 
     let mut bad_ob = bao_ob.clone();
@@ -108,7 +108,7 @@ fn wrong_format_key_authentication_failure_inboard_and_outboard() -> Result<()> 
     );
 
     let oenc = encode_outboard(&key, input, C14)?;
-    let bao_ob = oenc.bao_outboard.as_ref().expect("bao sidecar");
+    let bao_ob = oenc.verification_outboard.as_ref().expect("bao sidecar");
     let err_ob = verify_slice_outboard(
         oenc.main.as_slice(),
         bao_ob,

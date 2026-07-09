@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Information from the encoding step, some of which is needed for decoding.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct EncodeInfo {
     /// How many bytes input into the encoding step.
     pub input_len: u32,
@@ -46,15 +46,15 @@ pub struct Encoded(pub Vec<u8>, pub bao::Hash, pub EncodeInfo);
 
 /// Result of outboard encoding (for public non-Encrypted formats requesting outboard storage).
 /// main: bare bytes (post-compress if any; the primary on-disk artifact for outboard)
-/// bao_outboard: optional sidecar for Bao (e.g. <hash>.cXX.out)
-/// fec_parity: optional sidecar for Zfec outboard
+/// verification_outboard: optional sidecar for streaming verification (e.g. `<hash>.cXX.out`)
+/// fec_parity: optional sidecar for FEC outboard recovery
 /// hash: keyed bao root (commits to exact format/c number)
 /// info: encode stats (note bytes_verifiable reflects bare size in outboard)
 ///
 /// Encrypted outboard uses the same artifact split (bare ciphertext main + sidecars). See AGENTS §11.2.
 pub struct OutboardEncoded {
     pub main: Vec<u8>,
-    pub bao_outboard: Option<Vec<u8>>,
+    pub verification_outboard: Option<Vec<u8>>,
     pub fec_parity: Option<Vec<u8>>,
     pub hash: bao::Hash,
     pub info: EncodeInfo,

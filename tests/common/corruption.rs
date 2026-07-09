@@ -160,7 +160,7 @@ pub fn flip_byte(buf: &mut [u8], offset: usize, mask: u8) {
 /// Layout of data-shard stripes inside an outboard bare main (c8–c15 with Zfec).
 ///
 /// Outboard bare `main` stores the pre-FEC logical body; `scrub_outboard` and
-/// `zfec_with_parity` read data shards at fixed `chunk_len` strides. Parity
+/// `fec_with_parity` read data shards at fixed `chunk_len` strides. Parity
 /// shards live in the separate `.par` sidecar.
 #[derive(Clone, Debug)]
 pub struct OutboardShardLayout {
@@ -202,7 +202,7 @@ impl OutboardShardLayout {
 /// Scatter knockouts across outboard bare main data shards (≤ `max_bad_shards`).
 ///
 /// Does not touch the `.par` sidecar — models JBOD main-disk corruption with
-/// intact parity for `zfec_with_parity` / `scrub_outboard` recovery.
+/// intact parity for `fec_with_parity` / `scrub_outboard` recovery.
 pub fn scattered_outboard_main_knockout(
     main: &mut [u8],
     layout: &OutboardShardLayout,

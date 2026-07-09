@@ -14,7 +14,10 @@ use carbonado::{
 };
 use rand::RngCore;
 
-use common::header_layout::{self, offsets};
+use common::{
+    header_layout::{self, offsets},
+    inboard_parity::{assert_inboard_body_roundtrip, assert_segment_matches_buffer_encode},
+};
 
 const MASTER: [u8; 32] = [0x42; 32];
 const FORMAT: u8 = 14;
@@ -71,9 +74,20 @@ fn shard_roundtrip_three_segments() {
     assert!(!encoded[2].0.has_more);
 
     let expected_lens = [SEGMENT_BUDGET, SEGMENT_BUDGET, 2 * 1024 * 1024];
-    for (i, (result, _)) in encoded.iter().enumerate() {
+    for (i, (result, body)) in encoded.iter().enumerate() {
         assert_eq!(result.header.chunk_index, i as u32);
         assert_eq!(result.encode_info.input_len as u64, expected_lens[i]);
+        let start = i as u64 * SEGMENT_BUDGET;
+        let end = ((i + 1) as u64 * SEGMENT_BUDGET).min(original.len() as u64) as usize;
+        let segment = &original[start as usize..end];
+        assert_segment_matches_buffer_encode(
+            &MASTER,
+            FORMAT,
+            segment,
+            body,
+            &result.header.hash,
+            &result.encode_info,
+        );
     }
 
     let sources: Vec<ShardSource> = encoded
@@ -274,7 +288,7 @@ fn shard_roundtrip_encrypted_c15() {
     assert!(!encoded[2].0.has_more);
 
     let expected_lens = [SEGMENT_BUDGET, SEGMENT_BUDGET, 2 * 1024 * 1024];
-    for (i, (result, _)) in encoded.iter().enumerate() {
+    for (i, (result, body)) in encoded.iter().enumerate() {
         assert_eq!(result.header.chunk_index, i as u32);
         assert_eq!(result.encode_info.input_len as u64, expected_lens[i]);
         assert_eq!(result.header.format.bits(), 15);
@@ -282,6 +296,18 @@ fn shard_roundtrip_encrypted_c15() {
             result.header.payload_nonce, [0u8; 16],
             "encrypted shard must carry nonce in header"
         );
+        let start = i as u64 * SEGMENT_BUDGET;
+        let end = ((i + 1) as u64 * SEGMENT_BUDGET).min(original.len() as u64) as usize;
+        let segment = &original[start as usize..end];
+        // Header-path c15 uses a per-shard random nonce; byte parity vs `stream_encode_buffer`
+        // (embedded nonce) is not meaningful. Verify S2 preprocess+inboard path per segment.
+        assert_inboard_body_roundtrip(&master, 15, segment);
+        assert_eq!(
+            result.encode_info.input_len as u64,
+            segment.len() as u64,
+            "shard segment input_len for chunk {i}"
+        );
+        assert_eq!(body.len(), result.encode_info.output_len as usize);
     }
 
     let sources: Vec<ShardSource> = encoded

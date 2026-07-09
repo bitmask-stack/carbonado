@@ -13,9 +13,9 @@ pub const SLICE_LEN: u32 = 4096;
 /// Default Bao tree block size for 4KB chunk groups (aligns with SSD/HDD sectors,
 /// reduces tree overhead, improves max segment size). Uses the local keyed bao-tree fork.
 pub const BAO_BLOCK_SIZE: BlockSize = BlockSize::from_chunk_log(2);
-/// Zfec chunks needed (k)
+/// FEC data shards (k)
 pub const FEC_K: usize = 4;
-/// Zfec chunks encoded (m)
+/// FEC total shards (m)
 pub const FEC_M: usize = 8;
 
 /// ## Bitmask for Carbonado formats c0-c15
@@ -43,10 +43,10 @@ pub const FEC_M: usize = 8;
 ///
 /// | Bit name in enum | Meaning when set |
 /// |-------|-------|
-/// | Encrypted | Apply symmetric encryption (AES-256-CTR + HMAC-SHA512 EtM) |
-/// | Snappy | Apply Zstd compression at level 20 |
-/// | Bao   | Add Bao streaming verifiability |
-/// | Zfec  | Add FEC (reed-solomon-erasure 4/8) forward error correction |
+/// | Encryption | Apply symmetric encryption (AES-256-CTR + HMAC-SHA512 EtM) |
+/// | Compression | Apply Zstd compression at level 20 |
+/// | Verification | Add streaming verifiability (keyed Bao, 4 KiB leaves) |
+/// | Fec | Add forward error correction (reed-solomon-erasure 4/8) |
 ///
 /// While the low-level functions are called in a different order (see [encoding::encode](crate::encode)), the bitmask order is designed to be intuitive for users choosing a format level.
 ///
@@ -56,8 +56,8 @@ pub const FEC_M: usize = 8;
 #[bitmask(u8)]
 #[derive(Serialize, Deserialize)]
 pub enum Format {
-    Encrypted,
-    Snappy,
-    Bao,
-    Zfec,
+    Encryption,
+    Compression,
+    Verification,
+    Fec,
 }

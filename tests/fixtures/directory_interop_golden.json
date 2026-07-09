@@ -1,0 +1,79 @@
+{
+  "description": "Golden checksums for encode_directory(tests/samples, ZERO_KEY). Adamantine 1.0 uses decimal format suffixes in filenames (.c12/.c14/.adam.c14), not hex (.c0c). Canonical platform: Linux CI.",
+  "generated_with": {
+    "carbonado": "2.1.0",
+    "infer": "0.19.0",
+    "platform": "linux",
+    "master_key": "zero",
+    "command": "cargo run --bin carbonado --features cli -- encode tests/samples -o <outdir>",
+    "regenerate": "cargo test --test filepack_interop dump_interop_golden_fixture_values -- --ignored --nocapture"
+  },
+  "catalog_bao_root": "3b91ff89d0215cc48c83529de78798f5890c04dbfa298e192dd2f07ce08c5b45",
+  "catalog_filename": "3b91ff89d0215cc48c83529de78798f5890c04dbfa298e192dd2f07ce08c5b45.adam.c14",
+  "manifest_version": 2,
+  "format_level": 14,
+  "entry_count": 3,
+  "manifest_rkyv_len": 391,
+  "manifest_rkyv_sha256": "aed51d8b667f2c10f3e05faa03e92c3aaa74c89cd659aeb6ab6dcf32ba8a5b35",
+  "bundle_sha256": "d48c8db5b7f6b679c6d031a3cd542c62712254a3117417b344d252f2a21c0668",
+  "entries": [
+    {
+      "rel_path": "code.tar",
+      "segment_format": 12,
+      "segments": [
+        {
+          "verification_outboard_offset": 0,
+          "verification_outboard_len": 128,
+          "fec_parity_offset": 128,
+          "fec_parity_len": 16384
+        }
+      ]
+    },
+    {
+      "rel_path": "content.png",
+      "segment_format": 12,
+      "segments": [
+        {
+          "verification_outboard_offset": 16512,
+          "verification_outboard_len": 9600,
+          "fec_parity_offset": 26112,
+          "fec_parity_len": 622592
+        }
+      ]
+    },
+    {
+      "rel_path": "contract.rgbc",
+      "segment_format": 14,
+      "segments": [
+        {
+          "verification_outboard_offset": 648704,
+          "verification_outboard_len": 0,
+          "fec_parity_offset": 648704,
+          "fec_parity_len": 16384
+        }
+      ]
+    }
+  ],
+  "artifacts": {
+    "3b91ff89d0215cc48c83529de78798f5890c04dbfa298e192dd2f07ce08c5b45.adam.c14": {
+      "len": 1331321,
+      "sha256": "9946a7a49218a3a4f1e677cf7aeda5f3099669afd717cf27a38bc1f9fcb1cbb5",
+      "decimal_format_suffix": "14"
+    },
+    "797216a438ea69c1c6885b31700e93a7e1ef492825a1c38d8f50c6250ab0a5f4.c14": {
+      "len": 789,
+      "sha256": "a6486c89c81d1b04e5a9c32921e27c461f197268e3559c59a418c4b26f5c6c63",
+      "decimal_format_suffix": "14"
+    },
+    "b4c85e90d883d8094188f57f0710bc12c9e6ec5f9ab740178ef55de5c68af569.c12": {
+      "len": 616565,
+      "sha256": "339fe308a4d10d5b8f8232bead58c45c83a5922ff5727a72ef2dd3d1c06a61f8",
+      "decimal_format_suffix": "12"
+    },
+    "4de0459f69c4fe111b98117bb87d68170be628388ad75fe4436022a9beed34d9.c12": {
+      "len": 10240,
+      "sha256": "0c58066ad1d7d5b6bf2a9c921d97851bcc0b9a88cbfbea4eee07583097dddad6",
+      "decimal_format_suffix": "12"
+    }
+  }
+}

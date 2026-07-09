@@ -6,17 +6,25 @@ All notable changes to the Carbonado crate and `carbonado` CLI are documented he
 
 ### Added
 
+- **`bitcoinpqc` 0.4:** migrate from crates.io `libbitcoinpqc` 0.1 to `bitcoinpqc` 0.4 (WASM-capable bindings). SLH-DSA parameter set is now **SHA2-128s** (`SLH_DSA_SHA2_128S`); SHAKE-128s sidecars from dev builds are incompatible — re-sign if needed. Temporary `.cargo/config.toml` `[patch.crates-io]` — delete on or after **2026-07-18** once registry mirrors sync.
+- **Phase 3 CPU parallelism (`parallel` feature, default on):** scoped fork-join RS parity generation in `FecInboardEncoder::take_stripe` (`src/stream/parallel.rs`); `ParallelConfig::max_threads` caps per-wave workers; output bit-identical to serial `rs.encode`. WASM compiles with `parallel` but stays serial at runtime. Disable with `--no-default-features` for serial-only builds. Tests: `tests/parallel_determinism.rs` (default), `tests/serial_fec_path.rs` (no-`parallel` CI gate); bench: `benches/parallel_bench.rs`. Documented in `doc/STREAMING_PARALLELISM.md` § Phase 3.
+- **Phase 2 async I/O adapter (optional `async` feature):** `stream_decode_async` (`AsyncRead` → `AsyncWrite` inboard decode), `stream::io` pipeline traits (`PipelineSource`/`PipelineSink`, `AsyncPipelineSource`/`AsyncPipelineSink`), `BoundedCopyTruncation` for sync-aligned truncation errors. Disk spool bridge preserves MAC-before-decrypt; `async-tokio` offloads sync pipeline via `spawn_blocking`. WASM returns `NotImplemented`. Tests: `tests/streaming_async.rs` (`cargo test --features async`).
 - **Adamantine 1.0 directory envelope:** magic `ADAMANTINE10\n` (version in magic); 19-byte header with u8 flags (`REQUIRE_OTS` only). New module `adamantine_payload` (rkyv + centralized Bao bundle). Dev `ADAMANTINE2\n` rejected.
-- **Heterogeneous segment formats:** `directory/format_policy` with `infer` heuristic (compressible → c6/c7, incompressible → c4/c5); `SegmentFormatPolicy` Auto/Force*; `FilepackEntry.segment_format`; `SegmentRef.bao_outboard_offset/len`.
+- **Heterogeneous FEC segment formats:** `directory/format_policy` with `infer` heuristic (compressible → c14/c15, incompressible → c12/c13); `SegmentFormatPolicy` Auto/Force*; `FilepackEntry.segment_format`; `SegmentRef` verification + `fec_parity` bundle indices.
 - **Catalog OTS trailer:** optional `[COTS][u32 len][proof]` after inboard catalog bytes (stable Bao root).
 - **Filepack CBOR interop:** `FilepackManifest::from_filepack_cbor`, `from_packed`, `to_filepack_cbor`; `FilepackSegmentMap`; DoS limits on CBOR flatten. Error: `InvalidFilepackCbor`.
 - **New errors:** `InvalidAdamantineFlags`, `SegmentFormatMismatch`.
 
 ### Changed
 
+- **M1 pipeline memory (hard break):** non-FEC verification decode (c6) uses `SeekWriteAt` over the post-preprocess spool (O(chunk) RAM; no full logical `Vec`). FEC verification uses `FecInboardWriteAt::finish_into` (stream logical bytes without a second full logical buffer; shard buffers remain O(FEC body) under segment-wide RS geometry). See `doc/STREAMING_PARALLELISM.md`.
+- **M2 outboard verify memory:** `stream_verification_outboard_verify` uses `PostOrderOutboard` + `ReadAt` (on-demand hash pairs) instead of copying the full sidecar into `PostOrderMemOutboard`. Streaming outboard decode keeps the sidecar on a disk spool.
+- **S5 scrub verify oracle:** `scrub` pre-check uses `verify_inboard_keyed` (`DiscardWriteAt` sink) instead of buffer `verification()` full-body staging; `scrub_outboard` pre-check uses `stream_verification_outboard_verify` with `io::sink()`. Memory tiers in `doc/STREAMING_PARALLELISM.md`.
+- **S4 streaming inboard decode:** `stream_decode` / `stream_decode_buffer` stream keyed Bao verify into `WriteAt` sinks without staging the encoded body; `decode_stream` and `file::decode` share the same Bao/FEC path. Memory tiers documented in `doc/STREAMING_PARALLELISM.md`.
 - **Directory archive layout (clean break):** inboard catalog c14/c15 only; bare segment mains; no directory `.out`/`.par`/`.ots` sidecars; Bao outboard centralized in Adam payload. Removed `DirectoryLayout`, homogeneous segment format, directory `--inboard`/`--outboard`/`--format` CLI flags.
 - **CLI directory output:** defaults to `{input}-archive/`; never `.`.
-- **Directory format generalization superseded:** catalog locked to c14/c15; segments heterogeneous c4–c7.
+- **Directory segment FEC (clean break):** catalog locked to c14/c15; segments heterogeneous c12–c15 (Verification+FEC); legacy c4–c7 rejected. Centralized bundle holds verification outboard + FEC parity per segment.
+- **Keyed verification KDF domain:** `blake3::derive_key("carbonado-v2/verification", &[format])` replaces `"carbonado-v2/bao"` (breaks keyed roots vs pre-2.1.0). Public API: `crypto::carbonado_verification_key`.
 - **Directory manifest API rename (Phase 1):** `PackIndex` → `FilepackManifest`, `PackEntry` → `FilepackEntry`, `PackSegmentRef` → `SegmentRef`, module `pack_index` → `filepack_manifest`. rkyv wire layout unchanged; on-disk archives remain compatible.
 - **Error variant rename (breaking):** `InvalidPackIndex` → `InvalidFilepackManifest`. No enum alias is provided.
 - **Narrowed error taxonomy:** OTS proof size failures → `InvalidOtsProof`; Adamantine oversized `payload_len` → `InvalidAdamantinePayloadTooLarge`; directory decode integrity failures → `SegmentMainLenMismatch`, `ContentBlake3Mismatch`, `OutputPathEscape`, `OtsFeatureRequired`, `OtsProofRequired`.

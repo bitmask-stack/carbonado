@@ -64,7 +64,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &master_key,
         oenc.hash.as_bytes(),
         &bare,
-        oenc.bao_outboard.as_deref(),
+        oenc.verification_outboard.as_deref(),
         oenc.fec_parity.as_deref(),
         oenc.info.padding_len,
         4,

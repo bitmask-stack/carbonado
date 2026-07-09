@@ -28,9 +28,9 @@ pub enum CarbonadoError {
     #[error(transparent)]
     FecError(reed_solomon_erasure::Error),
 
-    /// An uneven number of input bytes were provided for zfec chunks
-    #[error("Input bytes must divide evenly over number of zfec chunks.")]
-    UnevenZfecChunks,
+    /// FEC shard geometry does not divide evenly over the stripe layout.
+    #[error("Input bytes must divide evenly over FEC shard count.")]
+    UnevenFecChunks,
 
     /// Unnecessary scrub
     #[error("Data does not need to be scrubbed.")]
@@ -44,11 +44,11 @@ pub enum CarbonadoError {
     #[error("Mismatch between scrubbed data length, input len: {0}, scrubbed len: {1}")]
     ScrubbedLengthMismatch(usize, usize),
 
-    /// Scrub requires the Bao bit (uses slice extraction for FEC shard candidates)
+    /// Scrub requires the Verification bit (slice extraction for FEC shard candidates).
     #[error(
-        "Scrub requires Bao bit in format (for slice-based candidate extraction from verifiable)"
+        "Scrub requires Verification bit in format (for slice-based candidate extraction from verifiable)"
     )]
-    ScrubRequiresBao,
+    ScrubRequiresVerification,
 
     /// Hash decode error
     #[error("Hash must be {0} bytes long, an input of {1} bytes was provided.")]
@@ -60,7 +60,7 @@ pub enum CarbonadoError {
 
     /// FEC padding should be zero when encoding (Carbonado adds its own)
     #[error("Padding from FEC should always be zero, since Carbonado adds its own padding. Padding was {0}.")]
-    EncodeZfecPaddingError(usize),
+    EncodeFecPaddingError(usize),
 
     /// Invalid chunk length
     #[error("Chunk length should be as calculated. Calculated chunk length was {0}, but actual chunk length was {1}")]
@@ -78,12 +78,12 @@ pub enum CarbonadoError {
     #[error("Invalid header length calculation")]
     InvalidHeaderLength,
 
-    /// Missing required bao outboard sidecar for Bao outboard decode
-    #[error("Bao outboard sidecar data required for this format but not supplied")]
-    MissingBaoOutboard,
+    /// Missing required verification outboard sidecar for outboard decode.
+    #[error("Verification outboard sidecar data required for this format but not supplied")]
+    MissingVerificationOutboard,
 
-    /// Missing required FEC parity sidecar for Zfec outboard decode
-    #[error("FEC parity sidecar data required for Zfec outboard format but not supplied")]
+    /// Missing required FEC parity sidecar for outboard decode.
+    #[error("FEC parity sidecar data required for Fec outboard format but not supplied")]
     MissingFecParity,
 
     /// Outboard sidecar validation failed (e.g. malformed sidecar data or read failure)
@@ -110,6 +110,14 @@ pub enum CarbonadoError {
     #[error("Ciphertext too short (expected at least nonce+tag or tag for the provided nonce)")]
     InvalidCiphertextLength,
 
+    /// Declared ciphertext length exceeded during bounded streaming decrypt.
+    #[error("Ciphertext exceeds declared length ({declared} bytes declared)")]
+    CiphertextExceedsDeclaredLength { declared: u64 },
+
+    /// Declared encoded-body length exceeded during bounded inboard decode.
+    #[error("Encoded body exceeds declared length ({declared} bytes declared)")]
+    EncodedBodyExceedsDeclaredLength { declared: u64 },
+
     #[error("HMAC authentication failed")]
     AuthenticationFailed,
 
@@ -120,7 +128,7 @@ pub enum CarbonadoError {
     #[error("Not implemented")]
     NotImplemented,
 
-    /// Post-quantum cryptography operation failed (SLH-DSA etc. via libbitcoinpqc)
+    /// Post-quantum cryptography operation failed (SLH-DSA etc. via `bitcoinpqc`)
     #[error("Post-quantum cryptography error: {0}")]
     PqcError(String),
 
@@ -172,7 +180,7 @@ pub enum CarbonadoError {
     #[error("directory layout mismatch: {0}")]
     DirectoryLayoutMismatch(String),
 
-    /// Per-file segment format disagrees with catalog encryption or allowed c4–c7 set
+    /// Per-file segment format disagrees with catalog encryption or allowed c12–c15 (Verification+FEC)
     #[error("segment format mismatch: {0}")]
     SegmentFormatMismatch(String),
 

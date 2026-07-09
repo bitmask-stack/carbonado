@@ -23,7 +23,7 @@ use clap::{Parser, Subcommand};
                   Single-file default: inboard headered `{hash}.c{fmt:02x}` (format 14 → `.c0e`).\n  \
                   `--outboard`: bare main + optional `.out`/`.par` sidecars (single-file only).\n  \
                   Directory: inboard Adamantine 1.0 catalog `.adam.c14` (or `.adam.c15` with \
-                  `--encrypted`) and heterogeneous bare segment mains (c4/c6 or c5/c7). Output \
+                  `--encrypted`) and heterogeneous bare segment mains (c12/c14 or c13/c15). Output \
                   defaults to `{input}-archive/`.\n\n\
                   See `carbonado <command> --help` for per-command options.",
     after_help = "EXAMPLES:\n  \
@@ -59,7 +59,7 @@ pub enum Commands {
         /// Single-file only: bare main + `.out`/`.par` sidecars (default single-file is inboard).
         #[arg(long)]
         outboard: bool,
-        /// Directory only: encrypted catalog c15 and segment formats c5/c7 (auto-creates BIP39 seed if needed)
+        /// Directory only: encrypted catalog c15 and segment formats c13/c15 (auto-creates BIP39 seed if needed)
         #[arg(long)]
         encrypted: bool,
         /// 32-byte master key as 64 hex chars (overrides stored BIP39 seed)
@@ -88,9 +88,9 @@ pub enum Commands {
         /// Bare outboard only: FEC padding in bytes [default: 0, auto when `.par` sidecar present]
         #[arg(long, default_value = "0", value_name = "BYTES")]
         padding: u32,
-        /// Bare outboard only: path to Bao `.out` sidecar [default: sibling of input]
-        #[arg(long, value_name = "PATH")]
-        bao_outboard: Option<PathBuf>,
+        /// Bare outboard only: path to verification `.out` sidecar [default: sibling of input]
+        #[arg(long, alias = "bao-outboard", value_name = "PATH")]
+        verification_outboard: Option<PathBuf>,
         /// Bare outboard only: path to FEC `.par` sidecar [default: sibling of input]
         #[arg(long, value_name = "PATH")]
         fec_parity: Option<PathBuf>,

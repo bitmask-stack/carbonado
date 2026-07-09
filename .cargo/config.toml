@@ -1,0 +1,15 @@
+# TEMPORARY — remove on or after 2026-07-18.
+#
+# `bitcoinpqc` 0.4.0 (published 2026-07-08) may not be on mirrored registries yet.
+# This patch satisfies `version = "0.4"` until mirrors sync (target lift: 2026-07-18).
+#
+# Lift checklist (on or after 2026-07-18):
+#   1. Delete this file.
+#   2. `cargo update -p bitcoinpqc`
+#   3. `cargo build --features pqc` (should resolve from crates.io with no patch).
+#
+# Environments that already see `bitcoinpqc` 0.4 on the default index may delete early.
+
+[patch.crates-io]
+bitcoinpqc = { git = "https://github.com/cryptoquick/libbitcoinpqc-bindings.git", rev = "7936b56" }
+# Monorepo local iteration (optional): `bitcoinpqc = { path = "../libbitcoinpqc-bindings" }`

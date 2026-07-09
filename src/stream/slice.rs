@@ -12,7 +12,7 @@ use bao_tree::{
 
 use crate::{
     constants::{BAO_BLOCK_SIZE, SLICE_LEN},
-    crypto::carbonado_bao_key,
+    crypto::carbonado_verification_key,
     error::CarbonadoError,
     utils::decode_bao_hash,
 };
@@ -141,20 +141,14 @@ pub fn verify_slice_inboard_seekable(
     if count == 0 {
         return Ok(vec![]);
     }
-    if input.len() < 8 {
-        return Err(CarbonadoError::InvalidHeaderLength);
-    }
-    let clen_bytes: [u8; 8] = input[0..8]
-        .try_into()
-        .map_err(|_| CarbonadoError::InvalidHeaderLength)?;
-    let content_len = u64::from_le_bytes(clen_bytes);
+    let content_len = crate::stream::bao::inboard_bao_content_len_prefix(input)?;
     if content_len == 0 {
         return Err(CarbonadoError::InvalidSliceIndex { index, content_len });
     }
     let response = &input[8..];
     let root = decode_bao_hash(hash)?;
     let tree = BaoTree::new(content_len, BAO_BLOCK_SIZE);
-    let key = carbonado_bao_key(format);
+    let key = carbonado_verification_key(format);
     // Inboard artifacts embed a full bao response (encode uses ChunkRanges::all()); partial
     // keyed decode ranges only match partial responses, so verify walks the full layout.
     let ranges = ChunkRanges::all();
@@ -187,13 +181,7 @@ pub(crate) fn extract_slice_inboard_for_scrub(
     if count == 0 {
         return Ok(vec![]);
     }
-    if input.len() < 8 {
-        return Err(CarbonadoError::InvalidHeaderLength);
-    }
-    let clen_bytes: [u8; 8] = input[0..8]
-        .try_into()
-        .map_err(|_| CarbonadoError::InvalidHeaderLength)?;
-    let content_len = u64::from_le_bytes(clen_bytes);
+    let content_len = crate::stream::bao::inboard_bao_content_len_prefix(input)?;
     if content_len == 0 {
         return Err(CarbonadoError::InvalidSliceIndex { index, content_len });
     }
@@ -289,7 +277,7 @@ pub fn verify_slice_outboard<D: ReadAt>(
         tree,
         data: outboard_bytes,
     };
-    let key = carbonado_bao_key(format);
+    let key = carbonado_verification_key(format);
     let ranges = slice_to_chunk_ranges(index, count);
     let expected_chunks = u64::from(count) * CHUNKS_PER_SLICE;
 

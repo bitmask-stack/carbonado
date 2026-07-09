@@ -3,7 +3,7 @@ name = "carbonado"
 edition = "2021"
 version = "2.0.0"
 license = "MIT"
-description = "An apocalypse-resistant data storage format for the truly paranoid. Fully symmetric AES-256-CTR + HMAC-SHA512 (EtM) container. Callers supply high-entropy master keys; passphrase KDF (e.g. Argon2id) is caller responsibility. SLH-DSA signatures are provided only as sidecars (via libbitcoinpqc). Clean cryptographic break from ECIES — v1 encrypted archives require external migration."
+description = "An apocalypse-resistant data storage format for the truly paranoid. Fully symmetric AES-256-CTR + HMAC-SHA512 (EtM) container. Callers supply high-entropy master keys; passphrase KDF (e.g. Argon2id) is caller responsibility. SLH-DSA signatures are provided only as sidecars (via `bitcoinpqc`). Clean cryptographic break from ECIES — v1 encrypted archives require external migration."
 documentation = "https://docs.rs/carbonado"
 homepage = "https://github.com/bitmask-stack/carbonado"
 repository = "https://github.com/bitmask-stack/carbonado.git"
@@ -32,6 +32,8 @@ bao = "0.13"
 # We set default-features = false because the fork's defaults pull in tokio/fs/etc
 # which are not needed (we only use sync keyed) and break some cross/wasm targets.
 bao_tree = { package = "bao-tree", git = "https://github.com/SurmountSystems/bao-tree.git", branch = "76-keyed-bao", default-features = false, features = ["validate"] }
+futures-lite = { version = "2", optional = true, default-features = false, features = ["std"] }
+tokio = { version = "1", features = ["rt"], optional = true }
 bitmask-enum = "2.1.0"
 log = "0.4.19"
 serde = { version = "1.0.164", features = ["derive"] }
@@ -74,33 +76,51 @@ ctr = "0.9"
 hmac = "0.12"
 sha2 = "0.10"
 getrandom = { version = "0.2", features = ["js"] }
-libbitcoinpqc = { version = "0.1", optional = true }
+# bitcoinpqc 0.4 (WASM-capable build.rs); SLH-DSA-SHA2-128s sidecars.
+# Local mirror lag: `.cargo/config.toml` patches 0.4 until 2026-07-18 (see lift checklist there).
+bitcoinpqc = { version = "0.4", optional = true }
 
 # Note: ecies + libsecp256k1-core + nostr + secp256k1 removed (clean break from old ECIES design and Nostr bech32/npub helpers).
 # Future quantum-resistant key formats (qpub etc.) will be handled separately.
 
 [features]
-default = ["pqc", "ots", "cli"]
-pqc = ["dep:libbitcoinpqc"]
+default = ["pqc", "ots", "cli", "parallel"]
+pqc = ["dep:bitcoinpqc"]
 # OpenTimestamps stub stamping (offline/testable; no network calendar in default build).
 ots = []
 # `carbonado` CLI binary (encode/decode/key). Disable for library-only dependency trees.
 cli = ["dep:clap", "dep:bip39", "dep:directories"]
 # `gen-carbonado-man` — regenerate roff pages under doc/man/ (`just gen-man`).
 man-gen = ["cli", "dep:clap_mangen"]
+# Async I/O adapter layer (Phase 2): `stream_decode_async` and pipeline I/O traits.
+# `bao_tree/tokio_fsm` is reserved for future async Bao FSM paths — no crate code references it yet.
+async = ["dep:futures-lite", "bao_tree/tokio_fsm"]
+# Optional Tokio: `stream_decode_async` offloads sync pipeline to `spawn_blocking` (not required for trait defs).
+async-tokio = ["async", "dep:tokio"]
+# CPU parallelism (Phase 3): fork-join RS parity encode via `std::thread::scope` (std only; on by default).
+# Disable with `--no-default-features` for library-only trees that want serial `rs.encode` only.
+parallel = []
 
 [dev-dependencies]
 anyhow = "1.0.71"
+sha2 = "0.10"
+serde_json = "1"
 pretty_env_logger = "0.5.0"
 rand = "0.8.5"
 wasm-bindgen-test = "0.3.37"
 criterion = { version = "0.5", features = ["html_reports"] }
 proptest = "1"
 tiny_http = "0.12"
+tokio = { version = "1", features = ["rt", "macros"] }
 
 [[bench]]
 name = "crypto_bench"
 harness = false
+
+[[bench]]
+name = "parallel_bench"
+harness = false
+required-features = ["parallel"]
 
 # Primary CLI: `cargo install carbonado` or `cargo install --path . --bin carbonado`
 [[bin]]

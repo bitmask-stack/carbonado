@@ -8,3 +8,22 @@
 
 [patch."https://github.com/SurmountSystems/bao-tree.git"]
 bao-tree = { path = "../bao-tree" }
+
+# `bitcoinpqc` 0.4 mirror lag: the repo ships `.cargo/config.toml` with a temporary
+# `[patch.crates-io]` until 2026-07-18. Delete that file once your index has 0.4.
+
+# Optional: wasm32 tooling notes
+#
+# CI / `just lint-wasm`: `--no-default-features` (no pqc) — green without a C wasm toolchain.
+#
+# wasm32 + `pqc`: bitcoinpqc's clang shim lives at
+# `../libbitcoinpqc-bindings/wasm/clang-wasm32.sh`. Do **not** set global
+# `CC_wasm32-unknown-unknown` to that shim for a full Carbonado build: `zstd-sys`
+# then tries to assemble host amd64 `.S` files with the wasm clang and fails.
+# Isolate CC for bitcoinpqc only (or wait for dep/build fixes) before enabling
+# wasm+pqc in CI.
+#
+# [target.wasm32-unknown-unknown]
+# rustflags = [
+#   "--cfg", "getrandom_backend=\"wasm_js\"",
+# ]

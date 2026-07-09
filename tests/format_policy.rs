@@ -27,44 +27,51 @@ fn infer_text_is_compressible() {
 }
 
 #[test]
-fn auto_public_text_gets_c6() {
+fn auto_public_text_gets_c14() {
     let fmt = SegmentFormatPolicy::Auto
         .resolve_segment_format(false, b"hello world\n")
-        .expect("c6");
+        .expect("c14");
     assert_eq!(fmt, SEGMENT_FORMAT_PUBLIC_COMPRESSED);
 }
 
 #[test]
-fn auto_public_jpeg_gets_c4() {
+fn auto_public_jpeg_gets_c12() {
     let jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
     let fmt = SegmentFormatPolicy::Auto
         .resolve_segment_format(false, &jpeg)
-        .expect("c4");
+        .expect("c12");
     assert_eq!(fmt, SEGMENT_FORMAT_PUBLIC_RAW);
 }
 
 #[test]
-fn auto_encrypted_text_gets_c7() {
+fn auto_encrypted_text_gets_c15() {
     let fmt = SegmentFormatPolicy::Auto
         .resolve_segment_format(true, b"secret notes\n")
-        .expect("c7");
+        .expect("c15");
     assert_eq!(fmt, SEGMENT_FORMAT_ENCRYPTED_COMPRESSED);
 }
 
 #[test]
-fn force_raw_encrypted_gets_c5() {
+fn force_raw_encrypted_gets_c13() {
     let fmt = SegmentFormatPolicy::ForceRaw
         .resolve_segment_format(true, b"anything")
-        .expect("c5");
+        .expect("c13");
     assert_eq!(fmt, SEGMENT_FORMAT_ENCRYPTED_RAW);
 }
 
 #[test]
-fn force_c4_rejects_encrypted_catalog() {
-    let err = SegmentFormatPolicy::ForceC4
+fn force_c12_rejects_encrypted_catalog() {
+    let err = SegmentFormatPolicy::ForceC12
         .resolve_segment_format(true, b"x")
         .unwrap_err();
-    assert!(matches!(err, CarbonadoError::SegmentFormatMismatch(_)));
+    assert!(
+        matches!(
+            err,
+            CarbonadoError::SegmentFormatMismatch(ref m)
+                if m.contains("does not match catalog encryption=true")
+        ),
+        "got {err:?}"
+    );
 }
 
 #[test]

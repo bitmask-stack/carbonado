@@ -77,8 +77,18 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Test (native)
-        run: just test
+      - name: Test (default features, includes parallel)
+        run: cargo test
+        env:
+          RUST_BACKTRACE: 1
+
+      - name: Test (serial FEC path without parallel)
+        run: cargo test --no-default-features --features "pqc,ots,cli" --test serial_fec_path
+        env:
+          RUST_BACKTRACE: 1
+
+      - name: Test (all features)
+        run: cargo test --all-features
         env:
           RUST_BACKTRACE: 1
 

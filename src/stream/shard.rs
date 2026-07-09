@@ -6,7 +6,6 @@ use crate::{
     constants::Format,
     error::CarbonadoError,
     file::{decode_stream, Header},
-    stream::encode::{stream_encode_inboard_body_from_bytes, stream_preprocess},
     structs::EncodeInfo,
 };
 
@@ -48,29 +47,19 @@ pub fn encode_shard_stream<R: BufRead, W: Write>(
     chunk_index: u32,
     segment_plaintext_budget: u64,
     metadata: Option<[u8; 8]>,
-    output: W,
+    mut output: W,
 ) -> Result<ShardEncodeResult, CarbonadoError> {
     let fmt = Format::from(format);
-    let mut staging = std::io::Cursor::new(Vec::new());
     let mut payload_nonce = [0u8; 16];
     let mut limited = input.by_ref().take(segment_plaintext_budget);
-    let stats = stream_preprocess(
+    let (hash, info, stats) = crate::stream::encode::stream_encode_inboard(
         master_key,
-        fmt,
         &mut limited,
-        &mut staging,
+        format,
+        &mut output,
         &mut payload_nonce,
         true,
     )?;
-    let body_bytes = staging.into_inner();
-
-    let mut body_out = Vec::new();
-    let (hash, info) =
-        stream_encode_inboard_body_from_bytes(&body_bytes, stats, format, &mut body_out)?;
-    let mut output = output;
-    output
-        .write_all(&body_out)
-        .map_err(CarbonadoError::StdIoError)?;
 
     let has_more = if stats.input_len == segment_plaintext_budget {
         has_more_buffered_input(&mut input)?

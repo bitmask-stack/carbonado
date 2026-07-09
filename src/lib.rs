@@ -68,7 +68,7 @@ pub mod constants;
 /// See the module-level documentation in [`crypto`] and AGENTS.md §2 for the
 /// security model, nonce rules, and SLH-DSA sidecar requirements.
 pub mod crypto;
-pub use crypto::carbonado_bao_key;
+pub use crypto::carbonado_verification_key;
 /// Error types
 pub mod error;
 /// File helper methods.
@@ -127,7 +127,12 @@ pub use decoding::scrub;
 
 pub use decoding::scrub_outboard;
 
+#[doc(hidden)]
+pub use decoding::verify_inboard_keyed_oracle;
+
 pub use paths::{detect_archive_layout, ArchiveLayout};
+#[cfg(feature = "async")]
+pub use stream::stream_decode_async;
 pub use stream::{
     decode_shards_stream, encode_shard_stream, stream_decode, stream_decode_buffer,
     stream_decode_outboard, stream_decode_outboard_buffer, stream_encode_buffer,
@@ -150,16 +155,16 @@ pub use adamantine::{
     ADAMANTINE_MAGIC,
 };
 pub use adamantine_payload::{
-    build_adamantine_payload, split_adamantine_payload, MAX_ADAMANTINE_PAYLOAD_LEN,
-    MAX_BAO_BUNDLE_LEN,
+    build_adamantine_payload, fec_slice_from_bundle, split_adamantine_payload,
+    verification_slice_from_bundle, MAX_ADAMANTINE_PAYLOAD_LEN, MAX_BAO_BUNDLE_LEN,
 };
 pub use directory::SegmentFormatPolicy;
 
 pub use filepack_manifest::{
-    FilepackEntry, FilepackManifest, FilepackSegmentMap, SegmentRef,
+    expected_fec_parity_len, FilepackEntry, FilepackManifest, FilepackSegmentMap, SegmentRef,
     FILEPACK_MANIFEST_FORMAT_LEVEL, FILEPACK_MANIFEST_FORMAT_LEVEL_ENCRYPTED,
     FILEPACK_MANIFEST_FORMAT_LEVEL_PUBLIC, FILEPACK_MANIFEST_VERSION,
-    MAX_FILEPACK_MANIFEST_ENTRIES,
+    MAX_FILEPACK_MANIFEST_ENTRIES, MAX_SEGMENT_MAIN_LEN,
 };
 
 /// Deprecated: renamed to [`FilepackManifest`].

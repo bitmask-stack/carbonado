@@ -99,8 +99,8 @@ fn codec(path: &str) -> Result<()> {
         15,
     )?;
 
-    // Exercise extract_slice and verify returning logical data (post-zfec for this level).
-    // For bao+zfec, full count verify returns exactly the zfec bytes (skipping 64B parents).
+    // Exercise extract_slice and verify returning logical data (post-fec for this level).
+    // For bao+fec, full count verify returns exactly the fec bytes (skipping 64B parents).
     let _ = extract_slice(&encoded, 0, hash.as_bytes(), 15);
     let verified_full = verify_slice(
         &encoded,
@@ -201,7 +201,7 @@ fn fec_robustness() -> Result<()> {
     let _ = pretty_env_logger::try_init();
 
     // Use non-encrypt formats so re-encode is deterministic (no internal nonce)
-    // 12 = Bao+Zfec, 14=Bao+Snappy+Zfec, 8=Zfec only (no bao, scrub not used), 10=snappy+zfec
+    // 12 = Bao+Zfec, 14=Bao+Snappy+Zfec, 8=Zfec only (no bao, scrub not used), 10=snappy+fec
     for &level in &[8u8, 10, 12, 14] {
         for &size in &[0usize, 1, 100, 1023, 4096, 5000, 8192, 10000] {
             let mut input = vec![0u8; size];
@@ -241,9 +241,9 @@ fn fec_robustness() -> Result<()> {
         }
     }
 
-    // Encrypted+Zfec with Bao for scrub (13/15 = E+(S)+Bao+Zfec). 9/11 lack Bao so return ScrubRequiresBao (now exercised in matrix + scrub_specific_errors).
+    // Encrypted+Zfec with Bao for scrub (13/15 = E+(S)+Bao+Zfec). 9/11 lack Bao so return ScrubRequiresVerification (now exercised in matrix + scrub_specific_errors).
     for &level in &[13u8, 15] {
-        let input = b"encrypted zfec roundtrip and scrub test payload";
+        let input = b"encrypted fec roundtrip and scrub test payload";
         let mut key = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut key);
         let Encoded(e, h, ei) = encode(&key, input, level)?;
@@ -262,7 +262,7 @@ fn fec_robustness() -> Result<()> {
     }
 
     // Scrub recovery e2e, including large for det + chaos patterns (taint distributed <=~50% shard wise)
-    // Use level 12 (zfec+bao, repeatable)
+    // Use level 12 (fec+bao, repeatable)
     let mut input = vec![0xABu8; 16384]; // >8k to cover previous non-det TODO case
     for (i, b) in input.iter_mut().enumerate() {
         *b = (i as u8).wrapping_mul(7);
@@ -375,7 +375,7 @@ fn fec_robustness() -> Result<()> {
     let rec2 = scrub(&consec, hash.as_bytes(), &encode_info, 12).expect("consec recoverable");
     assert_eq!(rec2, orig_encoded, "scrub from consec corruption");
 
-    // 0-byte case for zfec
+    // 0-byte case for fec
     let Encoded(e0, h0, ei0) = encode(&key, &[], 12)?;
     let d0 = decode(&key, h0.as_bytes(), &e0, ei0.padding_len, 12)?;
     assert!(d0.is_empty());
@@ -430,7 +430,7 @@ fn wasm_fec_robustness_small() -> Result<()> {
 }
 
 /// Full 16-format matrix roundtrips (content equality, not len-only), plus explicit det for
-/// non-encrypt Zfec, scrub/error coverage for *all* Zfec formats (incl 9/11 for ScrubRequiresBao
+/// non-encrypt Zfec, scrub/error coverage for *all* Zfec formats (incl 9/11 for ScrubRequiresVerification
 /// and 12-15 for recovery). Exercises FEC paths changed in v2 + non-FEC unchanged.
 /// Covers plan req: full encode/decode for all 16 (w/wo FEC), det, 4/8 shards etc via scrub.
 #[test]
@@ -502,24 +502,24 @@ fn all_formats_matrix_roundtrips() -> Result<()> {
                 let err = scrub(&e, h.as_bytes(), &ei, level).unwrap_err();
                 assert!(
                     matches!(err, CarbonadoError::UnnecessaryScrub),
-                    "good bao+zfec data must err UnnecessaryScrub (level {})",
+                    "good bao+fec data must err UnnecessaryScrub (level {})",
                     level
                 );
                 let mut bad = e.clone();
                 if bad.len() > 64 {
                     bad[48] ^= 0x5A; // light
                 }
-                let rec = scrub(&bad, h.as_bytes(), &ei, level)
-                    .expect("scrub recover for bao+zfec level");
+                let rec =
+                    scrub(&bad, h.as_bytes(), &ei, level).expect("scrub recover for bao+fec level");
                 assert_eq!(rec, e, "scrub body eq level {}", level);
                 let drec = decode(&key, h.as_bytes(), &rec, ei.padding_len, level)?;
                 assert_eq!(drec, input, "post-scrub decode eq level {}", level);
             } else {
-                // no Bao Zfec (e.g. 8,9,10,11): scrub must give ScrubRequiresBao
+                // no Bao Zfec (e.g. 8,9,10,11): scrub must give ScrubRequiresVerification
                 let err = scrub(&e, h.as_bytes(), &ei, level).unwrap_err();
                 assert!(
-                    matches!(err, CarbonadoError::ScrubRequiresBao),
-                    "Zfec w/o Bao level {} -> ScrubRequiresBao",
+                    matches!(err, CarbonadoError::ScrubRequiresVerification),
+                    "Zfec w/o Bao level {} -> ScrubRequiresVerification",
                     level
                 );
             }

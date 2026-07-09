@@ -5,12 +5,13 @@
 **Carbonado** is a single flat-file archival container format designed for long-term, consensus-critical data. It combines:
 
 - **AES-256-CTR + full HMAC-SHA512 EtM** (v2 symmetric encryption)
-- **SLH-DSA (FIPS-205)** post-quantum signatures as **sidecars only** (via `libbitcoinpqc`)
-- **Bao** streaming verifiability
-- **Reed-Solomon 4/8** (deterministic FEC replacement for classic zfec) forward error correction
+- **SLH-DSA (FIPS-205 SHA2-128s)** post-quantum signatures as **sidecars only** (via `bitcoinpqc` 0.4)
+- **Bao** keyed 4 KiB stream/slice verifiability
+- **Reed-Solomon 4/8** (deterministic FEC) forward error correction
 - **Zstd (level 20)** compression (optional)
+- **Streaming-first pipeline** with honest memory tiers (sync spool + stripe FEC; see [doc/STREAMING_PARALLELISM.md](doc/STREAMING_PARALLELISM.md)); optional `async` I/O; default `parallel` RS parity fork-join
 
-It is hardware-accelerated (AES-NI/VAES + SHA extensions), WASM-compatible, and makes **no attempt** to decode legacy v1 ECIES files — this is a clean cryptographic break.
+It is hardware-accelerated (AES-NI/VAES + SHA extensions), WASM-compatible without pqc (pqc on wasm needs a clang wasm shim), and makes **no attempt** to decode legacy v1 ECIES files — this is a clean cryptographic break.
 
 See [AGENTS.md](AGENTS.md) for the normative security model, invariants, and production guidance.
 
@@ -100,7 +101,7 @@ All of these changes were made so Carbonado remains simple to reason about, runs
 The v2 design aligns with Surmount Systems’ focus on accelerating Bitcoin’s quantum resistance:
 
 - Symmetric primitives (AES-256 + HMAC-SHA512) retain strong security against Grover’s algorithm (~128-bit post-quantum).
-- Long-term authenticity for important manifests uses hash-based post-quantum signatures (SLH-DSA via libbitcoinpqc) as sidecars.
+- Long-term authenticity for important manifests uses hash-based post-quantum signatures (SLH-DSA-SHA2-128s via `bitcoinpqc`) as sidecars.
 - The design prioritizes practical, hardware-accelerated primitives for bulk archival data while using conservative, quantum-resistant tools where they matter most for long-term verifiability.
 
 ### Migration from v1 / ECIES
@@ -145,7 +146,7 @@ Use the same pattern for any intermediate key material you derive before passing
 
 ### Sidecar Post-Quantum Signatures
 
-SLH-DSA signatures (FIPS-205 via `libbitcoinpqc`) are supported **only as sidecars**. They are never stored inside the `.cXX` Carbonado segments.
+SLH-DSA signatures (FIPS-205 **SHA2-128s** via `bitcoinpqc`) are supported **only as sidecars**. They are never stored inside the `.cXX` Carbonado segments. Wire sizes match older SHAKE-128s builds but signatures are not interoperable — re-sign if migrating.
 
 Typical pattern:
 - Encode your data → get a Bao hash.
@@ -214,20 +215,20 @@ carbonado decode ./archive-out/<catalog-root>.adam.c15 --master <64hex> --output
 |------|-------|---------------|
 | Single file (default) | One file | Headered inboard `{bao_root}.c{format:02x}` (no `--outboard`) |
 | Single file (`--outboard`) | One file | Bare public main + `.out`/`.par` sidecars (hex suffix, e.g. `.c0e`) |
-| Directory (public) | Tree of files | Inboard `{catalog}.adam.c14` + bare heterogeneous segment mains (c4/c6) |
-| Directory (`--encrypted`) | Tree of files | Inboard `{catalog}.adam.c15` + bare segment mains (c5/c7) |
+| Directory (public) | Tree of files | Inboard `{catalog}.adam.c14` + bare heterogeneous segment mains (c12/c14) |
+| Directory (`--encrypted`) | Tree of files | Inboard `{catalog}.adam.c15` + bare segment mains (c13/c15) |
 
 **Decode flags:** Headered inboard `.c{fmt:02x}` files (default encode output) decode automatically from the embedded header — do not pass `--format`. The `--format`, `--hash`, `--padding`, and sidecar override flags apply only to **bare outboard** mains (no `CARBONADO20` header).
 
 **Exit codes:** failures (missing input, invalid format/master, decode errors) return a non-zero exit status; success prints a summary line and exits 0.
 
-Directory encode defaults to public c14 with output `{input}-archive/` (never `.`). Pass `--encrypted` for c15. Segment formats are auto-selected (compressible → c6/c7, incompressible → c4/c5). See [AGENTS.md §7.1](AGENTS.md#71-adamantine-directory-catalog-v10-impl-complete-in-repo-chip-deferred).
+Directory encode defaults to public c14 with output `{input}-archive/` (never `.`). Pass `--encrypted` for c15. Segment formats are auto-selected (compressible → c14/c15, incompressible → c12/c13). See [AGENTS.md §7.1](AGENTS.md#71-adamantine-directory-catalog-v10-impl-complete-in-repo-chip-deferred).
 
 **Examples:** [dir_archival.rs](examples/dir_archival.rs) (directory roundtrip), [bare_serve.rs](examples/bare_serve.rs) (HTTP static server for bare `.c14` + sidecars).
 
 ### Streaming APIs & seekable verification
 
-Carbonado 2.0 is **streaming-first**: buffer helpers in `encoding`/`decoding` delegate to `src/stream/`.
+Carbonado is **streaming-first**: buffer helpers in `encoding`/`decoding` delegate to `src/stream/`. Sync `Read`/`Write`/`Seek` is canonical. Pipeline memory is spool- and stripe-bounded on fused paths; verification decode still has residual O(logical) sinks (active elimination work — not the same as Bao slice verification).
 
 | API | Purpose |
 |-----|---------|
@@ -239,9 +240,27 @@ Carbonado 2.0 is **streaming-first**: buffer helpers in `encoding`/`decoding` de
 | `verify_slice_inboard_seekable` | O(slice) verified read from inboard blob without full decode |
 | `encode_shard_stream` / `decode_shards_stream` | Multi-segment sharding for large logical files |
 
+### Async I/O (optional)
+
+Non-blocking inboard decode for P2P fetch, HTTP range reads, and UDP assembly adapters. Sync APIs remain the default; async is an adapter layer behind the `async` Cargo feature.
+
+| Feature | Enables |
+|---------|---------|
+| `parallel` | Scoped fork-join RS parity encode (`std::thread::scope`); on by default; WASM compiles, serial at runtime |
+| `async` | `stream_decode_async`, `stream::io` async traits, `futures-lite` |
+| `async-tokio` | `async` + `spawn_blocking` offload for the sync pipeline section |
+
+```bash
+cargo test --test parallel_determinism                           # Phase 3 determinism (default)
+cargo test --no-default-features --features "pqc,ots,cli" --test serial_fec_path  # serial FEC path
+cargo test --features async --test streaming_async
+```
+
+**Notes:** Async decode stages the encoded body to a disk spool before running the sync pipeline (documented tradeoff in `doc/STREAMING_PARALLELISM.md`). Not supported on `wasm32` (`NotImplemented`). `bao_tree/tokio_fsm` is reserved for future streaming Bao paths.
+
 - **HTTP range serving:** [`bare_serve`](examples/bare_serve.rs) serves bare `.c14` mains and uses `verify_slice_outboard` to satisfy `Range:` requests with cryptographically verified 4 KiB slices.
 - **Directory sharding:** large files in directory archives are split via `encode_shard_stream`; `FilepackEntry.segments` lists multiple `SegmentRef` entries with contiguous `chunk_index` values.
-- **Encrypted directories:** `carbonado encode <dir> --encrypted --master <64hex>` emits c15 catalog and c5/c7 segment mains.
+- **Encrypted directories:** `carbonado encode <dir> --encrypted --master <64hex>` emits c15 catalog and c13/c15 segment mains.
 
 ### Directory archives (Adamantine 1.0 + rkyv FilepackManifest)
 
@@ -250,10 +269,10 @@ A directory archive is a **separate inboard catalog** plus **bare per-file segme
 | Artifact | Role |
 |----------|------|
 | `{catalog_bao_root}.adam.c14` / `.adam.c15` | Inboard headered catalog (`CARBONADO20\n` + Adamantine 1.0 payload) |
-| `{segment_bao_root}.c4` / `.c6` / `.c5` / `.c7` | Bare segment mains (heterogeneous per file; no `.out`/`.par`) |
+| `{segment_bao_root}.c12` / `.c14` / `.c13` / `.c15` | Bare segment mains (heterogeneous per file; no `.out`/`.par`) |
 
 - **Catalog:** inboard `{catalog_bao_root_64hex}.adam.c14` (public) or `.adam.c15` (encrypted) — Adamantine 1.0 envelope around rkyv [`FilepackManifest`](src/filepack_manifest.rs) v2 + bundled segment Bao outboards.
-- **Per-file segments:** bare mains only; format auto-selected (compressible → c6/c7, incompressible → c4/c5). Large files may span multiple segments (sharded `FilepackEntry`).
+- **Per-file segments:** bare mains only; format auto-selected (compressible → c14/c15, incompressible → c12/c13). Verification + FEC parity live in the catalog bundle. Large files may span multiple segments (sharded `FilepackEntry`).
 - **Optional OTS:** per-entry proofs in manifest; catalog proof in `COTS` trailer appended to catalog file (does not change Bao root).
 
 **Canonical wire encoding:** rkyv `FilepackManifest` inside Adamantine 1.0 payload. Legacy CBOR [`filepack`](src/filepack.rs) remains **interop only**.
@@ -262,7 +281,7 @@ A directory archive is a **separate inboard catalog** plus **bare per-file segme
 
 | Context | Suffix | Example |
 |---------|--------|---------|
-| Directory archives | Decimal `c14`/`c15` catalog; `c4`–`c7` segments | `abc…def.c6`, `abc…def.adam.c14` |
+| Directory archives | Decimal `c14`/`c15` catalog; `c12`–`c15` segments | `abc…def.c14`, `abc…def.adam.c14` |
 | Single-file / generic CLI outboard | Hex format byte `c{fmt:02x}` | format 14 → `abc…def.c0e` |
 
 #### Adamantine 1.0 header (19 bytes + payload)

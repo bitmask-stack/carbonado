@@ -14,7 +14,7 @@ use common::corruption::{
     scattered_outboard_main_knockout, scattered_stream_knockout, InboardShardLayout,
     OutboardShardLayout,
 };
-use common::format_matrix::{bao_zfec_levels, format_label};
+use common::format_matrix::{format_label, verification_fec_levels};
 use proptest::prelude::*;
 use rand::Rng;
 
@@ -36,7 +36,7 @@ fn distributed_knockout_recovers_up_to_four_shards_public_bao_zfec() -> Result<(
     let mut rng = rand::thread_rng();
     let key = [0u8; 32];
 
-    for level in bao_zfec_levels().filter(|l| l & 1 == 0) {
+    for level in verification_fec_levels().filter(|l| l & 1 == 0) {
         for &size in &CHAOS_PAYLOAD_SIZES {
             let payload = varied_payload(size, level);
             let Encoded(orig, hash, info) = encode(&key, &payload, level)?;
@@ -138,7 +138,7 @@ fn outboard_distributed_knockout_scrub_recover_c12_c14_c15() -> Result<()> {
         let payload = varied_payload(32_768, level);
         let oenc = encode_outboard(&key, &payload, level)?;
         let hash_bytes = oenc.hash.as_bytes();
-        let ob = oenc.bao_outboard.as_deref().expect("bao outboard");
+        let ob = oenc.verification_outboard.as_deref().expect("bao outboard");
         let par = oenc.fec_parity.as_deref().expect("fec parity");
 
         assert!(matches!(
@@ -204,10 +204,10 @@ fn outboard_distributed_knockout_scrub_recover_c12_c14_c15() -> Result<()> {
 }
 
 #[test]
-fn zfec_with_parity_outboard_decode_without_scrub() -> Result<()> {
+fn fec_with_parity_outboard_decode_without_scrub() -> Result<()> {
     let key = [0u8; 32];
 
-    // Zfec-only outboard (no Bao gate): decode_outboard calls zfec_with_parity directly.
+    // Zfec-only outboard (no Bao gate): decode_outboard calls fec_with_parity directly.
     // Truncating bare main erases trailing data shards; RS reconstructs from intact `.par`.
     // XOR bit-flip corruption on Bao+Zfec paths still requires scrub_outboard.
     // c8 only: bare main bytes map 1:1 to pre-FEC logical body (c10 Snappy shrinks main vs chunk).
@@ -238,7 +238,7 @@ fn zfec_with_parity_outboard_decode_without_scrub() -> Result<()> {
             assert_eq!(
                 dec,
                 payload,
-                "zfec_with_parity erasure recovery {} size {} keep {}",
+                "fec_with_parity erasure recovery {} size {} keep {}",
                 format_label(level),
                 size,
                 keep
@@ -257,7 +257,7 @@ fn scrub_outboard_truncated_main_recovers_c14() -> Result<()> {
     rng.fill(&mut payload[..]);
     let oenc = encode_outboard(&key, &payload, 14)?;
     let hash_bytes = oenc.hash.as_bytes();
-    let ob = oenc.bao_outboard.as_deref().expect("bao outboard");
+    let ob = oenc.verification_outboard.as_deref().expect("bao outboard");
     let par = oenc.fec_parity.as_deref().expect("fec parity");
     let chunk = oenc.info.chunk_len as usize;
 
@@ -329,7 +329,7 @@ fn stripe_boundary_outboard_scrub_chaos() -> Result<()> {
         let payload = varied_payload(size, 14);
         let oenc = encode_outboard(&key, &payload, 14)?;
         let hash_bytes = oenc.hash.as_bytes();
-        let ob = oenc.bao_outboard.as_deref().expect("bao outboard");
+        let ob = oenc.verification_outboard.as_deref().expect("bao outboard");
         let par = oenc.fec_parity.as_deref().expect("fec parity");
 
         let layout = OutboardShardLayout::from_outboard_encode(

@@ -23,5 +23,5 @@ pub fn encode_outboard(
 }
 
 // Scrub recovery re-exports
-pub use crate::stream::bao::bao_inboard_buffer;
+pub use crate::stream::bao::verification_inboard_buffer;
 pub use crate::stream::fec::encode_inboard_buffer;

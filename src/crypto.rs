@@ -5,7 +5,7 @@
 //! - **AES-256-CTR** for length-preserving bulk encryption (hardware accelerated via AES-NI/VAES).
 //! - **HMAC-SHA512** (full 64-byte tags) in Encrypt-then-MAC construction for integrity and authentication.
 //! - **HMAC-SHA512-based subkey derivation** (BIP-32 style) for key separation.
-//! - **SLH-DSA (FIPS-205 / SPHINCS+)** post-quantum signatures via `libbitcoinpqc`, **strictly for sidecar use only**.
+//! - **SLH-DSA (FIPS-205 / SPHINCS+)** post-quantum signatures via `bitcoinpqc`, **strictly for sidecar use only**.
 //!
 //! # Hybrid Paranoia Extension (v2)
 //!
@@ -64,9 +64,9 @@
 //! - (optional) compress the data yourself with `encoding::compress` (Zstd-20) or let a higher layer do it.
 //! - Call `hybrid_encrypt(master, recipient_pub, data)` (or the _with_nonce variant if you need to record the outer nonce for a Header).
 //! - The result is an opaque blob in the same layout family as `symmetric_encrypt` output.
-//! - Feed that blob onward to `encoding::zfec` (if desired) and/or `encoding::bao` (if desired).
+//! - Feed that blob onward to `encoding::fec` (if desired) and/or `encoding::bao` (if desired).
 //! - If building a Header + .cXX file: use the *same* outer nonce you supplied to hybrid (or parse it from the hybrid ct if using the internal-nonce hybrid fn) as `payload_nonce`, set the format bits *without* `Encrypted` (so standard decoders do not attempt pure-symmetric decrypt), construct the Header with master (for header_mac), and prepend it.
-//! - On the read side: parse Header (verifies header_mac with master), reverse bao/zfec, then call `hybrid_decrypt(master, recipient_secret, recovered_blob)` to obtain the original plaintext.
+//! - On the read side: parse Header (verifies header_mac with master), reverse bao/fec, then call `hybrid_decrypt(master, recipient_secret, recovered_blob)` to obtain the original plaintext.
 //!
 //! The resulting container still benefits from header authentication, Bao verifiability (keyed), deterministic RS FEC, etc.
 //! The Encrypted bit in the format is intentionally left clear because the encryption work was performed by the hybrid APIs.
@@ -92,7 +92,7 @@ use sha2::Sha512;
 
 use crate::error::CarbonadoError;
 
-// SLH-DSA / post-quantum support is optional (disabled for WASM builds where libbitcoinpqc cannot easily compile).
+// SLH-DSA / post-quantum support is optional (`pqc` feature; `bitcoinpqc` 0.4+ supports wasm32).
 #[cfg(feature = "pqc")]
 pub use bitcoinpqc::{
     self, Algorithm, KeyPair, PqcError as BitcoinPqcError, PublicKey, SecretKey, Signature,
@@ -108,7 +108,7 @@ const LABEL_PREFIX: &[u8] = b"carbonado-v2/";
 /// Magic prefix for SLH-DSA sidecar files (`<bao-hash>.cXX.slh`).
 pub const SLH1_MAGIC: &[u8; 4] = b"SLH1";
 
-/// Raw SLH-DSA-SHAKE-128s signature length (FIPS-205 / libbitcoinpqc).
+/// Raw SLH-DSA-SHA2-128s signature length (FIPS-205 / `bitcoinpqc`).
 pub const SLH1_SIGNATURE_LEN: usize = 7856;
 
 /// Total on-disk SLH-DSA sidecar size: `SLH1_MAGIC` + signature.
@@ -145,7 +145,7 @@ pub(crate) fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 /// - `"ecc-chacha-poly"` → hybrid inner ChaCha20-Poly1305 key (ECDH shared secret as PRF input)
 /// - `"slh-dsa-seed"` / `"slh-dsa-seed-2"` → SLH-DSA keygen entropy stretching (`slh_sign` only)
 ///
-/// Keyed Bao uses a separate BLAKE3 KDF — see [`carbonado_bao_key`], not `derive_subkey`.
+/// Keyed Bao uses a separate BLAKE3 KDF — see [`carbonado_verification_key`], not `derive_subkey`.
 ///
 /// # Security
 ///
@@ -175,15 +175,21 @@ pub fn derive_subkey(master: &[u8], label: &str) -> Result<[u8; 64], CarbonadoEr
 /// This is **not** an HMAC-SHA512 subkey. It uses BLAKE3's `derive_key`:
 ///
 /// ```text
-/// blake3::derive_key("carbonado-v2/bao", &[format_byte])
+/// blake3::derive_key("carbonado-v2/verification", &[format_byte])
 /// ```
 ///
 /// Keyed Bao roots commit to the exact format pipeline chosen at encode time.
 /// Different format bytes produce independent roots even for identical logical input.
 ///
 /// See AGENTS.md §2.1.5 (Keyed Bao KDF) and `tests/bao_keyed_contract.rs`.
+pub fn carbonado_verification_key(format: u8) -> [u8; 32] {
+    blake3::derive_key("carbonado-v2/verification", &[format])
+}
+
+/// Deprecated: use [`carbonado_verification_key`].
+#[deprecated(since = "2.1.0", note = "renamed to carbonado_verification_key")]
 pub fn carbonado_bao_key(format: u8) -> [u8; 32] {
-    blake3::derive_key("carbonado-v2/bao", &[format])
+    carbonado_verification_key(format)
 }
 
 /// Encrypt with AES-256-CTR + full HMAC-SHA512 (64-byte tag) in Encrypt-then-MAC mode.
@@ -341,14 +347,14 @@ pub fn slh_dsa_generate_keypair(entropy: &[u8]) -> Result<KeyPair, CarbonadoErro
     if entropy.len() < 128 {
         return Err(CarbonadoError::InvalidKeyLength);
     }
-    bitcoinpqc::generate_keypair(Algorithm::SLH_DSA_128S, entropy)
+    bitcoinpqc::generate_keypair(Algorithm::SLH_DSA_SHA2_128S, entropy)
         .map_err(|e| CarbonadoError::PqcError(e.to_string()))
 }
 
 #[cfg(feature = "pqc")]
 /// Sign a message with an SLH-DSA secret key.
 pub fn slh_dsa_sign(secret_key: &SecretKey, message: &[u8]) -> Result<Signature, CarbonadoError> {
-    if secret_key.algorithm != Algorithm::SLH_DSA_128S {
+    if secret_key.algorithm != Algorithm::SLH_DSA_SHA2_128S {
         return Err(CarbonadoError::PqcError(
             "wrong algorithm for SLH-DSA".into(),
         ));
@@ -363,7 +369,7 @@ pub fn slh_dsa_verify(
     message: &[u8],
     signature: &Signature,
 ) -> Result<bool, CarbonadoError> {
-    if public_key.algorithm != Algorithm::SLH_DSA_128S {
+    if public_key.algorithm != Algorithm::SLH_DSA_SHA2_128S {
         return Err(CarbonadoError::PqcError(
             "wrong algorithm for SLH-DSA".into(),
         ));
@@ -553,7 +559,7 @@ pub fn slh_sign(seed: &[u8], message: &[u8]) -> Result<Vec<u8>, CarbonadoError> 
         return Err(CarbonadoError::InvalidKeyLength);
     }
 
-    // Stretch the caller's seed to the 128 bytes required by libbitcoinpqc using our
+    // Stretch the caller's seed to the 128 bytes required by `bitcoinpqc` using our
     // existing domain-separated KDF. This is deterministic given the seed.
     let stretched = derive_subkey(seed, "slh-dsa-seed")?;
     // We only have 64 bytes. Call derive again with a different label to get another 64.
@@ -581,11 +587,11 @@ pub fn slh_verify(pk: &[u8], message: &[u8], sig: &[u8]) -> Result<bool, Carbona
     }
 
     let public_key = PublicKey {
-        algorithm: Algorithm::SLH_DSA_128S,
+        algorithm: Algorithm::SLH_DSA_SHA2_128S,
         bytes: pk.to_vec(),
     };
     let signature = Signature {
-        algorithm: Algorithm::SLH_DSA_128S,
+        algorithm: Algorithm::SLH_DSA_SHA2_128S,
         bytes: sig.to_vec(),
     };
 
@@ -833,7 +839,7 @@ mod tests {
     }
 
     // ========================================================================
-    // SLH-DSA / libbitcoinpqc tests (real implementation, not stubs)
+    // SLH-DSA / bitcoinpqc tests (real implementation, not stubs)
     // Only compiled when the "pqc" feature is enabled.
     // ========================================================================
 
@@ -848,14 +854,14 @@ mod tests {
 
         assert_eq!(keypair.public_key.bytes.len(), 32);
         assert_eq!(keypair.secret_key.bytes.len(), 64);
-        assert_eq!(keypair.public_key.algorithm, Algorithm::SLH_DSA_128S);
+        assert_eq!(keypair.public_key.algorithm, Algorithm::SLH_DSA_SHA2_128S);
 
         let message = b"important manifest or checkpoint hash goes here";
 
         let sig = slh_dsa_sign(&keypair.secret_key, message).expect("signing must succeed");
 
-        assert_eq!(sig.bytes.len(), 7856); // SLH-DSA-SHAKE-128s signature size
-        assert_eq!(sig.algorithm, Algorithm::SLH_DSA_128S);
+        assert_eq!(sig.bytes.len(), 7856); // SLH-DSA-SHA2-128s signature size
+        assert_eq!(sig.algorithm, Algorithm::SLH_DSA_SHA2_128S);
 
         let valid = slh_dsa_verify(&keypair.public_key, message, &sig)
             .expect("verify call should not error");
@@ -1155,10 +1161,10 @@ mod tests {
     }
 
     #[test]
-    fn carbonado_bao_key_matches_blake3_derive_key() {
+    fn carbonado_verification_key_matches_blake3_derive_key() {
         for format in [0u8, 4, 14, 15] {
-            let expected = blake3::derive_key("carbonado-v2/bao", &[format]);
-            assert_eq!(carbonado_bao_key(format), expected);
+            let expected = blake3::derive_key("carbonado-v2/verification", &[format]);
+            assert_eq!(carbonado_verification_key(format), expected);
         }
     }
 

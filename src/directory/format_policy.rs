@@ -1,43 +1,56 @@
 //! Per-segment Carbonado format selection for directory archives.
 //!
 //! Directory catalogs are always inboard c14 (public) or c15 (encrypted). Individual file
-//! segments use heterogeneous c4/c6 (public) or c5/c7 (encrypted) chosen by
+//! segments use heterogeneous c12/c14 (public) or c13/c15 (encrypted) chosen by
 //! [`SegmentFormatPolicy`] and the `infer` crate heuristic.
 
+use crate::constants::Format;
 use crate::error::CarbonadoError;
 use crate::filepack_manifest::{
     FILEPACK_MANIFEST_FORMAT_LEVEL_ENCRYPTED, FILEPACK_MANIFEST_FORMAT_LEVEL_PUBLIC,
 };
 
-/// Public incompressible segment format (Bao verifiable, no compression).
-pub const SEGMENT_FORMAT_PUBLIC_RAW: u8 = 0x04;
+/// Public incompressible segment format (Verification + FEC, no compression).
+pub const SEGMENT_FORMAT_PUBLIC_RAW: u8 = 0x0C;
 
-/// Public compressible segment format (Zstd + Bao).
-pub const SEGMENT_FORMAT_PUBLIC_COMPRESSED: u8 = 0x06;
+/// Public compressible segment format (Zstd + Verification + FEC).
+pub const SEGMENT_FORMAT_PUBLIC_COMPRESSED: u8 = 0x0E;
 
-/// Encrypted incompressible segment format.
-pub const SEGMENT_FORMAT_ENCRYPTED_RAW: u8 = 0x05;
+/// Encrypted incompressible segment format (Encryption + Verification + FEC).
+pub const SEGMENT_FORMAT_ENCRYPTED_RAW: u8 = 0x0D;
 
-/// Encrypted compressible segment format.
-pub const SEGMENT_FORMAT_ENCRYPTED_COMPRESSED: u8 = 0x07;
+/// Encrypted compressible segment format (Encryption + Zstd + Verification + FEC).
+pub const SEGMENT_FORMAT_ENCRYPTED_COMPRESSED: u8 = 0x0F;
 
 /// Policy for selecting per-file segment format levels.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SegmentFormatPolicy {
-    /// `infer` heuristic: likely incompressible media/archives → c4/c5, else c6/c7.
+    /// `infer` heuristic: likely incompressible media/archives → c12/c13, else c14/c15.
     #[default]
     Auto,
-    /// Force incompressible public c4 / encrypted c5.
+    /// Force incompressible public c12 / encrypted c13.
     ForceRaw,
-    /// Force compressible public c6 / encrypted c7.
+    /// Force compressible public c14 / encrypted c15.
     ForceCompressed,
-    /// Force public c4 regardless of catalog encryption (encode error if catalog encrypted).
+    /// Force public c12 regardless of catalog encryption (encode error if catalog encrypted).
+    ForceC12,
+    /// Force public c14.
+    ForceC14,
+    /// Force encrypted c13.
+    ForceC13,
+    /// Force encrypted c15.
+    ForceC15,
+    /// Deprecated: use [`SegmentFormatPolicy::ForceC12`].
+    #[deprecated(since = "2.1.0", note = "directory segments are c12–c15; use ForceC12")]
     ForceC4,
-    /// Force public c6.
+    /// Deprecated: use [`SegmentFormatPolicy::ForceC14`].
+    #[deprecated(since = "2.1.0", note = "directory segments are c12–c15; use ForceC14")]
     ForceC6,
-    /// Force encrypted c5.
+    /// Deprecated: use [`SegmentFormatPolicy::ForceC13`].
+    #[deprecated(since = "2.1.0", note = "directory segments are c12–c15; use ForceC13")]
     ForceC5,
-    /// Force encrypted c7.
+    /// Deprecated: use [`SegmentFormatPolicy::ForceC15`].
+    #[deprecated(since = "2.1.0", note = "directory segments are c12–c15; use ForceC15")]
     ForceC7,
 }
 
@@ -48,6 +61,7 @@ impl SegmentFormatPolicy {
         catalog_encrypted: bool,
         data: &[u8],
     ) -> Result<u8, CarbonadoError> {
+        #[allow(deprecated)]
         let fmt = match self {
             SegmentFormatPolicy::Auto => {
                 if catalog_encrypted {
@@ -76,10 +90,18 @@ impl SegmentFormatPolicy {
                     SEGMENT_FORMAT_PUBLIC_COMPRESSED
                 }
             }
-            SegmentFormatPolicy::ForceC4 => SEGMENT_FORMAT_PUBLIC_RAW,
-            SegmentFormatPolicy::ForceC6 => SEGMENT_FORMAT_PUBLIC_COMPRESSED,
-            SegmentFormatPolicy::ForceC5 => SEGMENT_FORMAT_ENCRYPTED_RAW,
-            SegmentFormatPolicy::ForceC7 => SEGMENT_FORMAT_ENCRYPTED_COMPRESSED,
+            SegmentFormatPolicy::ForceC12 | SegmentFormatPolicy::ForceC4 => {
+                SEGMENT_FORMAT_PUBLIC_RAW
+            }
+            SegmentFormatPolicy::ForceC14 | SegmentFormatPolicy::ForceC6 => {
+                SEGMENT_FORMAT_PUBLIC_COMPRESSED
+            }
+            SegmentFormatPolicy::ForceC13 | SegmentFormatPolicy::ForceC5 => {
+                SEGMENT_FORMAT_ENCRYPTED_RAW
+            }
+            SegmentFormatPolicy::ForceC15 | SegmentFormatPolicy::ForceC7 => {
+                SEGMENT_FORMAT_ENCRYPTED_COMPRESSED
+            }
         };
         validate_segment_format_for_catalog(fmt, catalog_encrypted)?;
         Ok(fmt)
@@ -98,11 +120,16 @@ pub fn is_likely_incompressible(data: &[u8]) -> bool {
         || infer::is_font(data)
 }
 
-/// Validate segment format is one of c4/c5/c6/c7 and matches catalog encryption.
+/// Validate segment format is one of c12–c15, requires FEC, and matches catalog encryption.
 pub fn validate_segment_format_for_catalog(
     segment_format: u8,
     catalog_encrypted: bool,
 ) -> Result<(), CarbonadoError> {
+    if (0x04..=0x07).contains(&segment_format) {
+        return Err(CarbonadoError::SegmentFormatMismatch(format!(
+            "legacy segment format 0x{segment_format:02x} (c4–c7) rejected; directory segments require c12–c15 with FEC"
+        )));
+    }
     let valid = matches!(
         segment_format,
         SEGMENT_FORMAT_PUBLIC_RAW
@@ -113,6 +140,17 @@ pub fn validate_segment_format_for_catalog(
     if !valid {
         return Err(CarbonadoError::SegmentFormatMismatch(format!(
             "unsupported segment format 0x{segment_format:02x}"
+        )));
+    }
+    let fmt = Format::from(segment_format);
+    if !fmt.contains(Format::Verification) {
+        return Err(CarbonadoError::SegmentFormatMismatch(format!(
+            "segment format 0x{segment_format:02x} must include Verification"
+        )));
+    }
+    if !fmt.contains(Format::Fec) {
+        return Err(CarbonadoError::SegmentFormatMismatch(format!(
+            "segment format 0x{segment_format:02x} must include FEC"
         )));
     }
     let seg_encrypted = segment_format & 1 != 0;
@@ -138,28 +176,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn auto_selects_c6_for_text() {
+    fn auto_selects_c14_for_text() {
         let fmt = SegmentFormatPolicy::Auto
             .resolve_segment_format(false, b"hello world source code\n")
-            .expect("c6");
+            .expect("c14");
         assert_eq!(fmt, SEGMENT_FORMAT_PUBLIC_COMPRESSED);
     }
 
     #[test]
-    fn auto_selects_c4_for_jpeg_magic() {
+    fn auto_selects_c12_for_jpeg_magic() {
         let jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
         let fmt = SegmentFormatPolicy::Auto
             .resolve_segment_format(false, &jpeg)
-            .expect("c4");
+            .expect("c12");
         assert_eq!(fmt, SEGMENT_FORMAT_PUBLIC_RAW);
     }
 
     #[test]
-    fn force_c5_rejects_public_catalog() {
-        let err = SegmentFormatPolicy::ForceC5
+    fn force_c13_rejects_public_catalog() {
+        let err = SegmentFormatPolicy::ForceC13
             .resolve_segment_format(false, b"x")
             .unwrap_err();
         assert!(matches!(err, CarbonadoError::SegmentFormatMismatch(_)));
+    }
+
+    #[test]
+    fn rejects_legacy_c4_segment_format() {
+        let err = validate_segment_format_for_catalog(0x04, false).unwrap_err();
+        assert!(
+            matches!(err, CarbonadoError::SegmentFormatMismatch(ref m) if m.contains("c4–c7")),
+            "got {err:?}"
+        );
     }
 
     #[test]

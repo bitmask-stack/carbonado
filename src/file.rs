@@ -15,7 +15,7 @@ use crate::{
         ADAMANTINE_CARBONADO_FMT_PUBLIC, ADAMANTINE_FLAG_REQUIRE_OTS, ADAMANTINE_HEADER_LEN,
     },
     adamantine_payload::{
-        bao_slice_from_bundle, build_adamantine_payload, split_adamantine_payload,
+        build_adamantine_payload, split_adamantine_payload, verification_slice_from_bundle,
         MAX_ADAMANTINE_PAYLOAD_LEN, MAX_BAO_BUNDLE_LEN,
     },
     constants::{Format, MAGICNO},
@@ -25,24 +25,21 @@ use crate::{
     error::CarbonadoError,
     filepack_manifest::{
         FilepackEntry, FilepackManifest, SegmentRef, FILEPACK_MANIFEST_FORMAT_LEVEL_ENCRYPTED,
-        FILEPACK_MANIFEST_FORMAT_LEVEL_PUBLIC, FILEPACK_MANIFEST_VERSION,
+        FILEPACK_MANIFEST_FORMAT_LEVEL_PUBLIC, FILEPACK_MANIFEST_VERSION, MAX_SEGMENT_MAIN_LEN,
     },
     paths::parse_bao_root_from_filename,
     stream::{
-        decode::stream_decrypt_header_path,
-        encode::{
-            stream_encode_inboard_body_from_bytes, stream_encode_outboard, stream_preprocess,
-        },
+        decode::stream_decrypt_header_path, encode::stream_encode_outboard,
         DEFAULT_SEGMENT_PLAINTEXT_BUDGET,
     },
     structs::{EncodeInfo, OutboardEncoded},
-    utils::{decode_bao_hash, encode_bao_hash},
+    utils::{calc_padding_len, decode_bao_hash, encode_bao_hash},
 };
 
 #[cfg(feature = "ots")]
 use crate::ots::{stamp_bao_root, verify_stamp, OtsPolicy};
 
-/// Default format for public directory archives (c14: public compressed + bao + zfec).
+/// Default format for public directory archives (c14: public compressed + bao + fec).
 pub const DIRECTORY_ARCHIVE_FORMAT: u8 = FILEPACK_MANIFEST_FORMAT_LEVEL_PUBLIC;
 
 /// Encrypted directory archive format (c15).
@@ -54,9 +51,9 @@ pub const DIRECTORY_TEST_SEGMENT_BUDGET: u64 = 64 * 1024;
 /// Options for [`encode_directory_with_options`].
 #[derive(Clone, Debug)]
 pub struct DirectoryEncodeOptions {
-    /// When true, emit encrypted catalog c15 and encrypted segment formats (c5/c7).
+    /// When true, emit encrypted catalog c15 and encrypted segment formats (c13/c15).
     pub encrypted: bool,
-    /// Per-file segment format selection (heterogeneous c4/c6 or c5/c7 within one archive).
+    /// Per-file segment format selection (heterogeneous c12/c14 or c13/c15 within one archive).
     pub segment_format_policy: SegmentFormatPolicy,
     /// Max logical plaintext bytes per segment before sharding a file.
     pub segment_plaintext_budget: u64,
@@ -310,7 +307,17 @@ impl Header {
 
 /// Stream decode from headered inboard archive.
 ///
-/// Note: the body is fully buffered before Bao/FEC reverse (known P2 limitation).
+/// Bao/FEC reverse pipes into a [`crate::stream::spool::SeekableSpool`] via
+/// [`crate::stream::decode::stream_decode_inboard_bao_fec_into`], bounded by
+/// [`Header::encoded_len`]. Encrypted segments use [`crate::stream::stream_decrypt_header_path`]
+/// (streaming MAC-then-decrypt on `[tag(64) | ct]` with explicit `payload_nonce`).
+///
+/// **Memory tiers:**
+/// - **(A) Verification formats:** Bao verify streams incrementally; FEC reverse may still retain
+///   **O(logical)** at the Bao/FEC step (see `doc/STREAMING_PARALLELISM.md`).
+/// - **(B) Post-Bao/FEC spool:** O(chunk) RAM during disk-backed staging (no body `Vec`).
+/// - **(C) Encrypted:** streaming EtM via spool two-pass MAC verify then CTR decrypt.
+/// - **(D) c4/c8:** bounded by `encoded_len` when known; incremental FEC/decompress otherwise.
 pub fn decode_stream<R: Read, W: Write>(
     master_key: &[u8],
     mut input: R,
@@ -329,38 +336,29 @@ pub fn decode_stream<R: Read, W: Write>(
     }
 
     let fmt = header.format;
-    let mut body = Vec::new();
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = input.read(&mut buf).map_err(CarbonadoError::StdIoError)?;
-        if n == 0 {
-            break;
-        }
-        body.extend_from_slice(&buf[..n]);
-    }
-
-    let mut stage = body;
-    if fmt.contains(Format::Bao) {
-        stage = decoding::bao(&stage, header.hash.as_bytes(), fmt.bits())?;
-    }
-    if fmt.contains(Format::Zfec) {
-        stage = decoding::zfec(&stage, header.padding_len)?;
-    }
-    let out_len = if fmt.contains(Format::Encrypted) {
+    let mut post_preprocess = crate::stream::spool::SeekableSpool::new()?;
+    let mut body_reader = std::io::Read::by_ref(&mut input).take(header.encoded_len as u64);
+    crate::stream::decode::stream_decode_inboard_bao_fec_into(
+        &mut body_reader,
+        header.hash.as_bytes(),
+        header.padding_len,
+        fmt,
+        Some(header.encoded_len as u64),
+        &mut post_preprocess,
+    )?;
+    post_preprocess.rewind()?;
+    let out_len = if fmt.contains(Format::Encryption) {
         stream_decrypt_header_path(
             master_key,
             header.payload_nonce,
-            std::io::Cursor::new(&stage),
+            &mut post_preprocess,
             fmt.bits(),
             output,
         )?
-    } else if fmt.contains(Format::Snappy) {
-        crate::stream::compress::stream_decompress(std::io::Cursor::new(&stage), output)?
+    } else if fmt.contains(Format::Compression) {
+        crate::stream::compress::stream_decompress(post_preprocess, output)?
     } else {
-        output
-            .write_all(&stage)
-            .map_err(CarbonadoError::StdIoError)?;
-        stage.len() as u64
+        std::io::copy(&mut post_preprocess, output).map_err(CarbonadoError::StdIoError)?
     };
 
     Ok((header, out_len))
@@ -383,31 +381,38 @@ pub fn decode(master_key: &[u8], encoded: &[u8]) -> Result<(Header, Vec<u8>), Ca
         return Err(CarbonadoError::AuthenticationFailed);
     }
 
-    // High-level decode must use explicit nonce + with_nonce decrypt for Encrypted case
-    // (high encode uses symmetric_encrypt_with_nonce producing [tag|ct] without embedded nonce;
-    // low decoding::decode always assumes embedded-nonce blob from low encode).
-    // Pipeline reverse mirrors decoding::decode but with correct decrypt for header path.
+    // Same fused spool pipeline as decode_stream (streaming MAC-then-decrypt on header path).
+    // Body may include trailers (e.g. catalog COTS) after `encoded_len` bytes — limit the reader.
     let fmt = header.format;
-    let after_bao = if fmt.contains(Format::Bao) {
-        decoding::bao(body, header.hash.as_bytes(), fmt.bits())?
+    let body_len = header.encoded_len as usize;
+    if body.len() < body_len {
+        return Err(CarbonadoError::InvalidHeaderLength);
+    }
+    let mut post_preprocess = crate::stream::spool::SeekableSpool::new()?;
+    crate::stream::decode::stream_decode_inboard_bao_fec_into(
+        std::io::Cursor::new(&body[..body_len]),
+        header.hash.as_bytes(),
+        header.padding_len,
+        fmt,
+        Some(header.encoded_len as u64),
+        &mut post_preprocess,
+    )?;
+    post_preprocess.rewind()?;
+    let mut decompressed = Vec::new();
+    if fmt.contains(Format::Encryption) {
+        crate::stream::stream_decrypt_header_path(
+            master_key,
+            header.payload_nonce,
+            &mut post_preprocess,
+            fmt.bits(),
+            &mut decompressed,
+        )?;
+    } else if fmt.contains(Format::Compression) {
+        crate::stream::compress::stream_decompress(post_preprocess, &mut decompressed)?;
     } else {
-        body.to_owned()
-    };
-    let after_fec = if fmt.contains(Format::Zfec) {
-        decoding::zfec(&after_bao, header.padding_len)?
-    } else {
-        after_bao
-    };
-    let decrypted = if fmt.contains(Format::Encrypted) {
-        crate::crypto::symmetric_decrypt_with_nonce(master_key, header.payload_nonce, &after_fec)?
-    } else {
-        after_fec
-    };
-    let decompressed = if fmt.contains(Format::Snappy) {
-        decoding::decompress(&decrypted)?
-    } else {
-        decrypted
-    };
+        std::io::copy(&mut post_preprocess, &mut decompressed)
+            .map_err(CarbonadoError::StdIoError)?;
+    }
 
     Ok((header, decompressed))
 }
@@ -448,24 +453,15 @@ pub fn encode_stream<R: Read, W: Write>(
     output: &mut W,
 ) -> Result<(Header, EncodeInfo), CarbonadoError> {
     let format = Format::from(level);
-    let mut staging = std::io::Cursor::new(Vec::new());
     let mut payload_nonce = [0u8; 16];
-    let stats = stream_preprocess(
+    let (hash, info, _stats) = crate::stream::encode::stream_encode_inboard(
         master_key,
-        format,
         &mut input,
-        &mut staging,
+        level,
+        output,
         &mut payload_nonce,
         true,
     )?;
-    let body_bytes = staging.into_inner();
-
-    let mut body_out = Vec::new();
-    let (hash, info) =
-        stream_encode_inboard_body_from_bytes(&body_bytes, stats, level, &mut body_out)?;
-    output
-        .write_all(&body_out)
-        .map_err(CarbonadoError::StdIoError)?;
 
     let header = Header::new(
         master_key,
@@ -519,7 +515,7 @@ pub fn encode_outboard(
 ) -> Result<(Option<Header>, OutboardEncoded), CarbonadoError> {
     let format = Format::from(level);
     let mut payload_nonce = [0u8; 16];
-    let explicit_nonce = if format.contains(Format::Encrypted) {
+    let explicit_nonce = if format.contains(Format::Encryption) {
         getrandom::getrandom(&mut payload_nonce).map_err(|_| CarbonadoError::RandomnessError)?;
         Some(payload_nonce)
     } else {
@@ -571,14 +567,14 @@ pub fn encode_outboard_stream<R: Read>(
     )?;
 
     let main_bytes = read_file_from_start(main_out)?;
-    let bao_sidecar = if format.contains(Format::Bao) {
+    let bao_sidecar = if format.contains(Format::Verification) {
         Some(read_file_from_start(
-            bao_out.ok_or(CarbonadoError::MissingBaoOutboard)?,
+            bao_out.ok_or(CarbonadoError::MissingVerificationOutboard)?,
         )?)
     } else {
         None
     };
-    let fec_sidecar = if format.contains(Format::Zfec) {
+    let fec_sidecar = if format.contains(Format::Fec) {
         Some(read_file_from_start(
             parity_out.ok_or(CarbonadoError::MissingFecParity)?,
         )?)
@@ -602,7 +598,7 @@ pub fn encode_outboard_stream<R: Read>(
         Some(hdr),
         OutboardEncoded {
             main: main_bytes,
-            bao_outboard: bao_sidecar,
+            verification_outboard: bao_sidecar,
             fec_parity: fec_sidecar,
             hash,
             info,
@@ -620,14 +616,14 @@ fn read_file_from_start(f: &mut File) -> Result<Vec<u8>, CarbonadoError> {
 
 /// High-level outboard decode at the `file` layer (accepts bare main + sidecars + optional out-of-band header).
 ///
-/// `hash` is required (the keyed Bao root; from Header or filename); used for bao_with_outboard verify.
+/// `hash` is required (the keyed Bao root; from Header or filename); used for verification_with_outboard verify.
 /// `header`: optional out-of-band header bytes. If present, header_mac is verified (using master) before
 /// processing; enables auth for public bare cases too. If absent, public bare decode relies on bao outboard
 /// integrity (no mac).
 /// `main`: the bare main bytes (for public outboard) or post-header body (for enc inboard cases).
 /// Automatically tolerates accidental header prefix in main (strips if MAGIC present) for convenience.
 /// For Encrypted formats, `header` is required (provides payload_nonce); sidecars are ignored (not produced for enc).
-/// Sidecars required only when respective bits set (public paths); specific errors (MissingBaoOutboard etc) on absence.
+/// Sidecars required only when respective bits set (public paths); specific errors (MissingVerificationOutboard etc) on absence.
 /// Uses decode_outboard (which threads format for keyed bao verify).
 ///
 /// Many args are for flexibility (optional header for mac, bare main or inboard body,
@@ -638,7 +634,7 @@ pub fn decode_outboard(
     hash: &[u8],
     header: Option<&[u8]>,
     main: &[u8],
-    bao_outboard: Option<&[u8]>,
+    verification_outboard: Option<&[u8]>,
     fec_parity: Option<&[u8]>,
     padding: u32,
     format: u8,
@@ -678,7 +674,7 @@ pub fn decode_outboard(
 
     // For Encrypted, high-level inboard results (produced by file::encode / encode_outboard for enc) require the header
     // (for payload_nonce) and use embedded inboard body (sides=None). Public outboard uses bare + sides.
-    if fmt.contains(Format::Encrypted) && header.is_none() {
+    if fmt.contains(Format::Encryption) && header.is_none() {
         return Err(CarbonadoError::MissingOutboardHeader);
     }
 
@@ -692,17 +688,17 @@ pub fn decode_outboard(
 
     // Encrypted outboard uses bare main + sidecars with header-path nonce; tolerate legacy
     // inboard-embedded bodies (header prefix in main) via main_body strip above.
-    if fmt.contains(Format::Encrypted) && main.len() > Header::LEN && &main[0..12] == MAGICNO {
+    if fmt.contains(Format::Encryption) && main.len() > Header::LEN && &main[0..12] == MAGICNO {
         let mut stage = main_body.to_vec();
-        if fmt.contains(Format::Bao) {
-            stage = decoding::bao(&stage, &use_hash, format)?;
+        if fmt.contains(Format::Verification) {
+            stage = decoding::verification(&stage, &use_hash, format)?;
         }
-        if fmt.contains(Format::Zfec) {
-            stage = decoding::zfec(&stage, use_pad)?;
+        if fmt.contains(Format::Fec) {
+            stage = decoding::fec(&stage, use_pad)?;
         }
         let nonce = use_nonce.ok_or(CarbonadoError::InvalidHeaderLength)?;
         let decrypted = crate::crypto::symmetric_decrypt_with_nonce(master_key, nonce, &stage)?;
-        if fmt.contains(Format::Snappy) {
+        if fmt.contains(Format::Compression) {
             Ok(decoding::decompress(&decrypted)?)
         } else {
             Ok(decrypted)
@@ -712,7 +708,7 @@ pub fn decode_outboard(
             master_key,
             &use_hash,
             main_body,
-            bao_outboard,
+            verification_outboard,
             fec_parity,
             use_pad,
             format,
@@ -721,7 +717,7 @@ pub fn decode_outboard(
     }
 }
 
-/// Recursively encode a directory tree into bare per-file segment mains (c4/c6 or c5/c7) plus an
+/// Recursively encode a directory tree into bare per-file segment mains (c12/c14 or c13/c15) plus an
 /// inboard Adamantine-wrapped rkyv `FilepackManifest` catalog at `{catalog_bao_root}.adam.c14`
 /// (or `.adam.c15` when encrypted).
 ///
@@ -802,6 +798,10 @@ pub fn encode_directory_with_options(
 }
 
 /// Decode an inboard Adamantine catalog (`.adam.c14` or `.adam.c15`) and reconstruct the tree.
+///
+/// **Operational note:** Callers should pass an empty or trusted `outdir`. Extraction uses
+/// `create` + `write` without `O_NOFOLLOW`; a symlink or race under `outdir` can redirect writes
+/// (TOCTOU). The CLI documents that operators must not decode into attacker-controlled trees.
 pub fn decode_directory(
     master_key: &[u8],
     catalog_adam: &Path,
@@ -830,7 +830,7 @@ pub fn decode_directory(
             "directory catalog must be inboard headered c14/c15".into(),
         ));
     }
-    let (header, carbonado_body) = decode(master_key, &main).map_err(map_catalog_decode_err)?;
+    let (header, carbonado_body) = decode(master_key, &main)?;
     if header.hash.as_bytes() != &expected_root {
         return Err(CarbonadoError::CatalogBaoRootMismatch);
     }
@@ -865,10 +865,21 @@ pub fn decode_directory(
         let mut recovered = Vec::new();
         for seg_ref in &entry.segments {
             let segment_root = seg_ref.segment_bao_root;
-            let main_name = segment_filename(&segment_root, entry.segment_format, "");
-            let main_path = catalog_dir.join(&main_name);
+            let main_path =
+                resolve_segment_main_path(catalog_dir, &segment_root, entry.segment_format, rel)?;
+            let main_name = main_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
 
             check_segment_artifact_root(&main_path, &segment_root, rel, seg_ref.chunk_index)?;
+            if crate::paths::guess_format_from_filename(&main_path) != Some(entry.segment_format) {
+                return Err(CarbonadoError::DirectoryLayoutMismatch(format!(
+                    "segment file {main_name} format suffix does not match manifest segment_format 0x{:02x}",
+                    entry.segment_format
+                )));
+            }
             guard_segment_main_file_len(&main_path, seg_ref.main_len, rel, seg_ref.chunk_index)?;
             let seg_main = read_file(&main_path)
                 .map_err(|_| CarbonadoError::MissingSegment(format!("{rel} ({main_name})")))?;
@@ -883,18 +894,45 @@ pub fn decode_directory(
                     chunk_index: seg_ref.chunk_index,
                 });
             }
-            let bao_ob = bao_slice_from_bundle(
+            let bao_ob = verification_slice_from_bundle(
                 &bao_bundle,
-                seg_ref.bao_outboard_offset,
-                seg_ref.bao_outboard_len,
+                seg_ref.verification_outboard_offset,
+                seg_ref.verification_outboard_len,
             )?;
+            let fec_par = if Format::from(entry.segment_format).contains(Format::Fec) {
+                if seg_ref.main_len > 0 {
+                    if seg_ref.fec_parity_len == 0 {
+                        return Err(CarbonadoError::MissingFecParity);
+                    }
+                    Some(crate::adamantine_payload::fec_slice_from_bundle(
+                        &bao_bundle,
+                        seg_ref.fec_parity_offset,
+                        seg_ref.fec_parity_len,
+                    )?)
+                } else {
+                    Some(&[][..])
+                }
+            } else {
+                if seg_ref.fec_parity_len != 0 {
+                    return Err(CarbonadoError::InvalidFilepackManifest(format!(
+                        "fec_parity present for {rel} chunk {} but segment format 0x{:02x} lacks FEC",
+                        seg_ref.chunk_index, entry.segment_format
+                    )));
+                }
+                None
+            };
+            let padding = if Format::from(entry.segment_format).contains(Format::Fec) {
+                calc_padding_len(seg_ref.main_len as usize).0
+            } else {
+                0
+            };
             let part = decoding::decode_outboard(
                 master_key,
                 &segment_root,
                 &seg_main,
                 Some(bao_ob),
-                None,
-                0,
+                fec_par,
+                padding,
                 entry.segment_format,
             )?;
             recovered.extend_from_slice(&part);
@@ -1103,21 +1141,39 @@ fn write_bare_segment(
     let oenc = encoding::encode_outboard(master_key, data, segment_format)?;
     let root = *oenc.hash.as_bytes();
     let main_len = oenc.main.len() as u64;
+    if main_len > MAX_SEGMENT_MAIN_LEN {
+        return Err(CarbonadoError::InvalidFilepackManifest(format!(
+            "encoded segment main exceeds maximum {MAX_SEGMENT_MAIN_LEN} bytes"
+        )));
+    }
     let main_name = segment_filename(&root, segment_format, "");
     let main_path = outdir.join(&main_name);
     write_file(&main_path, &oenc.main)?;
     written_segment_paths.push(main_path);
-    let bao_ob = oenc
-        .bao_outboard
-        .as_deref()
-        .ok_or(CarbonadoError::MissingBaoOutboard)?;
-    let (offset, len) = bao_bundle.append(bao_ob)?;
+    let bao_ob = match oenc.verification_outboard.as_deref() {
+        Some(slice) => slice,
+        None => return Err(CarbonadoError::MissingVerificationOutboard),
+    };
+    let (ver_offset, ver_len) = bao_bundle.append(bao_ob)?;
+    let fmt = Format::from(segment_format);
+    let (fec_offset, fec_len) = if fmt.contains(Format::Fec) {
+        let fec_par = oenc
+            .fec_parity
+            .as_deref()
+            .ok_or(CarbonadoError::MissingFecParity)?;
+        let (offset, len) = bao_bundle.append(fec_par)?;
+        (offset, len)
+    } else {
+        (0, 0)
+    };
     Ok(SegmentRef {
         segment_bao_root: root,
         chunk_index: chunk_index as u32,
         main_len,
-        bao_outboard_offset: offset,
-        bao_outboard_len: len,
+        verification_outboard_offset: ver_offset,
+        verification_outboard_len: ver_len,
+        fec_parity_offset: fec_offset,
+        fec_parity_len: fec_len,
     })
 }
 
@@ -1130,11 +1186,19 @@ fn write_catalog_artifact(
     bao_bundle: &BaoBundleBuilder,
     written_catalog_path: &mut Option<PathBuf>,
 ) -> Result<[u8; 32], CarbonadoError> {
-    let mut flags = 0u8;
     #[cfg(feature = "ots")]
-    if options.ots_policy.as_ref().is_some_and(|p| p.stamp_entries) {
-        flags |= ADAMANTINE_FLAG_REQUIRE_OTS;
-    }
+    let flags = {
+        let mut flags = 0u8;
+        if options.ots_policy.as_ref().is_some_and(|p| p.stamp_entries) {
+            flags |= ADAMANTINE_FLAG_REQUIRE_OTS;
+        }
+        flags
+    };
+    #[cfg(not(feature = "ots"))]
+    let flags = {
+        let _ = options;
+        0u8
+    };
 
     let adam_fmt = if catalog_format & 1 != 0 {
         ADAMANTINE_CARBONADO_FMT_ENCRYPTED
@@ -1154,12 +1218,17 @@ fn write_catalog_artifact(
     let header = Header::try_from(&encoded[..Header::LEN])?;
     let root = hash_to_root(header.hash.as_bytes());
 
-    let mut on_disk = encoded;
     #[cfg(feature = "ots")]
-    if options.ots_policy.as_ref().is_some_and(|p| p.stamp_catalog) {
-        let proof = stamp_bao_root(&root)?;
-        on_disk = append_catalog_ots_trailer(&on_disk, &proof)?;
-    }
+    let on_disk = {
+        let mut on_disk = encoded;
+        if options.ots_policy.as_ref().is_some_and(|p| p.stamp_catalog) {
+            let proof = stamp_bao_root(&root)?;
+            on_disk = append_catalog_ots_trailer(&on_disk, &proof)?;
+        }
+        on_disk
+    };
+    #[cfg(not(feature = "ots"))]
+    let on_disk = encoded;
 
     let main_name = segment_filename(&root, catalog_format, ".adam");
     let catalog_path = outdir.join(&main_name);
@@ -1235,6 +1304,11 @@ fn guard_segment_main_file_len(
     rel_path: &str,
     chunk_index: u32,
 ) -> Result<(), CarbonadoError> {
+    if expected_main_len > MAX_SEGMENT_MAIN_LEN {
+        return Err(CarbonadoError::InvalidFilepackManifest(format!(
+            "main_len for {rel_path} chunk {chunk_index} exceeds maximum {MAX_SEGMENT_MAIN_LEN}"
+        )));
+    }
     let len = match fs::metadata(path) {
         Ok(meta) => meta.len(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -1245,6 +1319,12 @@ fn guard_segment_main_file_len(
         }
         Err(e) => return Err(CarbonadoError::StdIoError(e)),
     };
+    if len > MAX_SEGMENT_MAIN_LEN {
+        return Err(CarbonadoError::InvalidFilepackManifest(format!(
+            "segment main file {} exceeds maximum {MAX_SEGMENT_MAIN_LEN} bytes",
+            path.display()
+        )));
+    }
     if len != expected_main_len {
         if len as usize >= Header::LEN {
             let prefix = peek_file_prefix(path, Header::LEN)?;
@@ -1275,6 +1355,7 @@ fn has_carbonado_header_magic_prefix(bytes: &[u8]) -> bool {
 }
 
 /// Append `[COTS][u32 LE ots_len][ots_proof]` after inboard catalog bytes (does not affect Bao root).
+#[cfg(feature = "ots")]
 fn append_catalog_ots_trailer(
     carbonado_bytes: &[u8],
     proof: &[u8],
@@ -1417,6 +1498,44 @@ fn verify_entry_ots_at_decode(
     Ok(())
 }
 
+/// Resolve the bare segment main path, detecting on-disk format suffix mismatches.
+fn resolve_segment_main_path(
+    catalog_dir: &Path,
+    root: &[u8; 32],
+    expected_format: u8,
+    rel_path: &str,
+) -> Result<PathBuf, CarbonadoError> {
+    let main_name = segment_filename(root, expected_format, "");
+    let main_path = catalog_dir.join(&main_name);
+    if main_path.is_file() {
+        return Ok(main_path);
+    }
+    let entries = fs::read_dir(catalog_dir).map_err(CarbonadoError::StdIoError)?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name == main_name {
+            continue;
+        }
+        if parse_bao_root_from_filename(&path) != Some(*root) {
+            continue;
+        }
+        if crate::paths::guess_format_from_filename(&path) != Some(expected_format) {
+            return Err(CarbonadoError::DirectoryLayoutMismatch(format!(
+                "segment file {name} format suffix does not match manifest segment_format 0x{expected_format:02x}"
+            )));
+        }
+    }
+    Err(CarbonadoError::MissingSegment(format!(
+        "{rel_path} ({main_name})"
+    )))
+}
+
 /// Verify an on-disk segment main filename stem matches the manifest Bao root.
 fn check_segment_artifact_root(
     main_path: &Path,
@@ -1460,13 +1579,6 @@ fn segment_filename(root: &[u8; 32], format: u8, name_infix: &str) -> String {
         format!("{}.adam.c{format}", hex_encode(root))
     } else {
         format!("{}.c{format}", hex_encode(root))
-    }
-}
-
-fn map_catalog_decode_err(err: CarbonadoError) -> CarbonadoError {
-    match err {
-        CarbonadoError::OutboardVerificationFailed(_) => CarbonadoError::CatalogBaoRootMismatch,
-        other => other,
     }
 }
 

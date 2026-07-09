@@ -105,7 +105,11 @@ fn cli_decode_discovers_decimal_c14_sidecars() {
     let recovered = work.join("recovered.bin");
 
     fs::write(&main_path, &enc.main).expect("write main");
-    fs::write(&out_path, enc.bao_outboard.as_ref().expect("bao sidecar")).expect("write out");
+    fs::write(
+        &out_path,
+        enc.verification_outboard.as_ref().expect("bao sidecar"),
+    )
+    .expect("write out");
     fs::write(&par_path, enc.fec_parity.as_ref().expect("fec sidecar")).expect("write par");
 
     let dec = run_carbonado(&[
@@ -138,8 +142,11 @@ fn cli_decode_honors_explicit_sidecar_overrides() {
     let recovered = work.join("recovered.bin");
 
     fs::write(&main_path, &enc.main).expect("write main");
-    fs::write(&custom_out, enc.bao_outboard.as_ref().expect("bao sidecar"))
-        .expect("write custom out");
+    fs::write(
+        &custom_out,
+        enc.verification_outboard.as_ref().expect("bao sidecar"),
+    )
+    .expect("write custom out");
     fs::write(&custom_par, enc.fec_parity.as_ref().expect("fec sidecar"))
         .expect("write custom par");
 
@@ -173,7 +180,11 @@ fn cli_decode_bare_outboard_requires_format_when_unguessable() {
     let main_path = work.join("barepayload");
     let out_path = work.join("barepayload.out");
     fs::write(&main_path, &enc.main).expect("write main");
-    fs::write(&out_path, enc.bao_outboard.as_ref().expect("bao sidecar")).expect("write out");
+    fs::write(
+        &out_path,
+        enc.verification_outboard.as_ref().expect("bao sidecar"),
+    )
+    .expect("write out");
 
     let dec = run_carbonado(&["decode", main_path.to_str().unwrap()]);
 

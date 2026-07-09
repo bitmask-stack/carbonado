@@ -70,7 +70,7 @@ proptest! {
             if has_bao {
                 prop_assert_eq!(
                     bao_buf.clone(),
-                    buf.bao_outboard.clone().unwrap_or_default()
+                    buf.verification_outboard.clone().unwrap_or_default()
                 );
             }
             if has_zfec {

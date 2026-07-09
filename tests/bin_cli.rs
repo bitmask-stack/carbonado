@@ -296,14 +296,14 @@ fn bin_encode_dir_emits_bare_segment_mains() {
         .filter_map(Result::ok)
         .any(|e| {
             let name = e.file_name().to_string_lossy().to_string();
-            (name.ends_with(".c4") || name.ends_with(".c6")) && !name.contains(".adam.")
+            (name.ends_with(".c12") || name.ends_with(".c14")) && !name.contains(".adam.")
         });
-    assert!(has_segment_main, "expected bare .c4 or .c6 segment mains");
+    assert!(has_segment_main, "expected bare .c12 or .c14 segment mains");
     assert_no_sidecars(&catalog);
 }
 
 #[test]
-fn bin_encode_dir_format_c5_encrypted_roundtrip() {
+fn bin_encode_dir_format_c15_encrypted_roundtrip() {
     let samples = manifest_dir().join("tests/samples");
     assert!(samples.is_dir(), "tests/samples required");
 
@@ -687,7 +687,7 @@ fn bin_decode_inboard_headered() {
     fs::create_dir_all(&outdir).expect("outdir");
     fs::write(&input, PAYLOAD).expect("write input");
 
-    // Format 0 (public, no compression/bao/zfec) — distinct from c14 inboard roundtrip test.
+    // Format 0 (public, no compression/bao/fec) — distinct from c14 inboard roundtrip test.
     let enc = run_carbonado(&[
         "encode",
         input.to_str().unwrap(),

@@ -17,7 +17,7 @@ type HttpResponse = Response<Cursor<Vec<u8>>>;
 
 struct ArtifactSet {
     main_path: PathBuf,
-    bao_outboard: Option<Vec<u8>>,
+    verification_outboard: Option<Vec<u8>>,
     _fec_parity: Option<Vec<u8>>,
     bao_root: [u8; 32],
     bao_root_hex: String,
@@ -82,7 +82,7 @@ fn load_artifacts(main_path: &Path) -> Result<ArtifactSet, Box<dyn std::error::E
     let format = carbonado::paths::guess_format_from_filename(main_path).unwrap_or(0x0E);
     let out_path = sidecar_sibling_path(main_path, "out");
     let par_path = sidecar_sibling_path(main_path, "par");
-    let bao_outboard = if out_path.is_file() {
+    let verification_outboard = if out_path.is_file() {
         Some(std::fs::read(out_path)?)
     } else {
         None
@@ -94,7 +94,7 @@ fn load_artifacts(main_path: &Path) -> Result<ArtifactSet, Box<dyn std::error::E
     };
     Ok(ArtifactSet {
         main_path: main_path.to_path_buf(),
-        bao_outboard,
+        verification_outboard,
         _fec_parity: fec_parity,
         bao_root,
         bao_root_hex,
@@ -126,7 +126,7 @@ fn serve_range(artifacts: &ArtifactSet, start: u64, end: u64) -> Result<HttpResp
     let index = (start / 4096) as u32;
     let main = MainReadAt(File::open(&artifacts.main_path).map_err(|e| e.to_string())?);
     let ob = artifacts
-        .bao_outboard
+        .verification_outboard
         .as_deref()
         .ok_or_else(|| "range requests require bao outboard sidecar".to_string())?;
     let verified = verify_slice_outboard(
