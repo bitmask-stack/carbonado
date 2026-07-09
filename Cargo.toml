@@ -79,12 +79,19 @@ getrandom = { version = "0.2", features = ["js"] }
 # bitcoinpqc 0.4 (WASM-capable build.rs); SLH-DSA-SHA2-128s sidecars.
 # Local mirror lag: `.cargo/config.toml` patches 0.4 until 2026-07-18 (see lift checklist there).
 bitcoinpqc = { version = "0.4", optional = true }
+# Dual-backend: Lean AOT C library (docs/ABI.md, docs/TEST_CONTRACT.md).
+carbonado-sys = { path = "carbonado-sys", optional = true }
 
 # Note: ecies + libsecp256k1-core + nostr + secp256k1 removed (clean break from old ECIES design and Nostr bech32/npub helpers).
 # Future quantum-resistant key formats (qpub etc.) will be handled separately.
 
 [features]
-default = ["pqc", "ots", "cli", "parallel"]
+# Default: pure Rust engine + existing features. Dual-backend: see backend-rust / backend-lean.
+default = ["backend-rust", "pqc", "ots", "cli", "parallel"]
+# Pure Rust implementation (default engine).
+backend-rust = []
+# Lean AOT engine via carbonado-sys / libcarbonado (G8). Requires CARBONADO_LEAN_LIB.
+backend-lean = ["dep:carbonado-sys"]
 pqc = ["dep:bitcoinpqc"]
 # OpenTimestamps stub stamping (offline/testable; no network calendar in default build).
 ots = []

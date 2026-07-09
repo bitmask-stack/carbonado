@@ -58,6 +58,9 @@
 
 ////////////////////////////////////////////////////////////////////////////////
 
+/// Dual-backend dispatch (`backend-rust` / `backend-lean`). See docs/TEST_CONTRACT.md.
+pub mod backend;
+
 /// For details on Carbonado formats and their uses, see the [Carbonado Format bitmask constant](constants::Format).
 pub mod constants;
 /// Symmetric cryptographic primitives for the v2 design.

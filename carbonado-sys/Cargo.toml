@@ -1,0 +1,11 @@
+[package]
+name = "carbonado-sys"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "FFI bindings to Lean AOT libcarbonado (dual-backend parity)"
+publish = false
+
+[dependencies]
+
+[build-dependencies]

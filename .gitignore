@@ -22,3 +22,10 @@ recovered_dir/
 /*.adam.c[0-9][0-9].par
 /*.adam.c[0-9].ots
 /*.adam.c[0-9][0-9].ots
+
+# Nix / Lean build artifacts
+/result
+/result-*
+/.lake
+/**/.lake
+ref/parity-harness/**/target/

@@ -1,0 +1,24 @@
+[submodule "ref/bao-tree"]
+	path = ref/bao-tree
+	url = https://github.com/SurmountSystems/bao-tree.git
+[submodule "ref/reed-solomon-erasure"]
+	path = ref/reed-solomon-erasure
+	url = https://github.com/darrenldl/reed-solomon-erasure.git
+[submodule "ref/bitcoinpqc"]
+	path = ref/bitcoinpqc
+	url = https://github.com/cryptoquick/libbitcoinpqc-bindings.git
+[submodule "ref/blake3"]
+	path = ref/blake3
+	url = https://github.com/BLAKE3-team/BLAKE3.git
+[submodule "ref/zstd"]
+	path = ref/zstd
+	url = https://github.com/facebook/zstd.git
+[submodule "ref/rustcrypto-block-ciphers"]
+	path = ref/rustcrypto-block-ciphers
+	url = https://github.com/RustCrypto/block-ciphers.git
+[submodule "ref/rustcrypto-macs"]
+	path = ref/rustcrypto-macs
+	url = https://github.com/RustCrypto/MACs.git
+[submodule "ref/rustcrypto-hashes"]
+	path = ref/rustcrypto-hashes
+	url = https://github.com/RustCrypto/hashes.git

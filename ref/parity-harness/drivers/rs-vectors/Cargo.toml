@@ -1,0 +1,13 @@
+[package]
+name = "rs-vectors"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "rs-vectors"
+path = "src/main.rs"
+
+[dependencies]
+reed-solomon-erasure = { path = "../../../reed-solomon-erasure" }
+hex = "0.4"

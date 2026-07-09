@@ -1,8 +1,38 @@
 # AGENTS.md — Carbonado Development Guidelines
 
 **Project:** Carbonado (bitmask-stack/carbonado)  
-**Mission:** Apocalypse-resistant archival format for consensus-critical data, with a focus on Bitcoin quantum resistance.  
-**Current Status (as of 2026-07):** Symmetric v2 stack (`CARBONADO20\n`, AES-256-CTR + HMAC-SHA512 EtM) stable. **P1:** `SLICE_LEN=4096`, keyed 4 KiB Bao groups, seekable slice verify. **P2:** streaming-first encode/decode. **P3:** segment sharding. **P4:** Adamantine 1.0 directory archives (see §7.1). FEC: reed-solomon-erasure RS 4/8. Outboard + scrub complete.
+**Mission:** Apocalypse-resistant archival format for consensus-critical data, with a focus on Bitcoin quantum resistance.
+
+## Dual-backend product model (SSOT for parity)
+
+| Concern | Role |
+|---------|------|
+| **Rust** (`src/`, default `backend-rust`) | First-class engine; production library + CLI |
+| **Rust tests** (`tests/`) | **Normative behavioral contract** — both backends must pass |
+| **Lean 4** (`Carbonado/`, AOT `libcarbonado`) | Second engine: proofs + wire/C ABI compatible implementation |
+| **Nix flakes** | Build Lean AOT, purity/no-sorry, package `libcarbonado` |
+| **`ref/`** | Pinned oracles (bao-tree, RustCrypto, zstd, …) |
+
+**Parity bar (G8):** `cargo test` with `backend-rust` (default) and `backend-lean` (links Lean AOT C). Same tests; not separate Lean-only demos. See [docs/TEST_CONTRACT.md](docs/TEST_CONTRACT.md), [docs/ABI.md](docs/ABI.md), [docs/PARITY.md](docs/PARITY.md), [docs/GAPS.md](docs/GAPS.md).
+
+| Concern | Allowed |
+|---------|---------|
+| Lean product logic, proofs, AOT | `Carbonado/`, `CarbonadoTest/` (not `Tests/` — collides with Rust `tests/` on Darwin) |
+| Rust product + contract tests | `src/`, `tests/` (stay; do not delete for Lean purity) |
+| Build Lean / packaging | Nix flakes (`flake.nix`, `nix/`) |
+| Oracles / pins | `ref/` |
+
+**Prove everything:** machine-checked Lean theorems **and** bit-match via the Rust suite on `backend-lean`.
+
+**Agents:** implement and verify (`nix build`, `nix flake check`, `cargo test`). Do **not** create commits or push; agents do not own git history. **Never regress `backend-rust` `cargo test`.** Do **not** implement Phase 1+ C ABI exports unless that phase is the assigned task.
+
+**Gates:** `nix flake check` (Lean); `cargo test` (Rust default); dual-backend CI as G8 lands (Phase 0 docs closed; Phase 1+ engineering open — see GAPS P0–P5).
+
+**C ABI:** normative surface in `include/carbonado.h` + [docs/ABI.md](docs/ABI.md). Phase 0–1 honesty: encode/decode may still return `NOT_IMPLEMENTED` until Phase 1 wiring.
+
+---
+
+**Current Status (as of 2026-07):** Lean 4 + Nix product scaffold started (`Carbonado/Constants`, flake). Historical Rust: Symmetric v2 stack (`CARBONADO20\n`, AES-256-CTR + HMAC-SHA512 EtM) stable. **P1:** `SLICE_LEN=4096`, keyed 4 KiB Bao groups, seekable slice verify. **P2:** streaming-first encode/decode. **P3:** segment sharding. **P4:** Adamantine 1.0 directory archives (see §7.1). FEC: reed-solomon-erasure RS 4/8. Outboard + scrub complete.
 
 **Unified streaming stack (three independent axes — do not conflate):**
 | Axis | Status |
