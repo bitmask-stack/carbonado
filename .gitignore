@@ -2,6 +2,10 @@
 /Cargo.lock
 *.7z
 
+# CI (and optional local) in-workspace bao-tree checkout. Local `just setup-bao-tree`
+# still uses the sibling ../bao-tree; do not commit a machine-local tree here.
+/bao-tree
+
 # Carbonado encode artifacts when CLI `-o` is omitted (defaults to `.`)
 recovered.bin
 recovered_dir/

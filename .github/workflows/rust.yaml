@@ -7,6 +7,12 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# bao-tree is a git dep (Cargo.toml: n0-computer/bao-tree branch keyed-bao).
+# Checkout it *inside* GITHUB_WORKSPACE (`path: bao-tree`). actions/checkout
+# rejects anything outside the workspace, so `path: ../bao-tree` fails before rustc.
+# After checkout, append a CI-only [patch] so cargo uses that tree (do not commit
+# a machine-local path). Local optional sibling remains `just setup-bao-tree`.
+
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -14,12 +20,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout bao-tree keyed fork (sibling for path dep)
+      - name: Checkout bao-tree keyed fork (in-workspace for path dep)
         uses: actions/checkout@v4
         with:
-          repository: SurmountSystems/bao-tree
-          ref: 76-keyed-bao
-          path: ../bao-tree
+          repository: n0-computer/bao-tree
+          ref: keyed-bao
+          path: bao-tree
+          persist-credentials: false
+
+      - name: Patch cargo to use workspace bao-tree
+        uses: ./.github/actions/ci-patch-bao-tree
 
       - uses: extractions/setup-just@v2
 
@@ -39,12 +49,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout bao-tree keyed fork (sibling for path dep)
+      - name: Checkout bao-tree keyed fork (in-workspace for path dep)
         uses: actions/checkout@v4
         with:
-          repository: SurmountSystems/bao-tree
-          ref: 76-keyed-bao
-          path: ../bao-tree
+          repository: n0-computer/bao-tree
+          ref: keyed-bao
+          path: bao-tree
+          persist-credentials: false
+
+      - name: Patch cargo to use workspace bao-tree
+        uses: ./.github/actions/ci-patch-bao-tree
 
       - uses: extractions/setup-just@v2
 
@@ -64,12 +78,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout bao-tree keyed fork (sibling for path dep)
+      - name: Checkout bao-tree keyed fork (in-workspace for path dep)
         uses: actions/checkout@v4
         with:
-          repository: SurmountSystems/bao-tree
-          ref: 76-keyed-bao
-          path: ../bao-tree
+          repository: n0-computer/bao-tree
+          ref: keyed-bao
+          path: bao-tree
+          persist-credentials: false
+
+      - name: Patch cargo to use workspace bao-tree
+        uses: ./.github/actions/ci-patch-bao-tree
 
       - uses: extractions/setup-just@v2
 
@@ -121,12 +139,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout bao-tree keyed fork (sibling for path dep)
+      - name: Checkout bao-tree keyed fork (in-workspace for path dep)
         uses: actions/checkout@v4
         with:
-          repository: SurmountSystems/bao-tree
-          ref: 76-keyed-bao
-          path: ../bao-tree
+          repository: n0-computer/bao-tree
+          ref: keyed-bao
+          path: bao-tree
+          persist-credentials: false
+
+      - name: Patch cargo to use workspace bao-tree
+        uses: ./.github/actions/ci-patch-bao-tree
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -151,12 +173,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout bao-tree keyed fork (sibling for path dep)
+      - name: Checkout bao-tree keyed fork (in-workspace for path dep)
         uses: actions/checkout@v4
         with:
-          repository: SurmountSystems/bao-tree
-          ref: 76-keyed-bao
-          path: ../bao-tree
+          repository: n0-computer/bao-tree
+          ref: keyed-bao
+          path: bao-tree
+          persist-credentials: false
+
+      - name: Patch cargo to use workspace bao-tree
+        uses: ./.github/actions/ci-patch-bao-tree
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -179,12 +205,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout bao-tree keyed fork (sibling for path dep)
+      - name: Checkout bao-tree keyed fork (in-workspace for path dep)
         uses: actions/checkout@v4
         with:
-          repository: SurmountSystems/bao-tree
-          ref: 76-keyed-bao
-          path: ../bao-tree
+          repository: n0-computer/bao-tree
+          ref: keyed-bao
+          path: bao-tree
+          persist-credentials: false
+
+      - name: Patch cargo to use workspace bao-tree
+        uses: ./.github/actions/ci-patch-bao-tree
 
       - uses: extractions/setup-just@v2
 
