@@ -37,6 +37,10 @@ structure OutboardEncoded where
   baoHash : ByteArray
   paddingLen : Nat
   chunkLen : Nat
+  /-- Post-compress size when Compression bit set; else 0 (matches Rust `EncodeInfo`). -/
+  bytesCompressed : Nat
+  /-- Post-encrypt size when Encrypted bit set; else 0. -/
+  bytesEncrypted : Nat
   deriving DecidableEq
 
 /--
@@ -59,16 +63,31 @@ def encodeOutboardParity (input : ByteArray) : Except PipelineError (ByteArray �
         .ok (body.extract parityStart body.size, pad, chunk)
 
 /--
-  Decode with main + parity sidecars (undamaged path: all data present in main).
+  Empty-archive policy for outboard FEC (matches Rust `fec_with_parity`).
 
-  Pads main to stripe geometry, rebuilds k data + m-k parity shards, reconstructs,
-  strips padding.
+  Both main and parity empty → empty logical payload, **padding ignored**.
+  Shared by `decodeOutboardFec` and (via that helper) `decodeOutboardBody`.
+-/
+def emptyOutboardFecArchive : Except PipelineError ByteArray :=
+  .ok ByteArray.empty
+
+/--
+  Decode with main + parity sidecars (matches Rust `decoding::fec_with_parity`).
+
+  Stripe geometry comes from the parity sidecar (`shard_len = parity_len / (m-k)`),
+  not from truncated main length. Data shards that are fully present in `main`
+  (end ≤ min(main.size, logical_len)) are kept; any partial, missing, or
+  padding-boundary data column is an **erasure** (`none`) so RS can reconstruct
+  from intact parity. Zero-padding truncated main and treating all data shards
+  as present would silently feed zeroed columns into RS and corrupt recovery.
+
+  Empty main + empty parity: always empty (see `emptyOutboardFecArchive`); padding
+  is not validated in that branch (Rust ignores it too).
 -/
 def decodeOutboardFec (main parity : ByteArray) (padding : Nat) :
     Except PipelineError ByteArray :=
-  if main.size == 0 && padding == 0 then
-    if parity.size == 0 then .ok ByteArray.empty
-    else .error .unevenShards
+  if main.size == 0 && parity.size == 0 then
+    emptyOutboardFecArchive
   else if parity.size == 0 then
     .error .emptyShard
   else if parity.size % (fecM - fecK) != 0 then
@@ -83,17 +102,18 @@ def decodeOutboardFec (main parity : ByteArray) (padding : Nat) :
         .error .paddingTooLarge
       else
         let logicalLen := paddedTotal - padding
-        -- Copy main into padded buffer (zeros after main).
-        let padded :=
-          if main.size ≥ paddedTotal then
-            main.extract 0 paddedTotal
-          else
-            padWithZeros main paddedTotal
+        -- Present prefix of logical body only (not zero-filled pad tail).
+        let copyLen := min main.size logicalLen
         Id.run do
           let mut opts : Array (Option ByteArray) := Array.mkEmpty fecM
           for i in [:fecK] do
             let start := i * shardLen
-            opts := opts.push (some (padded.extract start (start + shardLen)))
+            let stop := start + shardLen
+            if stop ≤ copyLen then
+              opts := opts.push (some (main.extract start stop))
+            else
+              -- Truncated / partial / padding-region data column — erasure.
+              opts := opts.push none
           for j in [:fecM - fecK] do
             let start := j * shardLen
             opts := opts.push (some (parity.extract start (start + shardLen)))
@@ -102,25 +122,30 @@ def decodeOutboardFec (main parity : ByteArray) (padding : Nat) :
           | .ok data => pure (.ok data)
 
 /--
-  Outboard encode body (embedded-nonce encrypt when Encrypted).
+  Outboard encode body.
+
+  `headerPath = true`  → encrypted bare main is `[tag|ct]` (nonce out-of-band; matches
+  `file::encode_outboard` / `stream_encode_outboard_buffer(..., Some(nonce))`).
+  `headerPath = false` → encrypted bare main is `[nonce|tag|ct]` (matches low-level
+  `encoding::encode_outboard`).
 
   `nonce` is required when `format.encrypted` (pure model has no CSPRNG).
 -/
-def encodeOutboardBody (master nonce plaintext : ByteArray) (format : FormatBits) :
-    Except PipelineError OutboardEncoded :=
+def encodeOutboardBody (master nonce plaintext : ByteArray) (format : FormatBits)
+    (headerPath : Bool) : Except PipelineError OutboardEncoded :=
   let formatByte := format.toUInt8
   match compressStep plaintext format.compression with
   | .error e => .error e
-  | .ok (afterComp, _) =>
+  | .ok (afterComp, bytesCompressed) =>
     let encRes : Except PipelineError ByteArray :=
       if format.encrypted then
-        -- Embedded layout for bare mains (matches encoding::encode_outboard).
-        encryptStep master nonce afterComp false
+        encryptStep master nonce afterComp headerPath
       else
         .ok afterComp
     match encRes with
     | .error e => .error e
     | .ok bareMain =>
+      let bytesEncrypted := if format.encrypted then bareMain.size else 0
       match
         (if format.fec then encodeOutboardParity bareMain
          else .ok (ByteArray.empty, 0, 0))
@@ -136,6 +161,8 @@ def encodeOutboardBody (master nonce plaintext : ByteArray) (format : FormatBits
             baoHash := root
             paddingLen := paddingLen
             chunkLen := chunkLen
+            bytesCompressed := bytesCompressed
+            bytesEncrypted := bytesEncrypted
           }
         else
           .ok {
@@ -145,15 +172,22 @@ def encodeOutboardBody (master nonce plaintext : ByteArray) (format : FormatBits
             baoHash := zeroHash
             paddingLen := paddingLen
             chunkLen := chunkLen
+            bytesCompressed := bytesCompressed
+            bytesEncrypted := bytesEncrypted
           }
 
 /--
-  Outboard decode: Bao verify → FEC reconstruct → decrypt embedded → decompress.
+  Outboard decode: Bao verify → FEC reconstruct → decrypt → decompress.
+
+  `headerPath` / `nonce` must match encode-time layout:
+  * headerPath → decrypt with explicit `nonce` over `[tag|ct]`
+  * !headerPath → embedded-nonce decrypt (nonce arg unused)
 
   `padding` must match encode-time padding (directory uses `calcPaddingLen main_len`).
 -/
 def decodeOutboardBody (master root main verOutboard fecParity : ByteArray)
-    (padding : Nat) (format : FormatBits) : Except PipelineError ByteArray :=
+    (padding : Nat) (format : FormatBits) (headerPath : Bool) (nonce : ByteArray) :
+    Except PipelineError ByteArray :=
   let formatByte := format.toUInt8
   -- Bao verify first when verification bit set (empty post-order outboard is valid for single-leaf).
   let afterBao : Except PipelineError ByteArray :=
@@ -168,31 +202,39 @@ def decodeOutboardBody (master root main verOutboard fecParity : ByteArray)
   | .ok main' =>
     let afterFec : Except PipelineError ByteArray :=
       if format.fec then
-        if main'.size == 0 then
-          .ok ByteArray.empty
-        else if fecParity.size == 0 then
-          .error .emptyShard
-        else
-          decodeOutboardFec main' fecParity padding
+        -- Single policy: empty+empty → empty; empty main + parity → reconstruct;
+        -- truncated/partial data shards → erasures (see `decodeOutboardFec`).
+        decodeOutboardFec main' fecParity padding
       else
         .ok main'
     match afterFec with
     | .error e => .error e
     | .ok afterF =>
-      -- Embedded-nonce decrypt when encrypted.
-      match decryptStep master ByteArray.empty afterF format.encrypted false with
+      let decNonce := if headerPath then nonce else ByteArray.empty
+      match decryptStep master decNonce afterF format.encrypted headerPath with
       | .error e => .error e
       | .ok afterDec =>
         decompressStep afterDec format.compression
 
-/-- Round-trip outboard for a format. -/
+/-- Round-trip outboard for a format (embedded-nonce layout; low-level parity). -/
 def roundtripOutboard (master nonce plaintext : ByteArray) (format : FormatBits) :
     Except PipelineError Bool :=
-  match encodeOutboardBody master nonce plaintext format with
+  match encodeOutboardBody master nonce plaintext format false with
   | .error e => .error e
   | .ok enc =>
     match decodeOutboardBody master enc.baoHash enc.main enc.verificationOutboard
-        enc.fecParity enc.paddingLen format with
+        enc.fecParity enc.paddingLen format false ByteArray.empty with
+    | .error e => .error e
+    | .ok pt => .ok (ctEq pt plaintext)
+
+/-- Round-trip outboard with header-path encrypt (nonce out-of-band). -/
+def roundtripOutboardHeaderPath (master nonce plaintext : ByteArray) (format : FormatBits) :
+    Except PipelineError Bool :=
+  match encodeOutboardBody master nonce plaintext format true with
+  | .error e => .error e
+  | .ok enc =>
+    match decodeOutboardBody master enc.baoHash enc.main enc.verificationOutboard
+        enc.fecParity enc.paddingLen format true nonce with
     | .error e => .error e
     | .ok pt => .ok (ctEq pt plaintext)
 

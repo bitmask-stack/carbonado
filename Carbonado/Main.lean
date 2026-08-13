@@ -11,6 +11,7 @@ import Carbonado.Scrub
 import Carbonado.Shard
 import Carbonado.Adamantine
 import Carbonado.Filepack
+import Carbonado.RkyvFilepack
 import Carbonado.Outboard
 import Carbonado.Directory
 import Carbonado.Cli
@@ -39,6 +40,7 @@ open Carbonado.Scrub
 open Carbonado.Shard
 open Carbonado.Adamantine
 open Carbonado.Filepack
+open Carbonado.RkyvFilepack
 open Carbonado.Outboard
 open Carbonado.Directory
 open Carbonado.Cli
@@ -546,6 +548,27 @@ def runDemo : IO Unit := do
   | .ok _ => pure ()
   | .error e => fail s!"outboard verify: {repr e}"
   IO.println "outboard encode/verify ok"
+  -- R9 seekable outboard slice (O(slice) path)
+  match verifySliceOutboardForFormat 4 rOb bao5k ob 0 1 with
+  | .ok s =>
+    expectTrue "ob slice size" (s.size == 4096)
+    expectTrue "ob slice bytes" (toHex s == toHex (bao5k.extract 0 4096))
+  | .error e => fail s!"ob slice: {repr e}"
+  match verifySliceOutboardForFormat 4 rOb bao5k ob 1 1 with
+  | .ok s =>
+    expectTrue "ob slice1 size" (s.size == 904)
+    expectTrue "ob slice1 bytes" (toHex s == toHex (bao5k.extract 4096 5000))
+  | .error e => fail s!"ob slice1: {repr e}"
+  match verifySliceOutboardForFormat 4 rOb bao5k ob 0 0 with
+  | .ok s => expectTrue "ob count0" (s.size == 0)
+  | .error e => fail s!"ob count0: {repr e}"
+  let mut badOb := ob
+  badOb := badOb.set! 0 (badOb.get! 0 ^^^ 1)
+  match verifySliceOutboardForFormat 4 rOb bao5k badOb 0 1 with
+  | Except.error .authenticationFailed => pure ()
+  | Except.error e => fail s!"ob tamper: expected authenticationFailed, got {repr e}"
+  | Except.ok _ => fail "ob tamper: ok"
+  IO.println "outboard slice verify ok"
 
   -- Slice first group of 5000: stream decode (no plaintext oracle)
   let (rSlice, sliceEnc) := encodeSliceForFormat 4 bao5k 0 1
@@ -769,7 +792,7 @@ def runDemo : IO Unit := do
   match encodeHeadered master42 nonce11 (utf8 "hello") (FormatBits.ofUInt8 0) 0
       zeroSlhPk zeroMeta with
   | .error e => fail s!"enc c0 for len: {repr e}"
-  | .ok (_h, arch) =>
+  | .ok (_h, arch, _info) =>
     -- trailer after body still recovers
     let withTrailer := appendBA arch (ofList [0xaa, 0xbb, 0xcc])
     match decodeHeadered master42 withTrailer with
@@ -785,7 +808,7 @@ def runDemo : IO Unit := do
   match encodeHeadered master42 nonce11 (utf8 "hello") (FormatBits.ofUInt8 5) 0
       zeroSlhPk zeroMeta with
   | .error e => fail s!"enc c5 for trailer: {repr e}"
-  | .ok (_h, arch) =>
+  | .ok (_h, arch, _info) =>
     let withTrailer := appendBA arch (ofList [0xde, 0xad])
     match decodeHeadered master42 withTrailer with
     | .ok pt => expectTrue "c5 trailer ignore" (toHex pt == toHex (utf8 "hello"))
@@ -1140,19 +1163,38 @@ def runDemo : IO Unit := do
   | .error .verificationFailed => pure ()
   | .error e => fail s!"bad sig: expected verificationFailed, got {repr e}"
   | .ok _ => fail "bad sig: ok"
-  match signRoot (replicate 128 0x42) rootA with
-  | .error .signatureUnavailable => pure ()
-  | .error e => fail s!"sign: expected signatureUnavailable, got {repr e}"
-  | .ok _ => fail "sign: ok"
   match signRoot (replicate 128 0x42) (ofList [1]) with
   | .error .invalidRootLength => pure ()
   | .error e => fail s!"sign root len: expected invalidRootLength, got {repr e}"
   | .ok _ => fail "sign root len: ok"
+  match signRoot (replicate 16 0x42) rootA with
+  | .error .invalidEntropyLength => pure ()
+  | .error e => fail s!"sign entropy: expected invalidEntropyLength, got {repr e}"
+  | .ok _ => fail "sign entropy: ok"
   match mkBinding (ofList [1]) rootA goodSig with
   | .error .invalidPublicKeyLength => pure ()
   | .error e => fail s!"pk len: expected invalidPublicKeyLength, got {repr e}"
   | .ok _ => fail "pk len: ok"
-  IO.println "SLH bind-to-root + unavailable sign ok"
+  -- G10 live SLH-DSA: fixed entropy keygen → sign root → verify; fail-closed on tamper
+  match keygenAndSignRoot (replicate 128 0x42) rootA with
+  | .error e => fail s!"live keygen/sign: {repr e}"
+  | .ok (pkLive, _sk, sigLive) =>
+    expectTrue "live sig len" (sigLive.size == slh1SignatureLen)
+    expectTrue "live pk len" (pkLive.size == slhPublicKeyLen)
+    match verifyRoot pkLive rootA sigLive with
+    | .ok () => pure ()
+    | .error e => fail s!"live verify good: {repr e}"
+    match verifyRoot pkLive rootB sigLive with
+    | .error .verificationFailed => pure ()
+    | .error e => fail s!"live wrong root: expected verificationFailed, got {repr e}"
+    | .ok () => fail "live wrong root: ok"
+    let mut badSig := sigLive
+    badSig := badSig.set! 0 (badSig.get! 0 ^^^ 1)
+    match verifyRoot pkLive rootA badSig with
+    | .error .verificationFailed => pure ()
+    | .error e => fail s!"live bad sig: expected verificationFailed, got {repr e}"
+    | .ok () => fail "live bad sig: ok"
+  IO.println "SLH live sign/verify ok"
 
   IO.println "program F stack ok"
 
@@ -1213,6 +1255,158 @@ def runDemo : IO Unit := do
   | .ok () => pure ()
   | _ => fail "rel ok"
   IO.println "filepack path rules ok"
+
+  -- R9/W3 pure Lean rkyv encode + dual-decode goldens (Rust FilepackManifestWire v2)
+  match fromHex? goldenEmptyHex with
+  | none => fail "rkyv empty hex"
+  | some emptyBytes =>
+    expectTrue "rkyv empty len" (emptyBytes.size == 13)
+    match decodeRkyvManifest emptyBytes (replicate hashLen 0) with
+    | .error e => fail s!"rkyv empty decode: {repr e}"
+    | .ok m =>
+      expectTrue "rkyv empty ver" (m.version == 2)
+      expectTrue "rkyv empty fmt" (m.formatLevel == 0x0e)
+      expectTrue "rkyv empty entries" (m.entries.size == 0)
+      -- W3a: encode empty must bit-match golden
+      match encodeRkyvManifest m with
+      | .error e => fail s!"rkyv empty encode: {repr e}"
+      | .ok enc =>
+        expectTrue "rkyv empty encode golden" (ctEq enc emptyBytes)
+        match encodeRkyvManifest m with
+        | .ok enc2 => expectTrue "rkyv empty codecode" (ctEq enc enc2)
+        | .error e => fail s!"rkyv empty encode2: {repr e}"
+  match fromHex? goldenSingleHex with
+  | none => fail "rkyv single hex"
+  | some singleBytes =>
+    expectTrue "rkyv single len" (singleBytes.size == 131)
+    match decodeRkyvManifest singleBytes (replicate hashLen 0x33) with
+    | .error e => fail s!"rkyv single decode: {repr e}"
+    | .ok m =>
+      expectTrue "rkyv single ver" (m.version == 2)
+      expectTrue "rkyv single fmt" (m.formatLevel == 0x0e)
+      expectTrue "rkyv single n" (m.entries.size == 1)
+      let e := m.entries[0]!
+      expectTrue "rkyv path" (e.relPath == "a.txt")
+      expectTrue "rkyv segfmt" (e.segmentFormat == 0x0e)
+      expectTrue "rkyv segs" (e.segments.size == 1)
+      expectTrue "rkyv main_len" (e.segments[0]!.mainLen == 100)
+      expectTrue "rkyv blake" (ctEq e.contentBlake3 (replicate hashLen 0x22))
+      match encodeRkyvManifest m with
+      | .error e => fail s!"rkyv single encode: {repr e}"
+      | .ok enc =>
+        expectTrue "rkyv single encode golden" (ctEq enc singleBytes)
+        match decodeRkyvManifest enc (replicate hashLen 0x33) with
+        | .error e => fail s!"rkyv single redecode: {repr e}"
+        | .ok m2 =>
+          expectTrue "rkyv single roundtrip path" (m2.entries[0]!.relPath == "a.txt")
+    match decodeCatalogBody singleBytes (replicate hashLen 0x33) with
+    | .ok _ => pure ()
+    | .error e => fail s!"rkyv dual-decode: {repr e}"
+  -- Multi-entry + out-of-line path + OTS Some golden
+  match fromHex? goldenMultiOtsHex with
+  | none => fail "rkyv multi hex"
+  | some multiBytes =>
+    expectTrue "rkyv multi len" (multiBytes.size == 275)
+    match decodeRkyvManifest multiBytes (replicate hashLen 0x55) with
+    | .error e => fail s!"rkyv multi decode: {repr e}"
+    | .ok m =>
+      expectTrue "rkyv multi n" (m.entries.size == 2)
+      expectTrue "rkyv multi a" (m.entries[0]!.relPath == "a.txt")
+      expectTrue "rkyv multi b" (m.entries[1]!.relPath == "b/longer-path-name.txt")
+      match m.entries[1]!.otsProof with
+      | some p => expectTrue "rkyv multi ots" (p.size == 4 && p.get! 0 == 0xab)
+      | none => fail "rkyv multi ots missing"
+      match encodeRkyvManifest m with
+      | .error e => fail s!"rkyv multi encode: {repr e}"
+      | .ok enc =>
+        expectTrue "rkyv multi encode golden" (ctEq enc multiBytes)
+        match encodeRkyvManifest m with
+        | .ok enc2 => expectTrue "rkyv multi codecode" (ctEq enc enc2)
+        | .error e => fail s!"rkyv multi encode2: {repr e}"
+    -- Truncated buffer fail-closed (exact invalidWire)
+    match decodeRkyvManifest (multiBytes.extract 0 12) (replicate hashLen 0x55) with
+    | .error .invalidWire => pure ()
+    | .error e => fail s!"rkyv trunc: expected invalidWire, got {repr e}"
+    | .ok _ => fail "rkyv trunc: ok"
+  -- Extra free-form goldens (path 8/9 boundary, two segs, OTS mix)
+  match fromHex? goldenPathInline8Hex with
+  | none => fail "rkyv path8 hex"
+  | some b =>
+    match decodeRkyvManifest b (replicate hashLen 0) with
+    | .error e => fail s!"rkyv path8 decode: {repr e}"
+    | .ok m =>
+      expectTrue "rkyv path8" (m.entries[0]!.relPath == "12345678")
+      match encodeRkyvManifest m with
+      | .ok enc => expectTrue "rkyv path8 encode" (ctEq enc b)
+      | .error e => fail s!"rkyv path8 encode: {repr e}"
+  match fromHex? goldenPathOol9Hex with
+  | none => fail "rkyv path9 hex"
+  | some b =>
+    match decodeRkyvManifest b (replicate hashLen 0) with
+    | .error e => fail s!"rkyv path9 decode: {repr e}"
+    | .ok m =>
+      expectTrue "rkyv path9" (m.entries[0]!.relPath == "123456789")
+      match encodeRkyvManifest m with
+      | .ok enc => expectTrue "rkyv path9 encode" (ctEq enc b)
+      | .error e => fail s!"rkyv path9 encode: {repr e}"
+  match fromHex? goldenTwoSegmentsHex with
+  | none => fail "rkyv two_seg hex"
+  | some b =>
+    match decodeRkyvManifest b (replicate hashLen 0) with
+    | .error e => fail s!"rkyv two_seg decode: {repr e}"
+    | .ok m =>
+      expectTrue "rkyv two_seg n" (m.entries[0]!.segments.size == 2)
+      expectTrue "rkyv two_seg idx1" (m.entries[0]!.segments[1]!.chunkIndex == 1)
+      match encodeRkyvManifest m with
+      | .ok enc => expectTrue "rkyv two_seg encode" (ctEq enc b)
+      | .error e => fail s!"rkyv two_seg encode: {repr e}"
+  match fromHex? goldenOtsFirstOnlyHex with
+  | none => fail "rkyv ots_mix hex"
+  | some b =>
+    match decodeRkyvManifest b (replicate hashLen 0) with
+    | .error e => fail s!"rkyv ots_mix decode: {repr e}"
+    | .ok m =>
+      expectTrue "rkyv ots_mix n" (m.entries.size == 2)
+      match m.entries[0]!.otsProof, m.entries[1]!.otsProof with
+      | some p, none => expectTrue "rkyv ots_mix first" (p.size == 2)
+      | _, _ => fail "rkyv ots_mix shape"
+      match encodeRkyvManifest m with
+      | .ok enc => expectTrue "rkyv ots_mix encode" (ctEq enc b)
+      | .error e => fail s!"rkyv ots_mix encode: {repr e}"
+  -- Sniffer regression: rkyv body starting with ASCII "CFP2" must dual-decode as rkyv
+  match fromHex? goldenRkyvCfp2PrefixHex with
+  | none => fail "rkyv cfp2_prefix hex"
+  | some b =>
+    expectTrue "rkyv cfp2_prefix magic" (isCfp2 b)
+    match decodeCatalogBody b (replicate hashLen 0) with
+    | .error e => fail s!"rkyv cfp2_prefix dual-decode hijacked: {repr e}"
+    | .ok m =>
+      expectTrue "rkyv cfp2_prefix path" (m.entries[0]!.relPath == "a.txt")
+      expectTrue "rkyv cfp2_prefix root0" (m.entries[0]!.segments[0]!.segmentBaoRoot.get! 0 == 0x43)
+      match encodeRkyvManifest m with
+      | .ok enc => expectTrue "rkyv cfp2_prefix encode" (ctEq enc b)
+      | .error e => fail s!"rkyv cfp2_prefix encode: {repr e}"
+  -- CFP2 still dual-decodes when rkyv fails (genuine CFP2 empty-ish)
+  let cfp2Empty : FilepackManifest := {
+    version := 2
+    formatLevel := 0x0e
+    catalogBaoRoot := replicate hashLen 0
+    entries := #[]
+  }
+  match cfp2Empty.toWireBytes with
+  | .error e => fail s!"cfp2 empty wire: {repr e}"
+  | .ok cfp2Bytes =>
+    expectTrue "cfp2 magic" (isCfp2 cfp2Bytes)
+    match decodeCatalogBody cfp2Bytes (replicate hashLen 0) with
+    | .error e => fail s!"cfp2 dual-decode: {repr e}"
+    | .ok m => expectTrue "cfp2 dual n" (m.entries.size == 0)
+  -- UTF-8 byte length path cap (Issue 2): multi-byte chars count as bytes not codepoints
+  let multiByte := String.mk (List.replicate 1366 '你')  -- 1366 * 3 = 4098 > 4096 bytes
+  match validateRelPath multiByte with
+  | .error .relPathTooLong => pure ()
+  | .error e => fail s!"utf8 path cap: expected relPathTooLong, got {repr e}"
+  | .ok () => fail "utf8 path cap: accepted oversize multi-byte path"
+  IO.println "rkyv FilepackManifestWire encode/decode goldens ok"
 
   -- Outboard c12/c14 roundtrip
   let pubMaster := replicate 32 0

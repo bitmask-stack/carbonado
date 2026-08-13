@@ -28,14 +28,16 @@ Decode:
 | `stream_encode_inboard_body` (FEC) | Yes (4 KiB feed) | **O(8 × chunk_len)** — S2 eliminates pre-FEC `bare_len` staging |
 | `stream_encode_inboard_body` (Bao verify) | Yes (leaf-at-a-time) | **O(leaf + outboard)** — S3: `FecStripeReadAt` / `SeekReadAt`, no body staging `Vec` |
 | `encode_stream` / `encode_shard_stream` | Yes | O(chunk) preprocess spool + O(stripe) FEC |
-| `decode_stream` / `file::decode` | Yes (bounded `encoded_len`) | O(chunk) spool staging + streaming EtM on header path |
-| `stream_decode` (Verification c6) | Yes (incremental Read) | **(A)** Bao → `SeekWriteAt` on post-preprocess spool (**O(chunk)** RAM); **(B)** streaming EtM/decompress |
-| `stream_decode` (Verification+FEC c12/c14/c15) | Yes (incremental Read) | **(A)** Bao → `FecInboardWriteAt` O(FEC body) shards (segment-wide stripe); `finish_into` streams logical without second full `Vec`; **(B)** O(chunk) spool + EtM |
-| `stream_decode` (c4/c8) | Bounded when `encoded_body_len` set | O(stripe) FEC or O(compressed); rejects trailing bytes |
-| `stream_decode_outboard` | Incremental main/parity copy | Bao verify via `PostOrderOutboard` + `ReadAt` (O(hash pair) per node; spool or slice); main via spool |
+| `decode_stream` / `file::decode` | Yes (bounded `encoded_len`) | **backend-rust:** O(chunk) spool + streaming EtM. **backend-lean (W1a):** MAC-before-body, then materialize header+`encoded_len` → Lean `decode_headered`; peak **O(archive+plaintext)** E1. See [docs/LIMITS.md](../docs/LIMITS.md). |
+| `stream_decode` (Verification c6) | Yes (incremental Read) | **backend-rust:** Bao → `SeekWriteAt` (**O(chunk)**). **backend-lean:** E1 spool→Lean body decode (O(encoded+logical)). |
+| `stream_decode` (Verification+FEC c12/c14/c15) | Yes (incremental Read) | **backend-rust:** Bao → `FecInboardWriteAt` O(FEC body) + EtM. **backend-lean:** E1 Lean buffer. |
+| `stream_decode` (c4/c8) | Bounded when `encoded_body_len` set | rust O(stripe)/O(compressed); lean E1 |
+| `stream_*_outboard` **public non-Compression** (c0/c4/c8/c12) | Yes | **W1b E2 both backends:** S4 O(chunk/stripe) geometric (lean: **composition**, not pure Lean stream). |
+| `stream_*_outboard` **public + Compression** (c2/c6/c10/c14) | Yes | **backend-rust:** O(chunk) streaming zstd. **backend-lean:** **O(logical)** bulk zstd for Lean frame parity — **not E2**. |
+| `stream_*_outboard` **encrypted** | Yes | **backend-rust:** S4 + EtM spool. **backend-lean:** E1 Lean buffer (crypto dual). |
 | `scrub` | Seekable slices | O(1) Bao verify sink + combinatorial shard search (S5); `scrub_outboard` verify retains O(sidecar) |
 
-**Bottom line:** Phase 1 fused encode/decode uses `SeekableSpool` for preprocess and post-Bao/FEC staging with streaming MAC-then-decrypt. **M1:** c6 `SeekWriteAt` O(chunk); FEC verify O(FEC body) shards + `finish_into`. **M2:** outboard verify uses `PostOrderOutboard` + `ReadAt` (no full sidecar `Vec` copy). Residual: FEC O(segment body) under single segment-wide RS stripe; async encoded-body spool. Scrub uses discard `WriteAt` (S5).
+**Bottom line:** Phase 1 fused encode/decode uses `SeekableSpool` for preprocess and post-Bao/FEC staging with streaming MAC-then-decrypt. **M1 (pipeline):** c6 `SeekWriteAt` O(chunk); FEC verify O(FEC body) shards + `finish_into`. **M2:** outboard verify uses `PostOrderOutboard` + `ReadAt`. **W1b:** public **non-compress** outboard stream is O(chunk/stripe) under both backends (lean = geometric composition); Compression under lean is O(logical). **W4a:** inboard `verify_slice` Lean retains O(slice) (time O(N); full body input). **W4b permanent:** outboard slice C still full main+outboard buffers. **W4c permanent:** lean compress buffer-only. **W4d permanent:** FEC O(segment body); async encoded-body disk spool. Residual: pure Lean chunked C ABI; inboard/encrypted lean stream E1.
 
 Tests documenting this: `tests/streaming_limits.rs`.
 
@@ -48,6 +50,10 @@ Tests documenting this: `tests/streaming_limits.rs`.
 | **M1** | ~~Non-FEC c6 → `SeekWriteAt`~~ **Shipped**; FEC `finish_into` **Shipped**. Further FEC O(segment) needs multi-stripe geometry (format-level) or accept segment-bounded residual | c6 O(chunk); c12–c15 O(FEC body) shards |
 | **M2** | ~~Outboard `PostOrderOutboard` + `ReadAt`~~ **Shipped** (slice or spool; O(hash pair) per node) | Dropped O(sidecar) mem copy |
 | **M3** | Async: wire `bao_tree::io::fsm` (or equivalent); drop full encoded-body spool | Remove ~2× encoded disk I/O on async path |
+| **W4a** | ~~Inboard seekable O(slice) retain (Lean)~~ **Shipped** | O(slice) output; O(N) time; full body input at C |
+| **W4b** | Outboard ReadAt C callback ABI | **Permanent residual** — full main+outboard buffers at C |
+| **W4c** | Dual-safe streaming zstd | **Permanent residual** — buffer-only under lean (W2a) |
+| **W4d** | FEC multi-stripe / async no-spool FSM | **Permanent residual** this wave — metrics below |
 
 ### Design principles
 
@@ -102,6 +108,18 @@ Tests documenting this: `tests/streaming_limits.rs`.
 
 4. **Outboard sidecar ordering:** `.out` and `.par` are derived from the same logical body; parallel write is fine after body is known.
 
+### W4d metrics (permanent residual — 2026-07)
+
+| Metric | `backend-rust` | `backend-lean` |
+|--------|----------------|----------------|
+| FEC verify peak RAM | O(FEC body) = 8 × `chunk_len` shard buffers for segment-wide stripe (`FecInboardWriteAt`) | E1 full body `Vec` + decode (pipeline E1) or same O(FEC body) when on rust S4 composition paths |
+| Async `stream_decode_async` disk | O(encoded) staging spool + O(logical) plaintext spool | same disk staging |
+| Async peak RAM | spool/chunk + FEC residual O(FEC body) on sync path | **O(encoded + logical)** after E1 `read_encoded_body` |
+| Async without encoded spool | **not shipped** (full FSM out of scope W4d) | **not shipped** |
+| Double buffering | staging spool then sync path may re-read; not free earlier without API break | same |
+
+Honesty: do **not** claim async is O(chunk) under lean+async. Freeze never requires `async` (R10).
+
 ### Deferred parallel work (after memory M1–M3)
 
 Pipeline **memory** elimination outranks these:
@@ -148,8 +166,9 @@ Phase 2 adds **concurrency** (non-blocking fetch / range-read / UDP assembly ada
 2. **Async is an adapter layer** — same internal stage graph; different trait bounds on sources/sinks.
 3. **Runtime-agnostic traits** — `futures_lite::AsyncRead` / `AsyncWrite` (stdlib-compatible async I/O surface), not a hard Tokio dependency in library core.
 4. **Optional `async` Cargo feature** — enables `stream_decode_async` and `stream::io` async helpers; default build stays sync-only. `bao_tree` keeps `default-features = false, features = ["validate"]`; with `async`, `bao_tree/tokio_fsm` is enabled but **not referenced by crate code yet** (reserved; no runtime effect on decode today).
-5. **Bao bridge choice (Phase 2)** — async decode **does not** call `bao_tree::io::fsm`. Encoded input is fully staged to a disk-backed [`SeekableSpool`](../src/stream/spool.rs) via [`async_copy_bounded`](../src/stream/io.rs), then the existing sync keyed Bao + FEC + decrypt stages run unchanged. This preserves MAC-before-decrypt and bounded-read contracts without duplicating crypto logic, at the cost of **O(encoded_body)** disk I/O per decode (explicit tradeoff vs sync S4 incremental read). Phase 3 milestone: wire FSM or incremental async Bao to skip encoded spool.
-6. **Executor blocking** — sync pipeline runs inside `async fn`; enable `async-tokio` for `spawn_blocking` offload or call from a dedicated thread pool.
+5. **Bao bridge choice (Phase 2)** — async decode **does not** call `bao_tree::io::fsm`. Encoded input is fully staged to a disk-backed [`SeekableSpool`](../src/stream/spool.rs) via [`async_copy_bounded`](../src/stream/io.rs), then dual-aware sync [`stream_decode`](../src/stream/decode.rs) runs (R10: same engine dispatch as R5 E1 under `backend-lean`; S4 pipeline under `backend-rust`). This preserves MAC-before-decrypt and bounded-read contracts without duplicating crypto logic, at the cost of **O(encoded_body)** disk I/O per decode (explicit tradeoff vs sync S4 incremental read). Not stream E2 / true chunked.
+6. **Executor blocking** — dual-aware sync path runs inside `async fn`; enable `async-tokio` for `spawn_blocking` offload or call from a dedicated thread pool.
+7. **Dual freeze (R10 permanent)** — `just test-lean-ci` never enables `async`; optional lean+async is dual-engine product path, not freeze.
 
 ### Feature flag matrix
 
@@ -170,18 +189,25 @@ Phase 2 adds **concurrency** (non-blocking fetch / range-read / UDP assembly ada
 
 ### WASM
 
-Keep **`async` off** on `wasm32` deployments: `SeekableSpool` uses host temp files. `stream_decode_async` is exported when `async` is enabled but returns `NotImplemented` on `wasm32` at runtime. CI may compile `--all-features` on `wasm32-unknown-unknown`; that means "compiles, unsupported at runtime" — not a deployment target for async decode.
+Keep **`async` off** on `wasm32` deployments: `SeekableSpool` uses host temp files. `stream_decode_async` is exported when `async` is enabled but returns `NotImplemented` on `wasm32` at runtime. CI may compile `backend-rust` + optional features on `wasm32-unknown-unknown` (never `--all-features` — dual-backend mutual exclusion); that means "compiles, unsupported at runtime" — not a deployment target for async decode.
 
 ### Disk I/O overhead (Phase 2)
 
-Per decode on native targets with `async`: up to three temp spools (encoded staging, pipeline `post_preprocess`, plaintext staging). Encoded bytes are written once on ingress and read again by the sync pipeline — roughly **2× encoded-body disk traffic** vs sync incremental `Read`. Error cleanup uses `SeekableSpool::drop` (`0600` on Unix). Track elimination of encoded spool as a Phase 3 metric.
+Per decode on native targets with `async` (R10 dual-aware after staging):
+
+| Engine | Temp spools | Peak RAM (honest) |
+|--------|-------------|-------------------|
+| **`backend-rust` (S4)** | Up to **three** disk spools: encoded staging, pipeline `post_preprocess`, plaintext staging | Spool/chunk-oriented; FEC verification may retain O(FEC body) shard buffers |
+| **`backend-lean` (E1)** | **Two** disk spools: encoded staging + plaintext staging (no rust `post_preprocess` spool) | **O(encoded + logical)** — E1 materializes body `Vec` then Lean plaintext |
+
+Encoded bytes are written once on ingress and read again by the sync path — roughly **2× encoded-body disk traffic** vs rust sync incremental `Read`. Error cleanup uses `SeekableSpool::drop` (`0600` on Unix). Track elimination of encoded spool as a future metric (not stream E2 yet).
 
 ### Public API (async)
 
-- [`stream_decode_async`](../src/stream/decode_async.rs) — `AsyncPipelineSource` → `AsyncPipelineSink` inboard decode; delegates to sync `stream_decode_inboard_pipeline` (format matrix tested in `tests/streaming_async.rs`: c4/c6/c8/c12/c14/c15). Verification-format truncated bounded reads surface staging `UnexpectedEof` on async vs `BaoResponseTruncated` on sync (documented in rustdoc).
+- [`stream_decode_async`](../src/stream/decode_async.rs) — `AsyncPipelineSource` → `AsyncPipelineSink` inboard decode; after staging, dual-aware [`stream_decode`](../src/stream/decode.rs) (R10; format matrix in `tests/streaming_async.rs`: c4/c6/c8/c12/c14/c15). Verification-format truncated bounded reads under `backend-rust` surface staging `UnexpectedEof` on async vs `BaoResponseTruncated` on sync (documented in rustdoc).
 - [`stream::io`](../src/stream/io.rs) — `PipelineSource` / `PipelineSink` (sync), `AsyncPipelineSource` / `AsyncPipelineSink` + `async_copy_bounded` / `async_copy_all` (feature `async`).
 
-Tests: `cargo test --features async --test streaming_async`.
+Tests: `cargo test --features async --test streaming_async` (rust). Optional dual: lean features + `async` / `async-tokio` (not freeze).
 
 ## Phase 3: Parallelism (shipped)
 
@@ -209,11 +235,11 @@ Implementation: [`src/stream/parallel.rs`](../src/stream/parallel.rs) — `Paral
 | Feature | Default | Enables |
 |---------|---------|---------|
 | `parallel` | yes | Scoped parallel RS parity in `FecInboardEncoder::take_stripe`; std only (serial at runtime on `wasm32`) |
-| `--no-default-features` + `pqc,ots,cli` | — | Serial RS parity (`reed_solomon_erasure::encode`); CI-gated via `serial_fec_path` |
+| `--no-default-features` + `backend-rust,pqc,ots,cli` | — | Serial RS parity (`reed_solomon_erasure::encode`); CI-gated via `serial_fec_path` |
 | `async` | no | Phase 2 async adapters (orthogonal) |
 | `async-tokio` | no | Phase 2 + `spawn_blocking` offload |
 
-Combine flags independently: `cargo test --all-features` exercises compile-time matrix; determinism tests gate on `parallel` only.
+Combine flags carefully: never `cargo test --all-features` (enables both backends → `compile_error!`). Prefer default + `--features "async,async-tokio,man-gen"` for the optional rust matrix; determinism tests gate on `parallel` only.
 
 ### WASM
 
@@ -234,7 +260,7 @@ On `wasm32`, `parallel` compiles but [`should_parallelize_rs_parity`](../src/str
 | Multi-file directory segments (independent processes) | CTR stream under one archive nonce |
 | | Bao root finalize after all leaves |
 
-Determinism contract: parallel encode produces **bit-identical** body bytes and keyed Bao roots vs the serial `encode_sep` / `rs.encode` reference (`encode_rs_parity_serial`, unit-tested against `rs.encode`). Serial FEC path (no `parallel`) is CI-gated separately (`cargo test --no-default-features --features "pqc,ots,cli" --test serial_fec_path`). Scrub roundtrip under parallel encode: `parallel_determinism::parallel_encode_inboard_scrub_roundtrip_c12_c14`. Tests: `cargo test --test parallel_determinism`.
+Determinism contract: parallel encode produces **bit-identical** body bytes and keyed Bao roots vs the serial `encode_sep` / `rs.encode` reference (`encode_rs_parity_serial`, unit-tested against `rs.encode`). Serial FEC path (no `parallel`) is CI-gated separately (`cargo test --no-default-features --features "backend-rust,pqc,ots,cli" --test serial_fec_path`). Scrub roundtrip under parallel encode: `parallel_determinism::parallel_encode_inboard_scrub_roundtrip_c12_c14`. Tests: `cargo test --test parallel_determinism`.
 
 ## References
 

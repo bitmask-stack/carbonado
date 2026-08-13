@@ -46,12 +46,23 @@ fmt:
 fmt-fix:
     cargo fmt
 
+# rustfmt has no `-W`; `--check` is the fail-if-unformatted equivalent of `cargo fmt --all -W`.
+# Never `--all-features` on clippy: that enables both `backend-rust` and `backend-lean`
+# and hits `compile_error!`. This is the rust-compatible stand-in (same as `just lint` / CI).
+# Rust-only gate: fmt --check, clippy (rust features), nextest. Stops on first failure.
+check:
+    cargo fmt --all -- --check
+    cargo clippy --all-targets --features "async,async-tokio,man-gen" -- -D warnings
+    cargo nextest run
+
 # Clippy + project-specific source checks (things clippy does not know about).
 lint: _clippy _lint-source
 
+# Never use `--all-features` here: that enables both `backend-rust` and `backend-lean` → compile_error!.
+# Cover optional features mutually compatible with default `backend-rust`.
 [private]
 _clippy:
-    cargo clippy --all-targets --all-features -- -D warnings
+    cargo clippy --all-targets --features "async,async-tokio,man-gen" -- -D warnings
 
 [private]
 _lint-source:
@@ -67,17 +78,23 @@ _lint-source:
     failures=0
     pass() { echo -e "${GREEN}PASS${NC}: $1"; }
     fail() { echo -e "${RED}FAIL${NC}: $1"; failures=$((failures + 1)); }
+    # Skip #[cfg(test)] modules (any name) and bare `mod tests { ... }` blocks.
+    # Important: do not clear in_test on the cfg line itself (depth starts at 0).
     scan_non_test_src() {
       local mode="$1"
       find src -name '*.rs' -print0 | while IFS= read -r -d '' f; do
         awk -v mode="$mode" '
-          /#\[cfg\(test\)\]/ { in_test = 1 }
-          /^[[:space:]]*mod tests[[:space:]]*\{/ && !in_test { in_test = 1; depth = 1; next }
+          /#\[cfg\(test\)\]/ { in_test = 1; entered = 0; depth = 0; next }
+          /^[[:space:]]*(pub[[:space:]]+)?mod[[:space:]]+tests[[:space:]]*\{/ && !in_test {
+            in_test = 1; entered = 0; depth = 0
+          }
           in_test {
-            nopen = gsub(/\{/, "{")
-            nclose = gsub(/\}/, "}")
+            line = $0
+            nopen = gsub(/\{/, "{", line)
+            nclose = gsub(/\}/, "}", line)
             depth += nopen - nclose
-            if (depth <= 0) in_test = 0
+            if (nopen > 0) entered = 1
+            if (entered && depth <= 0) { in_test = 0; entered = 0; depth = 0 }
             next
           }
           {
@@ -135,13 +152,37 @@ _lint-source:
       rg -n 'MAGICNO' src/constants.rs 2>/dev/null | sed 's/^/    /' || true
     fi
     echo ""
-    echo "--- 4. NotImplemented not on crypto paths ---"
-    notimpl_returns=$(rg -n 'CarbonadoError::NotImplemented|Err\([^)]*NotImplemented' src/ 2>/dev/null || true)
-    if [[ -z "$notimpl_returns" ]]; then
-      pass "No NotImplemented returns in src/ (enum variant may exist for future use)"
+    echo "--- 4. NotImplemented only on intentional residual / map sites ---"
+    # Allowed (documented dual-backend / platform residuals — not silent crypto stubs):
+    # - error.rs enum variant definition
+    # - backend lean ABI code → CarbonadoError map arm
+    # - stream_decode_async on wasm32 (documented NotImplemented residual)
+    # - doc comments mentioning the variant
+    # (R2: file::encode metadata/SLH are plumbed — no longer NotImplemented)
+    notimpl_hits=$(rg -n 'CarbonadoError::NotImplemented|Err\([^)]*NotImplemented' src/ 2>/dev/null || true)
+    notimpl_bad=""
+    if [[ -n "$notimpl_hits" ]]; then
+      notimpl_bad=$(echo "$notimpl_hits" | while IFS= read -r line; do
+        # comments / docs
+        if echo "$line" | rg -q '^\S+:\d+:[[:space:]]*(//|///|\*)'; then continue; fi
+        # enum variant
+        if echo "$line" | rg -q 'src/error\.rs:'; then continue; fi
+        # match-arm mapping from C ABI
+        if echo "$line" | rg -q '=>[[:space:]]*CarbonadoError::NotImplemented'; then continue; fi
+        # intentional wasm async residual
+        if echo "$line" | rg -q 'src/stream/decode_async\.rs:'; then continue; fi
+        echo "$line"
+      done || true)
+    fi
+    if [[ -z "$notimpl_bad" ]]; then
+      pass "NotImplemented only at allowlisted residual/map sites (dual-backend + wasm async)"
+      if [[ -n "$notimpl_hits" ]]; then
+        echo "  Allowlisted evidence:"
+        echo "$notimpl_hits" | sed 's/^/    /'
+      fi
     else
-      fail "NotImplemented returned in src/"
-      echo "$notimpl_returns" | sed 's/^/    /'
+      fail "Unexpected NotImplemented returns in src/ (not on allowlist)"
+      echo "$notimpl_bad" | sed 's/^/    /'
     fi
     echo ""
     echo "--- 5. No todo!/unimplemented! in production src/ ---"
@@ -191,17 +232,19 @@ _lint-source:
       exit 1
     fi
 
+# wasm32: always name backend-rust under --no-default-features (mutual exclusion).
 lint-wasm:
-    cargo clippy --target wasm32-unknown-unknown --no-default-features --features "" -- -D warnings
+    cargo clippy --target wasm32-unknown-unknown --no-default-features --features "backend-rust" -- -D warnings
 
-# Default features (includes `parallel`), serial FEC regression, then full feature matrix.
+# Default features (includes `parallel`), serial FEC, then backend-rust + optional features.
+# Never `--all-features` (enables both backends → compile_error!).
 test:
     cargo test
-    cargo test --no-default-features --features "pqc,ots,cli" --test serial_fec_path
-    cargo test --all-features
+    cargo test --no-default-features --features "backend-rust,pqc,ots,cli" --test serial_fec_path
+    cargo test --features "async,async-tokio,man-gen"
 
 test-serial:
-    cargo test --no-default-features --features "pqc,ots,cli" --test serial_fec_path
+    cargo test --no-default-features --features "backend-rust,pqc,ots,cli" --test serial_fec_path
 
 test-parallel:
     cargo test --test parallel_determinism
@@ -209,6 +252,105 @@ test-parallel:
 # Focused smoke: slices, streaming, sharding, bao-tree contract (also in `just test`).
 test-smoke:
     cargo test --test streaming --test seekable_slices --test sharding --test bao_keyed_contract
+
+# Shared lean env: build libcarbonado if CARBONADO_LEAN_LIB unset; fail-closed if .so/.dylib missing.
+# stdout: only `export …` lines (safe for `eval "$(just _lean-env)"`); diagnostics on stderr.
+[private]
+_lean-env:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -z "${CARBONADO_LEAN_LIB:-}" ]]; then
+      # Dedicated symlink so other `nix build` targets do not clobber `result/`.
+      nix build .#libcarbonado -o result-libcarbonado
+      export CARBONADO_LEAN_LIB="$PWD/result-libcarbonado/lib"
+      export CARBONADO_LEAN_INCLUDE="$PWD/result-libcarbonado/include"
+    fi
+    if [[ ! -f "${CARBONADO_LEAN_LIB}/libcarbonado.so" && ! -f "${CARBONADO_LEAN_LIB}/libcarbonado.dylib" ]]; then
+      echo "FATAL: libcarbonado shared library missing under CARBONADO_LEAN_LIB=${CARBONADO_LEAN_LIB}" >&2
+      echo "  Build: nix build .#libcarbonado -o result-libcarbonado" >&2
+      echo "  Then:  export CARBONADO_LEAN_LIB=\$PWD/result-libcarbonado/lib" >&2
+      echo "         export CARBONADO_LEAN_INCLUDE=\$PWD/result-libcarbonado/include" >&2
+      exit 1
+    fi
+    if [[ -z "${CARBONADO_LEAN_INCLUDE:-}" ]]; then
+      if [[ -d "$(dirname "${CARBONADO_LEAN_LIB}")/include" ]]; then
+        export CARBONADO_LEAN_INCLUDE="$(dirname "${CARBONADO_LEAN_LIB}")/include"
+      else
+        echo "FATAL: CARBONADO_LEAN_INCLUDE unset and cannot infer from CARBONADO_LEAN_LIB" >&2
+        exit 1
+      fi
+    fi
+    export LD_LIBRARY_PATH="${CARBONADO_LEAN_LIB}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    echo "CARBONADO_LEAN_LIB=$CARBONADO_LEAN_LIB" >&2
+    echo "CARBONADO_LEAN_INCLUDE=$CARBONADO_LEAN_INCLUDE" >&2
+    printf 'export CARBONADO_LEAN_LIB=%q\n' "$CARBONADO_LEAN_LIB"
+    printf 'export CARBONADO_LEAN_INCLUDE=%q\n' "$CARBONADO_LEAN_INCLUDE"
+    printf 'export LD_LIBRARY_PATH=%q\n' "$LD_LIBRARY_PATH"
+
+# Dual-backend Phase 1: build libcarbonado and run lean allowlist smoke.
+test-lean-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    eval "$(just _lean-env)"
+    cargo test --no-default-features --features "backend-lean,pqc,ots" --test lean_backend_smoke
+
+# Dual-backend Phase 2: outboard/scrub/slice + G9 buffer seeds (+ Phase 1 smoke).
+test-lean-phase2:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    eval "$(just _lean-env)"
+    cargo test --no-default-features --features "backend-lean,pqc,ots" \
+      --test lean_backend_smoke --test lean_backend_phase2
+
+# Dual-backend Phase 3: directory composition (rkyv catalog + Lean segment/catalog crypto).
+test-lean-phase3:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    eval "$(just _lean-env)"
+    cargo test --no-default-features --features "backend-lean,pqc,ots" \
+      --test lean_backend_smoke --test lean_backend_phase2 --test lean_backend_phase3 \
+      --test format_policy
+
+# Dual-backend Phase 4: SLH composition (G10-A) + CLI dual path + directory OTS.
+# `cli` enables lean-linked binary: directory subprocess = dual-engine; single-file stream = link smoke.
+test-lean-phase4:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    eval "$(just _lean-env)"
+    cargo test --no-default-features --features "backend-lean,pqc,ots,cli" \
+      --test lean_backend_smoke --test lean_backend_phase2 --test lean_backend_phase3 \
+      --test format_policy --test slh_outboard --test lean_backend_phase4
+
+# Dual-backend Phase 5 / G11 + R7 G8 full close: shared CI + human gate.
+# Freeze = full dual suite under lean features (G8 closed 2026-07 R7). See docs/GAPS.md.
+# Permanent feature-gated exclusions under this feature set (0 tests, not dual residual):
+#   streaming_async needs `async` (R10 closed: freeze never requires async; lean+async dual-aware);
+#   parallel_determinism needs `parallel` (Lean RS serial).
+# Post-G8 residuals (not dual-suite failures): stream E2, file::decode_stream pure-Rust,
+# pure Lean rkyv encode residual — composition paths remain SSOT for those layers.
+test-lean-ci:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    eval "$(just _lean-env)"
+    # Full dual suite (lib units + all integration tests, including bin_*). Never add async.
+    cargo test --no-default-features --features "backend-lean,pqc,ots,cli"
+
+# G9 / R8: cross-backend matrix both directions (lean fixtures → rust; rust fixtures → lean).
+test-g9:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo test --test g9_cross_backend
+    eval "$(just _lean-env)"
+    cargo test --no-default-features --features "backend-lean,pqc,ots" --test g9_cross_backend
+
+# Regenerate G9 goldens under tests/fixtures/g9/{rust,lean}/ (requires libcarbonado for lean).
+g9-gen-fixtures:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    G9_WRITE_FIXTURES=1 cargo test --test g9_cross_backend write_fixtures -- --ignored --nocapture
+    eval "$(just _lean-env)"
+    G9_WRITE_FIXTURES=1 cargo test --no-default-features --features "backend-lean,pqc,ots" \
+      --test g9_cross_backend write_fixtures -- --ignored --nocapture
 
 build:
     cargo build --bin carbonado --release

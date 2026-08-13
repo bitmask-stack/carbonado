@@ -673,12 +673,11 @@ fn decode_rejects_tampered_catalog_body_returns_verification_failed() {
     fs::write(&tampered, &bytes).expect("write tampered");
 
     let err = decode_directory(&ZERO_KEY, &tampered, &tempdir("tamper_body_dec")).unwrap_err();
+    // Measured both backends (R4): keyed Bao body auth failure → AuthenticationFailed.
+    // Must not misreport CatalogBaoRootMismatch or collapse to BaoResponseTruncated.
     assert!(
-        matches!(
-            err,
-            CarbonadoError::OutboardVerificationFailed(_) | CarbonadoError::AuthenticationFailed
-        ),
-        "tampered catalog body must not map to CatalogBaoRootMismatch; got {err:?}"
+        matches!(err, CarbonadoError::AuthenticationFailed),
+        "tampered catalog body must yield AuthenticationFailed, got {err:?}"
     );
 }
 

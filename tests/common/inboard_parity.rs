@@ -123,6 +123,7 @@ pub fn preprocess_and_body(
         &mut staging,
         &mut nonce,
         true,
+        None, // CSPRNG when encrypted (production path)
     )
     .expect("preprocess");
     (stats, staging.into_inner(), nonce)

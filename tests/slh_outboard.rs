@@ -1,7 +1,9 @@
 //! Phase 1B: SLH-DSA sidecar E2E (requires `pqc` feature).
 //!
-//! CI must run `cargo test --all-features` (or `--features pqc`) for this crate;
-//! `--no-default-features` skips all tests here (`bitcoinpqc` / `pqc` is optional).
+//! Default features already enable `pqc`. Also in the lean freeze allowlist:
+//! `just test-lean-ci` / `cargo test --no-default-features --features "backend-lean,pqc,ots,cli" --test slh_outboard`.
+//! Never `cargo test --all-features` (enables both backends → `compile_error!`).
+//! Builds without `pqc` skip this crate (`#![cfg(feature = "pqc")]`).
 
 #![cfg(feature = "pqc")]
 

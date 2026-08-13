@@ -2,7 +2,9 @@
 //!
 //! Run with: `cargo test --test parallel_determinism` (default features include `parallel`).
 //!
-//! Serial-path coverage without `parallel`: `cargo test --no-default-features --features "pqc,ots,cli" --test serial_fec_path`.
+//! Serial-path coverage without `parallel`:
+//! `cargo test --no-default-features --features "backend-rust,pqc,ots,cli" --test serial_fec_path`
+//! (must name `backend-rust` under `--no-default-features`; never `--all-features`).
 
 #![cfg(feature = "parallel")]
 

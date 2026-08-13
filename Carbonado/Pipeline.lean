@@ -323,10 +323,13 @@ def natToU32Field (n : Nat) : Except PipelineError UInt32 :=
   if n > u32Max then .error .invalidFieldLength
   else .ok (UInt32.ofNat n)
 
-/-- Headered encode: body + authenticated 177-byte Header (header-path encrypt). -/
+/-- Headered encode: body + authenticated 177-byte Header (header-path encrypt).
+
+  Third component is pipeline `EncodeInfo` (stage counters for C ABI / dual-backend).
+-/
 def encodeHeadered (master nonce plaintext : ByteArray) (format : FormatBits)
     (chunkIndex : UInt32) (slhPublicKey metadata : ByteArray) :
-    Except PipelineError (Header × ByteArray) :=
+    Except PipelineError (Header × ByteArray × EncodeInfo) :=
   match encodeBody master nonce plaintext format true with
   | .error e => .error e
   | .ok enc =>
@@ -341,7 +344,7 @@ def encodeHeadered (master nonce plaintext : ByteArray) (format : FormatBits)
         match hdr.toBytes with
         | .error e => .error (ofHeaderError e)
         | .ok hdrBytes =>
-          .ok (hdr, appendBA hdrBytes enc.body)
+          .ok (hdr, appendBA hdrBytes enc.body, enc.info)
 
 /--
   Headered decode: **header MAC verified first**, then body with `payload_nonce`.
@@ -408,7 +411,7 @@ def roundtripHeadered (master nonce plaintext : ByteArray) (format : FormatBits)
     Except PipelineError Bool :=
   match encodeHeadered master nonce plaintext format 0 zeroSlhPk zeroMeta with
   | .error e => .error e
-  | .ok (_hdr, archive) =>
+  | .ok (_hdr, archive, _info) =>
     match decodeHeadered master archive with
     | .error e => .error e
     | .ok pt => .ok (ctEq pt plaintext)

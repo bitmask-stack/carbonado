@@ -62,10 +62,15 @@ def decodeSliceForFormat (format : UInt8) (root : ByteArray) (contentLen index c
     (response : ByteArray) : Except BaoError ByteArray :=
   decodeSliceResponse (carbonadoVerificationKey format) root contentLen index count response
 
-/-- Extract/verify slice from full inboard under format (auth-first). -/
+/-- Extract/verify slice from full inboard under format (W4a auth-first O(slice) retain). -/
 def verifySliceInboardForFormat (format : UInt8) (root input : ByteArray)
     (index count : Nat) : Except BaoError ByteArray :=
   verifySliceInboard (carbonadoVerificationKey format) root input index count
+
+/-- Seekable outboard slice verify under format (O(slice + height) hash; offset walk W4b). -/
+def verifySliceOutboardForFormat (format : UInt8) (root bare outboard : ByteArray)
+    (index count : Nat) : Except BaoError ByteArray :=
+  verifySliceOutboard (carbonadoVerificationKey format) root bare outboard index count
 
 /-- Different format bytes yield different verification keys. -/
 theorem verification_key_format_domain :

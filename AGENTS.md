@@ -13,7 +13,16 @@
 | **Nix flakes** | Build Lean AOT, purity/no-sorry, package `libcarbonado` |
 | **`ref/`** | Pinned oracles (bao-tree, RustCrypto, zstd, …) |
 
-**Parity bar (G8):** `cargo test` with `backend-rust` (default) and `backend-lean` (links Lean AOT C). Same tests; not separate Lean-only demos. See [docs/TEST_CONTRACT.md](docs/TEST_CONTRACT.md), [docs/ABI.md](docs/ABI.md), [docs/PARITY.md](docs/PARITY.md), [docs/GAPS.md](docs/GAPS.md).
+**Parity bar (G8):** same tests on both engines — not Lean-only demos. See [docs/TEST_CONTRACT.md](docs/TEST_CONTRACT.md), [docs/ABI.md](docs/ABI.md), [docs/PARITY.md](docs/PARITY.md), [docs/GAPS.md](docs/GAPS.md).
+
+```bash
+cargo test                                                              # backend-rust (default features)
+just test-lean-ci                                                       # backend-lean full dual suite (G8 closed at R7 / G11)
+# Equivalent unfiltered lean suite:
+# cargo test --no-default-features --features "backend-lean,pqc,ots,cli"
+```
+
+Default `Cargo.toml` features already enable `backend-rust`. Adding `--features backend-lean` without `--no-default-features` enables **both** engines and hits `compile_error!` in `src/backend/mod.rs`.
 
 | Concern | Allowed |
 |---------|---------|
@@ -24,11 +33,11 @@
 
 **Prove everything:** machine-checked Lean theorems **and** bit-match via the Rust suite on `backend-lean`.
 
-**Agents:** implement and verify (`nix build`, `nix flake check`, `cargo test`). Do **not** create commits or push; agents do not own git history. **Never regress `backend-rust` `cargo test`.** Do **not** implement Phase 1+ C ABI exports unless that phase is the assigned task.
+**Agents:** implement and verify (`nix build`, `nix flake check`, `cargo test`, `just test-lean-ci` when touching dual-backend). Do **not** create commits or push; agents do not own git history. **Never regress `backend-rust` `cargo test`.** Phase 0–**5 closed** for dual-backend **allowlist + CI freeze** (G11). **Full-suite G8 closed at R7** (measured green; freeze = full dual suite). **G9 closed at R8** — no-compress body/headered/outboard both directions (`tests/g9_cross_backend.rs` + `tests/fixtures/g9/`). **W2 closed:** **W2d** codecode/decodec shipped (`tests/determinism_roundtrip.rs`); **W2a/W2b permanent** cross-engine Compression / directory encode residuals (same-engine re-encode green; decode interop SSOT). **R9 pure Lean depth closed** for G10 SLH FFI + seekable outboard slice C + rkyv dual-decode; **W3 closed** pure Lean rkyv encode + Directory/CLI (dual-suite composition may still use Rust bitcoinpqc / Rust rkyv as product SSOT — never claim dual-suite *requires* pure Lean). **R10 async dual policy closed** — dual freeze **never** requires `async`; optional `stream_decode_async` is dual-aware under `backend-lean`+`async` via R5 E1 `stream_decode` (disk O(encoded) staging; lean peak RAM **O(encoded + logical)**; not E2). **W5a/G1 closed** — permanent no `ref/carbonado-rust` product pin; live `src/`/`tests/` dual-suite SSOT; third-party `ref/` oracles only. Post-G8 residuals remaining: feature-gated `streaming_async` / `parallel_determinism` (permanent freeze exclusion); ~~W1a+W1b dual honesty~~ **closed** (public outboard stream E2 = S4 composition under lean; pure Lean chunked C residual); ~~W2d codecode/decodec~~ **closed**; ~~W2a/W2b~~ **permanent** (cross-engine compress/dir encode); ~~Lean rkyv encode/CLI CFP2~~ **W3 closed**; ~~W4a inboard O(slice) retain~~ **closed**; **W4b** permanent full-buffer C outboard slice; **W4c** permanent buffer-only zstd under lean; **W4d** permanent FEC O(body) + async encoded spool.
 
-**Gates:** `nix flake check` (Lean); `cargo test` (Rust default); dual-backend CI as G8 lands (Phase 0 docs closed; Phase 1+ engineering open — see GAPS P0–P5).
+**Gates:** `nix flake check` (Lean); `cargo test` (Rust default / CI `desktop`); `just test-lean-ci` (Lean full dual suite / CI `dual-backend-lean`); `just test-g9` for cross-backend matrix only. Phase 0–**5** + **R7 G8 full** + **R8 G9 matrix** + **R9 pure Lean depth** + **R10 async dual policy** + **W2 determinism** + **W4 memory** + **W5a G1** closed (permanent no `ref/carbonado-rust` product pin; live `src/`/`tests/` SSOT; W4b–d permanent residuals) — see GAPS R7–R10 + W2 + W4 + W5a + post-G8 residuals.
 
-**C ABI:** normative surface in `include/carbonado.h` + [docs/ABI.md](docs/ABI.md). Phase 0–1 honesty: encode/decode may still return `NOT_IMPLEMENTED` until Phase 1 wiring.
+**C ABI:** normative surface in `include/carbonado.h` + [docs/ABI.md](docs/ABI.md). Phase 2: body/headered/outboard/scrub/verify_slice live via Lean AOT `libcarbonado`. Phase 3 directory: **composition** (no new directory C symbols) — `just test-lean-phase3`. Phase 4: SLH/OTS dual-suite composition (Rust bitcoinpqc + CBOTS; no new SLH C symbols); CLI dual-engine for **directory** + buffer APIs — `just test-lean-phase4`. **R5 stream E1:** `stream_encode_inboard` / `stream_decode` / **encrypted** `stream_*_outboard` spool→Lean under `backend-lean` (O(logical); not E2 chunked). **W1a:** `file::decode_stream` MAC-before-body then Lean `decode_headered`. **W1b:** public **non-Compression** outboard stream S4 O(chunk/stripe) composition under lean (c4/c12 MVP; Compression under lean O(logical) bulk zstd); encrypted/inboard remain Lean E1. **R6:** outboard FEC erasure for truncated main (`decodeOutboardFec` ≡ Rust `fec_with_parity`). **R7:** full G8 close — `just test-lean-ci` = unfiltered lean suite (includes `bin_*`) / job `dual-backend-lean`. **R8:** G9 full cross-backend matrix — `just test-g9` / fixtures under `tests/fixtures/g9/`. **R10:** async dual policy — freeze excludes `async`; lean+async `stream_decode_async` → dual-aware `stream_decode` (E1).
 
 ---
 
@@ -38,7 +47,7 @@
 | Axis | Status |
 |------|--------|
 | **Streaming / memory** | Phase 1 fused sync path shipped (`SeekableSpool`, streaming EtM, stripe FEC). **M1:** non-FEC verification (c6) uses `SeekWriteAt` (O(chunk) RAM); FEC verification retains O(FEC body) shard buffers under segment-wide RS geometry (`finish_into` avoids a second full logical `Vec`). Residuals: FEC O(segment body), O(sidecar) outboard verify, async encoded-body spool. See [doc/STREAMING_PARALLELISM.md](doc/STREAMING_PARALLELISM.md). **Not** the same as Bao slice/stream verification. |
-| **Concurrency** | Phase 2 optional `async` / `stream_decode_async` (disk spool bridge; WASM `NotImplemented`). |
+| **Concurrency** | Phase 2 optional `async` / `stream_decode_async` (disk spool bridge; **R10:** dual-aware via R5 E1 under lean+async; freeze never requires `async`; WASM `NotImplemented`). |
 | **Parallelism** | Phase 3 `parallel` feature (default on): `std::thread::scope` RS parity; WASM serial at runtime. No rayon; Tokio is not the CPU-parallel story. |
 
 **PQC:** `bitcoinpqc` 0.4, SLH-DSA-**SHA2**-128s sidecars only (`SLH_DSA_SHA2_128S`). Dev SHAKE-128s sidecars are incompatible — re-sign.
@@ -104,7 +113,7 @@ These rules were added because the same misunderstandings have caused significan
      - Full documentation of every security-relevant decision (nonce scope, subkey labels, single-nonce behavior, sidecar signing rules, CTR counter management, etc.).
      - Real benchmarks proving hardware acceleration claims.
      - WASM support either works cleanly or has precise documented limitations.
-     - CI is strict (full clippy --all-targets --all-features -D warnings, relevant targets tested).
+     - CI is strict: `cargo clippy --all-targets --features "async,async-tokio,man-gen" -D warnings` (never `--all-features` — that enables both `backend-rust` and `backend-lean` and hits `compile_error!`). Dual-backend lean gate: `just test-lean-ci`.
      - Error handling is complete and specific; no lossy or generic errors hiding crypto failures.
      - Zeroization of secret material where practical.
      - Test coverage includes adversarial, large-payload, and cross-layer cases.
@@ -947,7 +956,7 @@ This tension is acknowledged but not resolved in the current design. Carbonado i
 
 Remaining open (documented; active work called out):
 - **Pipeline memory residual (hard-break track):** fused encode/decode is O(chunk) spool + O(stripe) FEC encode; non-FEC verification decode is O(chunk) via `SeekWriteAt`; FEC verification decode retains O(FEC body) shard buffers (`FecInboardWriteAt`); outboard verify uses `PostOrderOutboard` + `ReadAt` (O(hash pair) per node); `stream_decode_async` fully spools encoded body to disk. Distinct from Bao **slice** verification (already O(slice) memory). See [doc/STREAMING_PARALLELISM.md](doc/STREAMING_PARALLELISM.md).
-- **WASM:** `cargo clippy --target wasm32-unknown-unknown --no-default-features` is green (CI `lint-wasm`). **wasm32 + `pqc` probe (2026-07-08):** pointing global `CC_wasm32-unknown-unknown` at `libbitcoinpqc-bindings/wasm/clang-wasm32.sh` breaks **`zstd-sys`** (it tries to assemble `huf_decompress_amd64.S` with the wasm clang). Residual is build-env / dep CC scoping — not Carbonado crypto logic. Keep CI wasm lint **no-pqc** until bitcoinpqc (or zstd) wasm build is isolated.
+- **WASM:** `cargo clippy --target wasm32-unknown-unknown --no-default-features --features "backend-rust"` is green (CI `lint-wasm`). **wasm32 + `pqc` probe (2026-07-08):** pointing global `CC_wasm32-unknown-unknown` at `libbitcoinpqc-bindings/wasm/clang-wasm32.sh` breaks **`zstd-sys`** (it tries to assemble `huf_decompress_amd64.S` with the wasm clang). Residual is build-env / dep CC scoping — not Carbonado crypto logic. Keep CI wasm lint **no-pqc** until bitcoinpqc (or zstd) wasm build is isolated.
 - Bao crate: Surmount keyed bao-tree fork (`76-keyed-bao`), 4 KiB groups, `default-features = false` (no tokio/fs on wasm). Temporary until upstream.
 - reed-solomon-erasure: upstream "looking for maintainers"; periodic re-eval (no runtime issues).
 - (Perf: inboard `verify_slice` is O(slice) memory but O(N) encoded-byte I/O; outboard slice verify is O(slice) time+memory; scrub pre-check uses `verify_inboard_keyed` with O(1) retained decode memory (S5).)

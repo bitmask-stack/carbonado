@@ -252,7 +252,7 @@ Non-blocking inboard decode for P2P fetch, HTTP range reads, and UDP assembly ad
 
 ```bash
 cargo test --test parallel_determinism                           # Phase 3 determinism (default)
-cargo test --no-default-features --features "pqc,ots,cli" --test serial_fec_path  # serial FEC path
+cargo test --no-default-features --features "backend-rust,pqc,ots,cli" --test serial_fec_path  # serial FEC (must name backend)
 cargo test --features async --test streaming_async
 ```
 
@@ -357,9 +357,12 @@ just all              # everything (fmt, lint, tests, release build, source grep
 |--------|----------------|
 | `just fmt` | Formatting |
 | `just lint` | Clippy **and** source checks (no v1 ECIES, prod `unwrap`, magic string, etc.) |
-| `just test` | Full test suite |
+| `just test` | Full test suite (`backend-rust` default) |
 | `just test-smoke` | Slice/streaming/sharding/bao contract tests |
+| `just test-lean-ci` | Dual-backend lean **full suite** freeze (G8 closed at R7; needs Nix + `libcarbonado`; CI `dual-backend-lean`) |
 | `just build` + `just test-cli` | Release binary + CLI tests |
+
+**Dual-backend (Rust + Lean AOT):** default `cargo test` is pure Rust. Lean engine tests require `nix build .#libcarbonado -o result-libcarbonado`, then `CARBONADO_LEAN_LIB` / `CARBONADO_LEAN_INCLUDE` / `LD_LIBRARY_PATH` (or just `just test-lean-ci`, which builds and fail-closes if the shared library is missing). CI runs both: job `desktop` (`backend-rust`) and job `dual-backend-lean` (`just test-lean-ci`). Full lean suite parity (**G8**) is **closed at R7** — freeze = full dual suite under lean features; see [docs/GAPS.md](docs/GAPS.md) and [docs/TEST_CONTRACT.md](docs/TEST_CONTRACT.md).
 
 CI runs the same recipes — see `.github/workflows/rust.yaml`.
 

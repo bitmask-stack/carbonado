@@ -183,6 +183,9 @@ pub fn derive_subkey(master: &[u8], label: &str) -> Result<[u8; 64], CarbonadoEr
 ///
 /// See AGENTS.md §2.1.5 (Keyed Bao KDF) and `tests/bao_keyed_contract.rs`.
 pub fn carbonado_verification_key(format: u8) -> [u8; 32] {
+    // Public KDF (not secret-key material). Always pure blake3 so the API is
+    // infallible on both backends. Lean AOT parity is checked via
+    // `backend::lean::verification_key` in `tests/lean_backend_smoke.rs`.
     blake3::derive_key("carbonado-v2/verification", &[format])
 }
 

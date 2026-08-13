@@ -59,10 +59,20 @@
           rev = "f8745da6ff1ad1e7bab384bd1f9d742439278e99";
           hash = "sha256-tNFWIT9ydfozB8dWcmTMuZLCQmQudTFJIkSr0aG7S44=";
         };
+        # R9 / G10: libbitcoinpqc pin matching ref/bitcoinpqc submodule
+        # (b309f444… / branch 27-slh-dsa-sha-2-128s). SLH-DSA-SHA2-128s only
+        # (no secp/ML-DSA) is compiled into libcarbonado_native.a.
+        bitcoinpqcPinned = pkgs.fetchFromGitHub {
+          owner = "cryptoquick";
+          repo = "libbitcoinpqc";
+          rev = "b309f444e383f0e8726c8697128641c7599524f1";
+          hash = "sha256-dSGYo3qmq2wSltKjRgcRyrYFZO6YGoIsIG7scEWnQqE=";
+        };
         carbonadoNative = import ./nix/native {
           inherit pkgs;
           leanAll = pkgs.lean.lean-all;
           zstdSrc = zstdPinned;
+          bitcoinpqcSrc = bitcoinpqcPinned;
           carbonadoInclude = ./include;
         };
 
@@ -70,8 +80,12 @@
           name = "carbonado";
           # Separate roots so CarbonadoTest compiles without product → test imports.
           # lean4-nix only discovers modules under the root name of each entry.
+          # Carbonado.Ffi is a root so `@[export] l_carbonado_*` AOT objects land in
+          # staticLib even when Main does not import Ffi.
           roots = [
             "Carbonado.Main"
+            "Carbonado.Ffi"
+            "Carbonado.RkyvFilepack"
             "CarbonadoTest.Scaffold"
             "CarbonadoTest.EtM"
             "CarbonadoTest.Fec"
@@ -84,10 +98,71 @@
           src = productSrc;
           debug = false;
           leancFlags = ["-O3" "-DNDEBUG"];
-          # Static zstd + FFI (no shared libzstd — avoids lld shlib-undefined/pthread).
+          # Static zstd + C ABI glue (no shared libzstd — avoids lld shlib-undefined/pthread).
           staticLibDeps = [carbonadoNative];
           linkFlags = [];
         };
+
+        # Dual-backend product archive: Lean AOT objects + native zstd/ABI glue,
+        # packaged as a shared library (leanc links Lean runtime) plus a static
+        # archive for `nm` / partial static consumers.
+        libcarbonado =
+          pkgs.runCommand "libcarbonado" {
+            nativeBuildInputs = [pkgs.binutils pkgs.stdenv.cc pkgs.lean.leanc];
+          } ''
+            set -euo pipefail
+            mkdir -p $out/lib $out/include
+
+            LEAN_A="${leanPkg.staticLib}/libcarbonado.a"
+            NATIVE_A="${carbonadoNative}/libcarbonado_native.a"
+            test -f "$LEAN_A"
+            test -f "$NATIVE_A"
+
+            # Shared library via leanc + Lean shared stdlib (Init/runtime).
+            # lean4-nix staticLib is a *thin* archive; leanc/ld accept it with whole-archive.
+            # --whole-archive keeps @[export] + C ABI symbols from being GC'd.
+            # Pass libleanshared the same way buildLeanPackage.executable does (withSharedStdlib).
+            ${pkgs.lean.leanc}/bin/leanc -shared -fPIC \
+              -Wl,--whole-archive "$LEAN_A" "$NATIVE_A" -Wl,--no-whole-archive \
+              ${pkgs.lean.leanshared}/* \
+              -o $out/lib/libcarbonado.so
+
+            # Regular static archive for `nm` / consumers: thin member paths + native objects.
+            WORK=$(mktemp -d)
+            cd "$WORK"
+            mapfile -t LEAN_OBJS < <(${pkgs.binutils}/bin/ar t "$LEAN_A")
+            ${pkgs.binutils}/bin/ar x "$NATIVE_A"
+            ${pkgs.binutils}/bin/ar rcs $out/lib/libcarbonado.a "''${LEAN_OBJS[@]}" ./*.o
+
+            cp ${./include}/carbonado.h $out/include/
+            echo "libcarbonado: packaged static + shared" >&2
+          '';
+
+        leanAbiCheck =
+          pkgs.runCommand "carbonado-lean-abi" {
+            nativeBuildInputs = [pkgs.binutils];
+          } ''
+            set -euo pipefail
+            test -f ${libcarbonado}/include/carbonado.h
+            test -f ${libcarbonado}/lib/libcarbonado.a
+            test -f ${libcarbonado}/lib/libcarbonado.so
+            nm ${libcarbonado}/lib/libcarbonado.a | grep -q carbonado_abi_version
+            nm ${libcarbonado}/lib/libcarbonado.a | grep -q carbonado_free
+            nm ${libcarbonado}/lib/libcarbonado.a | grep -q carbonado_encode
+            nm ${libcarbonado}/lib/libcarbonado.a | grep -q carbonado_decode
+            nm ${libcarbonado}/lib/libcarbonado.a | grep -q carbonado_encode_headered
+            nm ${libcarbonado}/lib/libcarbonado.a | grep -q carbonado_decode_headered
+            nm ${libcarbonado}/lib/libcarbonado.a | grep -q carbonado_verification_key
+            nm ${libcarbonado}/lib/libcarbonado.a | grep -q l_carbonado_encode_headered
+            nm ${libcarbonado}/lib/libcarbonado.a | grep -q l_carbonado_verification_key
+            # R9 / G10 SLH + seekable outboard slice
+            nm ${libcarbonado}/lib/libcarbonado.a | grep -q carbonado_slh_keygen
+            nm ${libcarbonado}/lib/libcarbonado.a | grep -q carbonado_slh_sign
+            nm ${libcarbonado}/lib/libcarbonado.a | grep -q carbonado_slh_verify
+            nm ${libcarbonado}/lib/libcarbonado.a | grep -q carbonado_verify_slice_outboard
+            nm ${libcarbonado}/lib/libcarbonado.a | grep -q l_carbonado_verify_slice_outboard
+            echo ok > $out
+          '';
 
         noSorry =
           pkgs.runCommand "carbonado-no-sorry" {
@@ -221,11 +296,14 @@
             grep -q "zstd goldens + roundtrip + error paths ok" $out
             grep -q "pipeline compression formats c2/c6 + headered c3/c7 ok" $out
             grep -q "SLH1 wire framing ok" $out
-            grep -q "SLH bind-to-root + unavailable sign ok" $out
+            grep -q "SLH live sign/verify ok" $out
             grep -q "program F stack ok" $out
+            grep -q "outboard slice verify ok" $out
             # Program G
             grep -q "adamantine wire ok" $out
             grep -q "filepack path rules ok" $out
+            grep -q "rkyv FilepackManifestWire encode/decode goldens ok" $out
+            # multi-entry + OTS + trunc covered in same Main block
             grep -q "outboard segment roundtrip ok" $out
             grep -q "directory pure encode/decode ok" $out
             grep -q "directory exact failure modes ok" $out
@@ -260,29 +338,6 @@
           inherit system;
           overlays = [(lean4-nix.readToolchainFile ./lean-toolchain)];
         };
-
-        # Dual-backend: static lib + header for Rust `backend-lean` / carbonado-sys.
-        libcarbonado =
-          pkgs.runCommand "libcarbonado" {} ''
-            set -euo pipefail
-            mkdir -p $out/lib $out/include
-            cp ${carbonadoNative}/libcarbonado_native.a $out/lib/libcarbonado.a
-            cp ${carbonadoNative}/include/carbonado.h $out/include/
-            cp ${carbonadoNative}/libcarbonado_native.a $out/lib/libcarbonado_native.a
-          '';
-
-        leanAbiCheck =
-          pkgs.runCommand "carbonado-lean-abi" {
-            nativeBuildInputs = [pkgs.binutils];
-          } ''
-            set -euo pipefail
-            test -f ${libcarbonado}/include/carbonado.h
-            test -f ${libcarbonado}/lib/libcarbonado.a
-            # Symbols from C ABI stubs (encode may be weak NOT_IMPLEMENTED).
-            nm ${libcarbonado}/lib/libcarbonado.a | grep -q carbonado_abi_version
-            nm ${libcarbonado}/lib/libcarbonado.a | grep -q carbonado_free
-            echo ok > $out
-          '';
 
         packages = {
           default = leanPkg.executable;
@@ -322,8 +377,14 @@
               echo "carbonado Lean 4 + Nix dev shell"
               echo "Lean toolchain pin: $(cat lean-toolchain)"
               echo "Build: nix build .#carbonado"
+              echo "Lib:   nix build .#libcarbonado"
               echo "Check: nix flake check"
               echo "Run:   nix run"
+              echo "Lean backend tests:"
+              echo "  nix build .#libcarbonado -o result-libcarbonado"
+              echo "  export CARBONADO_LEAN_LIB=\$PWD/result-libcarbonado/lib CARBONADO_LEAN_INCLUDE=\$PWD/result-libcarbonado/include"
+              echo "  export LD_LIBRARY_PATH=\$CARBONADO_LEAN_LIB"
+              echo "  cargo test --no-default-features --features \"backend-lean,pqc,ots\" --test lean_backend_smoke"
             fi
           '';
         };

@@ -60,6 +60,7 @@ impl SeekableSpool {
     }
 
     /// Truncate and replace contents from `src` (used after encrypt preprocess).
+    #[cfg_attr(feature = "backend-lean", allow(dead_code))] // rust stream_preprocess_spool only
     pub fn overwrite_from(&mut self, src: &mut Self) -> Result<(), CarbonadoError> {
         src.rewind()?;
         self.file.set_len(0).map_err(CarbonadoError::StdIoError)?;
@@ -68,6 +69,39 @@ impl SeekableSpool {
         self.rewind()?;
         src.rewind()?;
         Ok(())
+    }
+
+    /// Spool a reader to this temp file with O(chunk) RAM, then materialize for a buffer ABI.
+    ///
+    /// **W1b disk-backed E1.5:** ingest peak RAM is O(copy buffer), not O(N). The returned
+    /// `Vec` is still O(N) — required for Lean buffer C ABI. Prefer this over `read_to_end`
+    /// when the source is unbounded / adversarial so intermediate growth stays on disk until
+    /// the final materialize (with optional DoS cap via [`Read::take`]).
+    #[cfg(feature = "backend-lean")]
+    pub fn spool_then_materialize<R: Read>(
+        mut input: R,
+        max_len: Option<u64>,
+    ) -> Result<Vec<u8>, CarbonadoError> {
+        let mut spool = Self::new()?;
+        match max_len {
+            Some(cap) => {
+                let mut limited = input.by_ref().take(cap.saturating_add(1));
+                io::copy(&mut limited, &mut spool).map_err(CarbonadoError::StdIoError)?;
+                let len = spool.content_len()?;
+                if len > cap {
+                    return Err(CarbonadoError::InternalStateError(format!(
+                        "spool materialize exceeds max_len {cap}"
+                    )));
+                }
+            }
+            None => {
+                io::copy(&mut input, &mut spool).map_err(CarbonadoError::StdIoError)?;
+            }
+        }
+        spool.rewind()?;
+        let mut out = Vec::new();
+        io::copy(&mut spool, &mut out).map_err(CarbonadoError::StdIoError)?;
+        Ok(out)
     }
 }
 

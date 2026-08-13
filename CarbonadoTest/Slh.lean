@@ -2,6 +2,7 @@
   Program F — SLH1 wire + Bao-root binding theorems.
 
   Large 7856-byte signature roundtrips are AOT Main only (not native_decide).
+  Live SLH-DSA is AOT-only (extern); pure theorems cover wire + length gates.
 -/
 import Carbonado.Constants
 import Carbonado.Crypto.Util
@@ -71,15 +72,15 @@ theorem wrong_root_path :
      | .error .verificationFailed => true
      | _ => false) = true := wrong_root_fails
 
-theorem sign_unavail :
-    (match signRoot (replicate 128 0x42) (replicate hashLen 0) with
-     | .error .signatureUnavailable => true
-     | _ => false) = true := sign_unavailable
-
 theorem sign_bad_root_len :
     (match signRoot (replicate 128 0x42) (ofList [1]) with
      | .error .invalidRootLength => true
      | _ => false) = true := sign_bad_root
+
+theorem sign_short_entropy :
+    (match signRoot (replicate 16 0x42) (replicate hashLen 0) with
+     | .error .invalidEntropyLength => true
+     | _ => false) = true := sign_bad_entropy
 
 /-- bindingFromSidecar: short file → invalidSidecarLength. -/
 theorem binding_short_sidecar :

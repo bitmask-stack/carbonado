@@ -1,14 +1,26 @@
 /-
   FilepackManifest v2 for Adamantine catalogs (Program G).
 
-  **Wire note (LIMITS):** Rust uses rkyv `FilepackManifestWire`. Lean ships a
-  deterministic **CFP2** native codec with the same *logical* fields (version,
-  format_level, entries with SegmentRef + content_blake3). Adamantine envelope
-  framing matches Rust (`manifest_len` + body + `bundle_len` + bundle); the
-  *manifest body* is Lean-native CFP2, not rkyv — interop with Rust-produced
-  catalogs requires a converter (tracked LIMITS). Product CLI uses CFP2 end-to-end.
+  **Wire note (LIMITS / dual-suite):** Dual-suite directory archives use Rust
+  **rkyv** `FilepackManifestWire` as the normative Adamantine payload body. Under
+  `backend-lean`, `file::encode_directory` / `decode_directory` keep rkyv in Rust
+  and dispatch segment/catalog *crypto* through Lean C ABI (composition). Dual-suite
+  does **not** require pure Lean rkyv.
 
-  Path rules: fail-closed (no `..`, no absolute, no backslash, length caps).
+  **W3 pure Lean product wire:** `Carbonado/RkyvFilepack.lean` provides bit-exact
+  rkyv **encode** (`encodeRkyvManifest` / `encodeCatalogBody`) and **decode**
+  (`decodeRkyvManifest` / `decodeCatalogBody`) matching goldens in
+  `tests/fixtures/rkyv/`. Pure Lean `Directory.encodeDirectory` / CLI emit rkyv
+  so Rust dual-suite `decode_directory` can consume Lean-made catalogs.
+  Dual-decode **prefers rkyv first** (avoids CFP2 sniffer hijack of roots starting
+  with ASCII `CFP2`).
+
+  This module also ships a deterministic **CFP2** Lean-native codec with the same
+  *logical* fields for legacy demos / dual-decode fallback. CFP2 is **not**
+  byte-identical to rkyv; product pure-Lean encode prefers rkyv.
+
+  Path rules: fail-closed (no `..`, no absolute, no backslash, **UTF-8 byte**
+  length cap). Lean is stricter than Rust on empty components / NUL (LIMITS).
 -/
 import Carbonado.Constants
 import Carbonado.Crypto.Util
@@ -26,7 +38,7 @@ def filepackManifestVersion : Nat := 2
 /-- Max entries (DoS). -/
 def maxFilepackEntries : Nat := 100000
 
-/-- Max rel_path bytes. -/
+/-- Max rel_path **UTF-8 bytes** (Rust `MAX_REL_PATH_LEN`; not Unicode scalar count). -/
 def maxRelPathLen : Nat := 4096
 
 /-- Max OTS proof blob. -/
@@ -128,12 +140,17 @@ structure FilepackManifest where
 /--
   Fail-closed relative path validation (AGENTS / Rust `validate_rel_path` + extras).
 
-  Rejects: empty, too long, `\`, absolute `/`, `..`, empty components, NUL.
+  Rejects: empty, too long (**UTF-8 byte** length > `maxRelPathLen`, matching Rust
+  `rel.len()` / `MAX_REL_PATH_LEN`), `\`, absolute `/`, `..`, empty components, NUL.
+
+  **Stricter than Rust (LIMITS):** Lean also rejects empty path components (`a//b`)
+  and embedded NUL. Handcrafted Rust rkyv with `//` can fail Lean decode validate;
+  normal `encode_directory` FS walks do not emit those paths.
 -/
 def validateRelPath (rel : String) : Except FilepackError Unit :=
   if rel.isEmpty then
     .error .emptyRelPath
-  else if rel.length > maxRelPathLen then
+  else if (utf8 rel).size > maxRelPathLen then
     .error .relPathTooLong
   else if rel.contains '\\' then
     .error .relPathBackslash

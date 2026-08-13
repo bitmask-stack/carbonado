@@ -1,18 +1,18 @@
 /-
-  SLH-DSA-SHA2-128s sidecar wire format + Bao-root binding (Program F).
+  SLH-DSA-SHA2-128s sidecar wire format + Bao-root binding (Program F / R9 G10).
 
   Normative (AGENTS §2.3):
   * Sidecar: `SLH1` (4) + raw signature (7856) = 7860 bytes
   * Public key (32 B) lives in Header.slh_public_key, not the sidecar
   * Signature is over the 32-byte Bao root of the target container
 
-  Real SPHINCS+/libbitcoinpqc sign-verify is **not** linked in this program
-  (libbitcoinpqc submodule empty / heavy cmake — see LIMITS). This module
-  provides fail-closed wire codec, binding model, and theorems. Optional FFI
-  can replace the oracle later without changing the wire API.
+  **G10 (R9):** real SLH-DSA via `@[extern]` into libbitcoinpqc objects linked
+  in `libcarbonado_native.a` (`nix/native/carbonado_slh.c`). Lean elaborator
+  bodies are fail-closed fallbacks (do **not** `native_decide` over live crypto).
+  AOT `Main` / C ABI / dual-suite composition exercise the real oracle.
 
-  Large-array roundtrips (7856 B sig) are gated in AOT Main, not `native_decide`
-  (elaboration cost).
+  Dual-suite product SLH may still use Rust `bitcoinpqc` composition; pure Lean
+  is for `libcarbonado` purity. Composition remains SSOT for dual-suite wire.
 -/
 import Carbonado.Constants
 import Carbonado.Crypto.Util
@@ -36,8 +36,10 @@ inductive SlhError where
   | invalidRootLength
   /-- Signature verification failed (oracle returned false). -/
   | verificationFailed
-  /-- Oracle/sign path refused (no real crypto linked, bad params, etc.). -/
+  /-- Keygen/sign refused (bad params, crypto failure). -/
   | signatureUnavailable
+  /-- Entropy shorter than 128 bytes for keygen. -/
+  | invalidEntropyLength
   deriving DecidableEq, Repr
 
 /-- Detached SLH1 sidecar contents (signature only; pk is out-of-band). -/
@@ -150,14 +152,133 @@ def mockOracleFor (acceptedRoot acceptedSig : ByteArray)
     (_pk message sig : ByteArray) : Bool :=
   ctEq message acceptedRoot && ctEq sig acceptedSig
 
-/-- Placeholder sign: always `signatureUnavailable` until libbitcoinpqc is linked. -/
-def signRoot (_secretKeyEntropy root : ByteArray) : Except SlhError ByteArray :=
+/-! ## Live SLH-DSA via libbitcoinpqc (G10)
+
+  Status-prefixed blobs match `carbonado_slh.c` / zstd pattern.
+  Elaborator bodies are fail-closed (status **3** / verify 0) — not for `native_decide`.
+  Status 1 is reserved for short entropy only (see `decodeSlhStatusPayload`).
+-/
+
+/-- Status-prefix helper for elaborator `@[extern]` bodies (keygen/sign).
+
+  Uses status **3** (crypto / unavailable), not 1 (short entropy), so elaborator
+  fallbacks map to `signatureUnavailable` rather than `invalidEntropyLength`.
+-/
+def slhStatusFail : ByteArray :=
+  ByteArray.mk #[3]
+
+/--
+  Raw keygen: entropy (≥128) → `[status][pk 32 | sk 64]`.
+  AOT: real `slh_dsa_sha2_128s_keygen`. Elaborator: status 3 fail.
+-/
+@[extern "carbonado_slh_keygen_raw"]
+def keygenRaw (entropy : @& ByteArray) : ByteArray :=
+  slhStatusFail
+
+/--
+  Raw sign: sk (64) + message → `[status][sig 7856]`.
+  AOT: real deterministic `slh_dsa_sha2_128s_sign`. Elaborator: status 3 fail.
+-/
+@[extern "carbonado_slh_sign_raw"]
+def signRaw (sk : @& ByteArray) (message : @& ByteArray) : ByteArray :=
+  slhStatusFail
+
+/--
+  Raw verify: pk + message + sig → `1` accept / `0` reject.
+  AOT: real `slh_dsa_sha2_128s_verify`. Elaborator: always reject (fail-closed).
+-/
+@[extern "carbonado_slh_verify_raw"]
+def verifyRaw (pk : @& ByteArray) (message : @& ByteArray) (signature : @& ByteArray) : UInt8 :=
+  0
+
+/-- Decode status-prefixed keygen/sign blob (SLH-specific; not Compress zstd).
+
+  Status codes from `carbonado_slh.c`:
+  * 0 → ok payload
+  * 1 → short entropy (`invalidEntropyLength`)
+  * 2 → other bad argument (`signatureUnavailable`)
+  * 3+ → crypto failure (`signatureUnavailable`)
+-/
+def decodeSlhStatusPayload (raw : ByteArray) : Except SlhError ByteArray :=
+  if raw.size == 0 then
+    .error .signatureUnavailable
+  else
+    let code := raw.get! 0
+    if code == 0 then
+      .ok (raw.extract 1 raw.size)
+    else if code == 1 then
+      .error .invalidEntropyLength
+    else
+      .error .signatureUnavailable
+
+/-- Keygen from ≥128 bytes entropy → `(publicKey, secretKey)`. -/
+def keygen (entropy : ByteArray) : Except SlhError (ByteArray × ByteArray) :=
+  if entropy.size < 128 then
+    .error .invalidEntropyLength
+  else
+    match decodeSlhStatusPayload (keygenRaw entropy) with
+    | .error e => .error e
+    | .ok payload =>
+      if payload.size != slhPublicKeyLen + 64 then
+        .error .signatureUnavailable
+      else
+        .ok (payload.extract 0 slhPublicKeyLen, payload.extract slhPublicKeyLen payload.size)
+
+/-- Live SLH-DSA verify predicate for `verifyBound` / CLI. -/
+def liveVerifyOracle (pk message sig : ByteArray) : Bool :=
+  verifyRaw pk message sig == 1
+
+/-- Sign a 32-byte Bao root with a 64-byte secret key. -/
+def signWithSk (secretKey root : ByteArray) : Except SlhError ByteArray :=
+  if root.size != hashLen then
+    .error .invalidRootLength
+  else if secretKey.size != 64 then
+    .error .signatureUnavailable
+  else
+    match decodeSlhStatusPayload (signRaw secretKey root) with
+    | .error e => .error e
+    | .ok sig =>
+      if sig.size != slh1SignatureLen then
+        .error .invalidSignatureLength
+      else
+        .ok sig
+
+/--
+  Product sign path: ≥128-byte entropy → keygen → sign 32-byte Bao root.
+  Returns the 7856-byte raw signature (not SLH1 sidecar framing).
+-/
+def signRoot (secretKeyEntropy root : ByteArray) : Except SlhError ByteArray :=
+  if root.size != hashLen then
+    .error .invalidRootLength
+  else if secretKeyEntropy.size < 128 then
+    .error .invalidEntropyLength
+  else
+    match keygen secretKeyEntropy with
+    | .error e => .error e
+    | .ok (_pk, sk) => signWithSk sk root
+
+/-- Keygen + sign, returning `(pk, sk, sig)` for roundtrip tests. -/
+def keygenAndSignRoot (entropy root : ByteArray) :
+    Except SlhError (ByteArray × ByteArray × ByteArray) :=
   if root.size != hashLen then
     .error .invalidRootLength
   else
-    .error .signatureUnavailable
+    match keygen entropy with
+    | .error e => .error e
+    | .ok (pk, sk) =>
+      match signWithSk sk root with
+      | .error e => .error e
+      | .ok sig => .ok (pk, sk, sig)
 
-/-! ## Theorems: wire framing + bind-to-root (small native_decide cases) -/
+/-- Verify raw signature over Bao root with live oracle. -/
+def verifyRoot (publicKey root signature : ByteArray) : Except SlhError Unit :=
+  verifyBound liveVerifyOracle publicKey root signature
+
+/-! ## Theorems: wire framing + bind-to-root (small native_decide cases)
+
+  Live crypto is **not** theorem-gated (`native_decide` cannot link externs).
+  Length gates + mock-oracle binding remain pure.
+-/
 
 theorem slh1_sidecar_len : slh1SidecarLen = 7860 := slh1SidecarLen_eq
 
@@ -255,17 +376,17 @@ theorem wrong_root_fails :
      | _ => false) = true := by
   native_decide
 
-/-- signRoot is unavailable without linked PQC (fail-closed). -/
-theorem sign_unavailable :
-    (match signRoot (replicate 128 0x42) (replicate hashLen 0) with
-     | .error .signatureUnavailable => true
-     | _ => false) = true := by
-  native_decide
-
-/-- signRoot rejects bad root length before unavailability. -/
+/-- signRoot rejects bad root length before crypto. -/
 theorem sign_bad_root :
     (match signRoot (replicate 128 0x42) (ofList [1]) with
      | .error .invalidRootLength => true
+     | _ => false) = true := by
+  native_decide
+
+/-- signRoot rejects short entropy before crypto. -/
+theorem sign_bad_entropy :
+    (match signRoot (replicate 16 0x42) (replicate hashLen 0) with
+     | .error .invalidEntropyLength => true
      | _ => false) = true := by
   native_decide
 

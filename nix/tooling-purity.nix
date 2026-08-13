@@ -1,9 +1,11 @@
-# checks.tooling-purity — product Lean/Nix tree must not grow non-ref impurity.
-# Transition: existing Rust under src/, tests/, benches/, examples/ is legacy product
-# until moved to ref/carbonado-rust. This check:
+# checks.tooling-purity — dual-backend product tree purity constraints.
+# Dual-backend SSOT (AGENTS / G1 W5a): Rust under src/, tests/, benches/, examples/
+# is permanent first-class product + dual-suite contract — NOT transitional and NOT
+# moved to ref/carbonado-rust (permanent no product pin). ref/ is third-party oracles only.
+# This check:
 #   * requires product Lean roots to exist and be Lean-only
 #   * bans product shell/python glue outside nix/ and ref/
-#   * allowlists known top-level roots (transitional Rust included)
+#   * allowlists known top-level roots (both engines + docs/tooling expected permanently)
 { pkgs, src }:
 pkgs.runCommand "carbonado-tooling-purity" {
   inherit src;
@@ -58,8 +60,9 @@ pkgs.runCommand "carbonado-tooling-purity" {
   fi
 
   # Positive allowlist for top-level names.
-  # Transitional Rust (src, tests, benches, examples, Cargo.*) until freeze.
-  # productSrc often excludes those; allowlist still names them for full-tree runs.
+  # Permanent dual product roots: src/, tests/, benches/, examples/, Cargo.* (Rust)
+  # plus Carbonado/, CarbonadoTest/ (Lean). productSrc may exclude Rust; allowlist
+  # still names them for full-tree runs (expected, not temporary).
   is_allowed() {
     local base="$1"
     case "$base" in

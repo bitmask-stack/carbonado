@@ -3,9 +3,12 @@
 
   Layout (AGENTS §7.1):
   * Catalog: inboard headered `{catalog_root}.adam.c14` / `.adam.c15`
-    body = Adamantine10 envelope (CFP2 FilepackManifest + centralized Bao bundle)
+    body = Adamantine10 envelope (**rkyv** FilepackManifestWire v2 + centralized Bao bundle)
   * Segments: bare mains `{seg_root}.c12|c13|c14|c15` (no .out/.par on disk)
   * Bundle: per-segment [verification_outboard][fec_parity] indexed by SegmentRef
+
+  **W3:** pure Lean encode emits rkyv (bit-compatible with Rust dual-suite decode).
+  Decode accepts rkyv **or** legacy CFP2 via `decodeCatalogBody`.
 
   Path rules fail-closed via Filepack.validateRelPath.
   Content integrity: BLAKE3 of recovered plaintext vs entry.content_blake3.
@@ -17,6 +20,7 @@ import Carbonado.Pipeline
 import Carbonado.Outboard
 import Carbonado.Adamantine
 import Carbonado.Filepack
+import Carbonado.RkyvFilepack
 import Carbonado.Bao.Blake3
 import Carbonado.Fec.Inboard
 
@@ -29,6 +33,7 @@ open Carbonado.Pipeline
 open Carbonado.Outboard
 open Carbonado.Adamantine
 open Carbonado.Filepack
+open Carbonado.RkyvFilepack
 open Carbonado.Bao.Blake3
 open Carbonado.Fec.Inboard
 
@@ -351,7 +356,9 @@ def encodeDirectory (master : ByteArray) (files : Array DirFile)
                     err := some .insufficientNonces
                   else
                     if fmtBits.encrypted then nonceIdx := nonceIdx + 1
-                    match encodeOutboardBody master nonce chunk fmtBits with
+                    -- Directory segments use low-level embedded-nonce layout (matches Rust
+                    -- encoding::encode_outboard), not header-path file::encode_outboard.
+                    match encodeOutboardBody master nonce chunk fmtBits false with
                     | .error pe => err := some (ofPipelineError pe)
                     | .ok oenc =>
                       -- Single-leaf trees may have empty post-order outboard (no parent pairs).
@@ -418,7 +425,7 @@ def encodeDirectory (master : ByteArray) (files : Array DirFile)
       match err with
       | some e => pure (.error e)
       | none =>
-        -- Build CFP2 manifest (catalog root placeholder zeros until headered encode).
+        -- Build rkyv FilepackManifestWire v2 (catalog root bound via filename, not wire).
         let placeholderRoot := replicate hashLen 0
         let manifest : FilepackManifest := {
           version := filepackManifestVersion
@@ -426,7 +433,7 @@ def encodeDirectory (master : ByteArray) (files : Array DirFile)
           catalogBaoRoot := placeholderRoot
           entries := entries
         }
-        match manifest.toWireBytes with
+        match encodeCatalogBody manifest with
         | .error pe => pure (.error (ofFilepackError pe))
         | .ok manBytes =>
           match buildPayload manBytes bundle.bytes with
@@ -449,7 +456,7 @@ def encodeDirectory (master : ByteArray) (files : Array DirFile)
               match encodeHeadered master catNonce adamBody catFmtBits 0
                   (replicate slhPublicKeyLen 0) (replicate 8 0) with
               | .error pe => pure (.error (ofPipelineError pe))
-              | .ok (hdr, catalogBytes) =>
+              | .ok (hdr, catalogBytes, _info) =>
                 -- Rebind catalog root into manifest is not on wire; filename binds root.
                 let root := hdr.hash
                 match catalogFilename root catalogFmt with
@@ -521,7 +528,7 @@ def decodeDirectory (master : ByteArray) (archive : DirectoryArchive) :
                 match splitPayload payload with
                 | .error ae => .error (ofAdamantineError ae)
                 | .ok (manBytes, baoBundle) =>
-                  match FilepackManifest.fromWireBytes manBytes expectedRoot with
+                  match decodeCatalogBody manBytes expectedRoot with
                   | .error pe => .error (ofFilepackError pe)
                   | .ok manifest =>
                     if manifest.formatLevel != catalogFmt then
@@ -567,7 +574,8 @@ def decodeDirectory (master : ByteArray) (archive : DirectoryArchive) :
                                         | .ok fecPar =>
                                           let pad := paddingForMainLen art.main.size fmtBits.fec
                                           match decodeOutboardBody master sref.segmentBaoRoot
-                                              art.main verOb fecPar pad fmtBits with
+                                              art.main verOb fecPar pad fmtBits false
+                                              ByteArray.empty with
                                           | .error pe => err := some (ofPipelineError pe)
                                           | .ok part =>
                                             recovered := appendBA recovered part

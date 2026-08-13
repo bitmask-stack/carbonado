@@ -9,6 +9,8 @@ use bao::Hash;
 // nom imports removed — legacy parse_bytes / old header parsing was deleted as part of the v2 replacement.
 // (secp256k1 imports removed - clean break, legacy Header parsing deleted)
 
+#[cfg(feature = "backend-rust")]
+use crate::stream::decode::stream_decrypt_header_path;
 use crate::{
     adamantine::{
         decode_adamantine, encode_adamantine, AdamantineHeader, ADAMANTINE_CARBONADO_FMT_ENCRYPTED,
@@ -28,10 +30,7 @@ use crate::{
         FILEPACK_MANIFEST_FORMAT_LEVEL_PUBLIC, FILEPACK_MANIFEST_VERSION, MAX_SEGMENT_MAIN_LEN,
     },
     paths::parse_bao_root_from_filename,
-    stream::{
-        decode::stream_decrypt_header_path, encode::stream_encode_outboard,
-        DEFAULT_SEGMENT_PLAINTEXT_BUDGET,
-    },
+    stream::{encode::stream_encode_outboard, DEFAULT_SEGMENT_PLAINTEXT_BUDGET},
     structs::{EncodeInfo, OutboardEncoded},
     utils::{calc_padding_len, decode_bao_hash, encode_bao_hash},
 };
@@ -307,114 +306,183 @@ impl Header {
 
 /// Stream decode from headered inboard archive.
 ///
+/// Headered inboard decode over [`Read`] / [`Write`].
+///
+/// Reads the 177-byte [`Header`], verifies integrity, then reverses the body pipeline
+/// (Bao/FEC → decrypt → decompress as format bits require).
+///
+/// # `backend-rust`
+///
 /// Bao/FEC reverse pipes into a [`crate::stream::spool::SeekableSpool`] via
 /// [`crate::stream::decode::stream_decode_inboard_bao_fec_into`], bounded by
 /// [`Header::encoded_len`]. Encrypted segments use [`crate::stream::stream_decrypt_header_path`]
 /// (streaming MAC-then-decrypt on `[tag(64) | ct]` with explicit `payload_nonce`).
 ///
-/// **Memory tiers:**
+/// **Memory tiers (rust):**
 /// - **(A) Verification formats:** Bao verify streams incrementally; FEC reverse may still retain
 ///   **O(logical)** at the Bao/FEC step (see `doc/STREAMING_PARALLELISM.md`).
 /// - **(B) Post-Bao/FEC spool:** O(chunk) RAM during disk-backed staging (no body `Vec`).
 /// - **(C) Encrypted:** streaming EtM via spool two-pass MAC verify then CTR decrypt.
 /// - **(D) c4/c8:** bounded by `encoded_len` when known; incremental FEC/decompress otherwise.
+///
+/// # `backend-lean` (W1a)
+///
+/// Reads the 177-byte header, verifies `header_mac` **before** body I/O (same fail-closed
+/// order as rust), then spools `encoded_len` body into an archive buffer and calls Lean
+/// [`crate::backend::lean::decode_headered`] for dual body pipeline. Peak RAM
+/// **O(header + body + plaintext)** — E1 honesty, not stream E2. (W1b public **non-compress**
+/// outboard stream uses S4 O(chunk) composition; this headered path remains Lean E1.)
 pub fn decode_stream<R: Read, W: Write>(
     master_key: &[u8],
     mut input: R,
     output: &mut W,
 ) -> Result<(Header, u64), CarbonadoError> {
-    let mut header_bytes = [0u8; Header::LEN];
-    input
-        .read_exact(&mut header_bytes)
-        .map_err(CarbonadoError::StdIoError)?;
-    let header = Header::try_from(&header_bytes[..])?;
+    #[cfg(feature = "backend-lean")]
+    {
+        use crate::filepack_manifest::MAX_SEGMENT_MAIN_LEN;
 
-    let auth_data = build_header_auth_data(&header);
-    let expected_mac = crate::crypto::compute_header_mac(master_key, &auth_data)?;
-    if !crate::crypto::ct_eq(&expected_mac, &header.header_mac) {
-        return Err(CarbonadoError::AuthenticationFailed);
+        let mut header_bytes = [0u8; Header::LEN];
+        input
+            .read_exact(&mut header_bytes)
+            .map_err(CarbonadoError::StdIoError)?;
+        let header_probe = Header::try_from(&header_bytes[..])?;
+        // MAC-before-body (parity with rust path): reject unauthenticated peers before
+        // allocating/reading up to MAX_SEGMENT_MAIN_LEN body bytes. Lean re-verifies MAC
+        // inside decode_headered for dual body/pipeline honesty.
+        let auth_data = build_header_auth_data(&header_probe);
+        let expected_mac = crate::crypto::compute_header_mac(master_key, &auth_data)?;
+        if !crate::crypto::ct_eq(&expected_mac, &header_probe.header_mac) {
+            return Err(CarbonadoError::AuthenticationFailed);
+        }
+        let body_len = header_probe.encoded_len as u64;
+        if body_len > MAX_SEGMENT_MAIN_LEN {
+            return Err(CarbonadoError::InternalStateError(format!(
+                "header encoded_len {body_len} exceeds MAX_SEGMENT_MAIN_LEN {MAX_SEGMENT_MAIN_LEN}"
+            )));
+        }
+        let mut body = vec![0u8; body_len as usize];
+        if let Err(e) = input.read_exact(&mut body) {
+            // Match rust pipeline taxonomy: short body after a valid header prefix is
+            // `InvalidHeaderLength` (not bare UnexpectedEof), e.g. truncated Bao bodies.
+            return Err(if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                CarbonadoError::InvalidHeaderLength
+            } else {
+                CarbonadoError::StdIoError(e)
+            });
+        }
+        let mut archive = Vec::with_capacity(Header::LEN + body.len());
+        archive.extend_from_slice(&header_bytes);
+        archive.extend_from_slice(&body);
+        drop(body); // free body copy before Lean allocates plaintext
+        let (header, plaintext) = crate::backend::lean::decode_headered(master_key, &archive)?;
+        drop(archive);
+        output
+            .write_all(&plaintext)
+            .map_err(CarbonadoError::StdIoError)?;
+        Ok((header, plaintext.len() as u64))
     }
+    #[cfg(feature = "backend-rust")]
+    {
+        let mut header_bytes = [0u8; Header::LEN];
+        input
+            .read_exact(&mut header_bytes)
+            .map_err(CarbonadoError::StdIoError)?;
+        let header = Header::try_from(&header_bytes[..])?;
 
-    let fmt = header.format;
-    let mut post_preprocess = crate::stream::spool::SeekableSpool::new()?;
-    let mut body_reader = std::io::Read::by_ref(&mut input).take(header.encoded_len as u64);
-    crate::stream::decode::stream_decode_inboard_bao_fec_into(
-        &mut body_reader,
-        header.hash.as_bytes(),
-        header.padding_len,
-        fmt,
-        Some(header.encoded_len as u64),
-        &mut post_preprocess,
-    )?;
-    post_preprocess.rewind()?;
-    let out_len = if fmt.contains(Format::Encryption) {
-        stream_decrypt_header_path(
-            master_key,
-            header.payload_nonce,
+        let auth_data = build_header_auth_data(&header);
+        let expected_mac = crate::crypto::compute_header_mac(master_key, &auth_data)?;
+        if !crate::crypto::ct_eq(&expected_mac, &header.header_mac) {
+            return Err(CarbonadoError::AuthenticationFailed);
+        }
+
+        let fmt = header.format;
+        let mut post_preprocess = crate::stream::spool::SeekableSpool::new()?;
+        let mut body_reader = std::io::Read::by_ref(&mut input).take(header.encoded_len as u64);
+        crate::stream::decode::stream_decode_inboard_bao_fec_into(
+            &mut body_reader,
+            header.hash.as_bytes(),
+            header.padding_len,
+            fmt,
+            Some(header.encoded_len as u64),
             &mut post_preprocess,
-            fmt.bits(),
-            output,
-        )?
-    } else if fmt.contains(Format::Compression) {
-        crate::stream::compress::stream_decompress(post_preprocess, output)?
-    } else {
-        std::io::copy(&mut post_preprocess, output).map_err(CarbonadoError::StdIoError)?
-    };
+        )?;
+        post_preprocess.rewind()?;
+        let out_len = if fmt.contains(Format::Encryption) {
+            stream_decrypt_header_path(
+                master_key,
+                header.payload_nonce,
+                &mut post_preprocess,
+                fmt.bits(),
+                output,
+            )?
+        } else if fmt.contains(Format::Compression) {
+            crate::stream::compress::stream_decompress(post_preprocess, output)?
+        } else {
+            std::io::copy(&mut post_preprocess, output).map_err(CarbonadoError::StdIoError)?
+        };
 
-    Ok((header, out_len))
+        Ok((header, out_len))
+    }
 }
 
 pub fn decode(master_key: &[u8], encoded: &[u8]) -> Result<(Header, Vec<u8>), CarbonadoError> {
-    if encoded.len() < Header::LEN {
-        return Err(CarbonadoError::InvalidHeaderLength);
+    #[cfg(feature = "backend-lean")]
+    {
+        crate::backend::lean::decode_headered(master_key, encoded)
     }
-    let (header_bytes, body) = encoded.split_at(Header::LEN);
-    let header = Header::try_from(header_bytes)?;
+    #[cfg(feature = "backend-rust")]
+    {
+        if encoded.len() < Header::LEN {
+            return Err(CarbonadoError::InvalidHeaderLength);
+        }
+        let (header_bytes, body) = encoded.split_at(Header::LEN);
+        let header = Header::try_from(header_bytes)?;
 
-    // Verify header_mac
-    let auth_data = build_header_auth_data(&header);
-    let expected_mac = crate::crypto::compute_header_mac(master_key, &auth_data)?;
+        // Verify header_mac
+        let auth_data = build_header_auth_data(&header);
+        let expected_mac = crate::crypto::compute_header_mac(master_key, &auth_data)?;
 
-    // Constant-time comparison for the header MAC to avoid timing side-channels.
-    // (See AGENTS.md for the constant-time review of EtM + header auth paths.)
-    if !crate::crypto::ct_eq(&expected_mac, &header.header_mac) {
-        return Err(CarbonadoError::AuthenticationFailed);
-    }
+        // Constant-time comparison for the header MAC to avoid timing side-channels.
+        // (See AGENTS.md for the constant-time review of EtM + header auth paths.)
+        if !crate::crypto::ct_eq(&expected_mac, &header.header_mac) {
+            return Err(CarbonadoError::AuthenticationFailed);
+        }
 
-    // Same fused spool pipeline as decode_stream (streaming MAC-then-decrypt on header path).
-    // Body may include trailers (e.g. catalog COTS) after `encoded_len` bytes — limit the reader.
-    let fmt = header.format;
-    let body_len = header.encoded_len as usize;
-    if body.len() < body_len {
-        return Err(CarbonadoError::InvalidHeaderLength);
-    }
-    let mut post_preprocess = crate::stream::spool::SeekableSpool::new()?;
-    crate::stream::decode::stream_decode_inboard_bao_fec_into(
-        std::io::Cursor::new(&body[..body_len]),
-        header.hash.as_bytes(),
-        header.padding_len,
-        fmt,
-        Some(header.encoded_len as u64),
-        &mut post_preprocess,
-    )?;
-    post_preprocess.rewind()?;
-    let mut decompressed = Vec::new();
-    if fmt.contains(Format::Encryption) {
-        crate::stream::stream_decrypt_header_path(
-            master_key,
-            header.payload_nonce,
+        // Same fused spool pipeline as decode_stream (streaming MAC-then-decrypt on header path).
+        // Body may include trailers (e.g. catalog COTS) after `encoded_len` bytes — limit the reader.
+        let fmt = header.format;
+        let body_len = header.encoded_len as usize;
+        if body.len() < body_len {
+            return Err(CarbonadoError::InvalidHeaderLength);
+        }
+        let mut post_preprocess = crate::stream::spool::SeekableSpool::new()?;
+        crate::stream::decode::stream_decode_inboard_bao_fec_into(
+            std::io::Cursor::new(&body[..body_len]),
+            header.hash.as_bytes(),
+            header.padding_len,
+            fmt,
+            Some(header.encoded_len as u64),
             &mut post_preprocess,
-            fmt.bits(),
-            &mut decompressed,
         )?;
-    } else if fmt.contains(Format::Compression) {
-        crate::stream::compress::stream_decompress(post_preprocess, &mut decompressed)?;
-    } else {
-        std::io::copy(&mut post_preprocess, &mut decompressed)
-            .map_err(CarbonadoError::StdIoError)?;
-    }
+        post_preprocess.rewind()?;
+        let mut decompressed = Vec::new();
+        if fmt.contains(Format::Encryption) {
+            crate::stream::stream_decrypt_header_path(
+                master_key,
+                header.payload_nonce,
+                &mut post_preprocess,
+                fmt.bits(),
+                &mut decompressed,
+            )?;
+        } else if fmt.contains(Format::Compression) {
+            crate::stream::compress::stream_decompress(post_preprocess, &mut decompressed)?;
+        } else {
+            std::io::copy(&mut post_preprocess, &mut decompressed)
+                .map_err(CarbonadoError::StdIoError)?;
+        }
 
-    Ok((header, decompressed))
+        Ok((header, decompressed))
+    }
 }
 
 /// High-level encode using the new v2 symmetric model (always inboard with Header prepended).
@@ -426,17 +494,92 @@ pub fn decode(master_key: &[u8], encoded: &[u8]) -> Result<(Header, Vec<u8>), Ca
 /// (public and encrypted formats share the same artifact split; optional out-of-band Header).
 /// Sidecar naming convention: <bao-hash>.cXX.out (Bao), <bao-hash>.cXX.par (FEC parity).
 /// See AGENTS §11.2 (completed) and low-level `encoding::encode_outboard`.
+///
+/// # `backend-lean` (Phase 2)
+///
+/// Dispatches to Lean AOT via C ABI (`carbonado_encode_headered`).
+///
+/// - **`metadata` / SLH pk:** plumbed through C ABI (nullable → zero fields).
+/// - **`EncodeInfo`:** full stage counters from Lean pack (R3) — compress/encrypt when
+///   those bits ran, FEC/Bao geometry, padding, and `output_len`/`bytes_verifiable`
+///   from body length (matches header `encoded_len`).
+/// - **Live dual under lean:** body/headered encode-decode, outboard (header-path when
+///   `file::encode_outboard` supplies `Some(payload_nonce)`), scrub, verify_slice,
+///   stream buffer + **R5 E1** stream I/O (inboard/encrypted outboard spool→Lean),
+///   **W1a** `decode_stream` → Lean `decode_headered`, **W1b** public outboard stream
+///   S4 O(chunk/stripe) composition, seekable outboard slice C (**R9**), optional **R10**
+///   `stream_decode_async` under lean+`async` (dual-aware via E1; freeze never requires `async`).
+/// - **Post-G8 residuals (honest):** pure Lean chunked stream residual (W1b public outboard
+///   E2 is rust geometric composition under lean; encrypted/inboard stream remain E1);
+///   dual-suite catalog encode remains Rust rkyv composition SSOT (**W3** pure Lean rkyv
+///   also available); ~~W4a~~ O(slice) inboard retain closed; **W4b** full-buffer C outboard
+///   slice permanent; **W4c** buffer-only zstd under lean; **W4d** FEC/async spool permanent.
+///   Dual-suite SLH may use Rust `bitcoinpqc` composition.
 pub fn encode(
     master_key: &[u8],
     input: &[u8],
     level: u8,
     metadata: Option<[u8; 8]>,
 ) -> Result<(Vec<u8>, EncodeInfo), CarbonadoError> {
-    let mut out = Vec::new();
-    let (header, info) = encode_stream(master_key, input, level, metadata, &mut out)?;
-    let mut body = header.try_to_vec()?;
-    body.extend_from_slice(&out);
-    Ok((body, info))
+    encode_with_nonce(master_key, input, level, metadata, None)
+}
+
+/// Headered inboard encode with optional fixed `payload_nonce` for encrypted formats.
+///
+/// When `explicit_nonce` is `Some(n)` and Encryption is set, **both backends** use `n`
+/// literally (including all-zero). When `None`, encrypted formats draw a CSPRNG nonce
+/// (production default). Public formats use a zero `payload_nonce` field regardless.
+///
+/// # Safety / intended use
+///
+/// Fixed nonces are for **tests and determinism only** (e.g. G9 goldens). Prefer
+/// [`encode`] for production so a fresh CSPRNG nonce is drawn. AES-CTR requires the
+/// nonce to be unique per `(master_key, encryption operation)` — **reuse is catastrophic**
+/// (keystream reuse → plaintext recovery). See AGENTS.md §2.1.4.
+pub fn encode_with_nonce(
+    master_key: &[u8],
+    input: &[u8],
+    level: u8,
+    metadata: Option<[u8; 8]>,
+    explicit_nonce: Option<[u8; 16]>,
+) -> Result<(Vec<u8>, EncodeInfo), CarbonadoError> {
+    #[cfg(feature = "backend-lean")]
+    {
+        let format = level;
+        let nonce = if format & 1 != 0 {
+            match explicit_nonce {
+                Some(n) => Some(n),
+                None => {
+                    let mut n = [0u8; 16];
+                    getrandom::getrandom(&mut n).map_err(|_| CarbonadoError::RandomnessError)?;
+                    Some(n)
+                }
+            }
+        } else {
+            None
+        };
+        let (archive, info) = crate::backend::lean::encode_headered(
+            master_key,
+            input,
+            format,
+            nonce.as_ref(),
+            None, // slh_public_key: dual-suite sets via sidecar path / Header APIs
+            metadata.as_ref(),
+        )?;
+        if archive.len() < Header::LEN {
+            return Err(CarbonadoError::InvalidHeaderLength);
+        }
+        Ok((archive, info))
+    }
+    #[cfg(feature = "backend-rust")]
+    {
+        let mut out = Vec::new();
+        let (header, info) =
+            encode_stream_with_nonce(master_key, input, level, metadata, &mut out, explicit_nonce)?;
+        let mut body = header.try_to_vec()?;
+        body.extend_from_slice(&out);
+        Ok((body, info))
+    }
 }
 
 /// Headered inboard encode over [`Read`] / [`Write`]. Header is returned for staging; body
@@ -447,20 +590,36 @@ pub fn encode(
 /// with monotonic `chunk_index` values and [`decode_shards_stream`](crate::stream::decode_shards_stream).
 pub fn encode_stream<R: Read, W: Write>(
     master_key: &[u8],
-    mut input: R,
+    input: R,
     level: u8,
     metadata: Option<[u8; 8]>,
     output: &mut W,
 ) -> Result<(Header, EncodeInfo), CarbonadoError> {
+    encode_stream_with_nonce(master_key, input, level, metadata, output, None)
+}
+
+/// Like [`encode_stream`], with optional fixed `payload_nonce` for encrypted formats.
+///
+/// When `explicit_nonce` is `Some(n)`, both backends use `n` literally (including
+/// all-zero). See [`encode_with_nonce`] for safety notes (test/determinism only).
+pub fn encode_stream_with_nonce<R: Read, W: Write>(
+    master_key: &[u8],
+    mut input: R,
+    level: u8,
+    metadata: Option<[u8; 8]>,
+    output: &mut W,
+    explicit_nonce: Option<[u8; 16]>,
+) -> Result<(Header, EncodeInfo), CarbonadoError> {
     let format = Format::from(level);
     let mut payload_nonce = [0u8; 16];
-    let (hash, info, _stats) = crate::stream::encode::stream_encode_inboard(
+    let (hash, info, _stats) = crate::stream::encode::stream_encode_inboard_with_nonce(
         master_key,
         &mut input,
         level,
         output,
         &mut payload_nonce,
         true,
+        explicit_nonce,
     )?;
 
     let header = Header::new(

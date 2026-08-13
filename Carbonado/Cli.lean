@@ -18,6 +18,7 @@ import Carbonado.Pipeline
 import Carbonado.Outboard
 import Carbonado.Adamantine
 import Carbonado.Filepack
+import Carbonado.RkyvFilepack
 import Carbonado.Directory
 import Carbonado.Slh
 import Carbonado.Bao.Blake3
@@ -28,6 +29,7 @@ open Carbonado.Constants
 open Carbonado.Crypto.Util
 open Carbonado.Header
 open Carbonado.Pipeline
+open Carbonado.RkyvFilepack
 open Carbonado.Outboard
 open Carbonado.Adamantine
 open Carbonado.Filepack
@@ -70,7 +72,9 @@ def helpText : String :=
   "      -o <path>         output file or directory\n" ++
   "  carbonado slh parse <file>    Validate SLH1 sidecar wire (7860 B)\n" ++
   "  carbonado slh verify <sidecar> --root <hex64> --pk <hex64>\n" ++
-  "      Cryptographic bind-to-root (fails closed exit 1 until SLH-DSA FFI — LIMITS)\n"
+  "      Live SLH-DSA-SHA2-128s verify via libbitcoinpqc (carbonado_slh_*);\n" ++
+  "      exit 0 accept / exit 1 reject or bad wire. Dual-suite may still use\n" ++
+  "      Rust bitcoinpqc composition (W3c / LIMITS) — pure Lean path is optional.\n"
 
 /-- Parse 64 hex chars → 32 bytes. -/
 def parseMaster (s : String) : Except CliError ByteArray :=
@@ -202,7 +206,7 @@ def encodeFile (inputPath : System.FilePath) (outputPath : Option System.FilePat
       match encodeHeadered master nonce data format 0
           (replicate slhPublicKeyLen 0) (replicate 8 0) with
       | .error e => pure (.error (.pipeline e))
-      | .ok (hdr, archive) =>
+      | .ok (hdr, archive, _info) =>
         let out :=
           match outputPath with
           | some p => p
@@ -342,7 +346,7 @@ def decodeDir (catalogPath outputDir : System.FilePath) (master : ByteArray) :
                 match splitPayload payload with
                 | .error ae => pure (.error (.directory (ofAdamantineError ae)))
                 | .ok (manBytes, baoBundle) =>
-                  match FilepackManifest.fromWireBytes manBytes expectedRoot with
+                  match decodeCatalogBody manBytes expectedRoot with
                   | .error pe => pure (.error (.directory (ofFilepackError pe)))
                   | .ok manifest =>
                     if manifest.formatLevel != catalogFmt then
@@ -382,7 +386,7 @@ def decodeDir (catalogPath outputDir : System.FilePath) (master : ByteArray) :
                                 else pure ByteArray.empty
                               let pad := paddingForMainLen main.size fmtBits.fec
                               match decodeOutboardBody master sref.segmentBaoRoot main verOb
-                                  fecPar pad fmtBits with
+                                  fecPar pad fmtBits false ByteArray.empty with
                               | .error pe => return .error (.pipeline pe)
                               | .ok part => recovered := appendBA recovered part
                         match checkContentBlake3 recovered entry.contentBlake3 with
@@ -514,17 +518,16 @@ def runCommand (cmd : String) (args : List String) : IO UInt32 := do
               match parseSidecar bytes with
               | .error e => IO.eprintln (formatCliError (.slh e)); pure 1
               | .ok sig =>
-                -- Fail-closed: never exit 0 without real SLH-DSA verify.
-                -- Until FFI is linked, always-false oracle → verificationFailed → exit 1.
-                match verifyBound (fun _ _ _ => false) pk root sig with
-                | .error .verificationFailed
+                -- G10: live SLH-DSA verify via libbitcoinpqc (fail-closed on reject).
+                match verifyBound liveVerifyOracle pk root sig with
+                | .error .verificationFailed =>
+                  IO.eprintln "slh verify: signature rejected"
+                  pure 1
                 | .error .signatureUnavailable =>
-                  IO.eprintln "slh verify: cryptographic verification unavailable (LIMITS: no SLH-DSA FFI)"
-                  IO.eprintln s!"  wire parse ok (sigLen={sig.size}); NOT verified — exit 1"
+                  IO.eprintln "slh verify: cryptographic verification unavailable"
                   pure 1
                 | .error e => IO.eprintln (formatCliError (.slh e)); pure 1
                 | .ok () =>
-                  -- Only reachable once real oracle is linked and accepts.
                   IO.println s!"slh verify ok root={toHex root}"
                   pure 0
             catch e =>

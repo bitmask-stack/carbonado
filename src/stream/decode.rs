@@ -14,6 +14,8 @@ use crate::{
 };
 
 /// Primary inboard decode (buffer). Used by [`crate::decoding::decode`].
+///
+/// Under `backend-lean`, composes over Lean C ABI body decode.
 pub fn stream_decode_buffer(
     master_key: &[u8],
     hash: &[u8],
@@ -21,20 +23,30 @@ pub fn stream_decode_buffer(
     padding: u32,
     format: u8,
 ) -> Result<Vec<u8>, CarbonadoError> {
-    let mut out = Vec::new();
-    stream_decode_inboard_pipeline(
-        master_key,
-        hash,
-        Cursor::new(input),
-        padding,
-        format,
-        None,
-        &mut out,
-    )?;
-    Ok(out)
+    #[cfg(feature = "backend-lean")]
+    {
+        crate::backend::lean::decode(master_key, hash, input, padding, format)
+    }
+    #[cfg(feature = "backend-rust")]
+    {
+        let mut out = Vec::new();
+        stream_decode_inboard_pipeline(
+            master_key,
+            hash,
+            Cursor::new(input),
+            padding,
+            format,
+            None,
+            &mut out,
+        )?;
+        Ok(out)
+    }
 }
 
 /// Primary outboard decode (buffer). Used by [`crate::decoding::decode_outboard`].
+///
+/// Under `backend-lean`, composes over Lean C ABI outboard decode.
+/// `explicit_nonce.is_some()` → header-path decrypt (`[tag|ct]`); else embedded-nonce.
 #[allow(clippy::too_many_arguments)]
 pub fn stream_decode_outboard_buffer(
     master_key: &[u8],
@@ -46,19 +58,37 @@ pub fn stream_decode_outboard_buffer(
     format: u8,
     explicit_nonce: Option<[u8; 16]>,
 ) -> Result<Vec<u8>, CarbonadoError> {
-    let mut out = Vec::new();
-    stream_decode_outboard(
-        master_key,
-        hash,
-        Cursor::new(main),
-        verification_outboard.map(Cursor::new),
-        fec_parity.map(Cursor::new),
-        padding,
-        format,
-        explicit_nonce,
-        &mut out,
-    )?;
-    Ok(out)
+    #[cfg(feature = "backend-lean")]
+    {
+        let header_path = explicit_nonce.is_some();
+        crate::backend::lean::decode_outboard(
+            master_key,
+            hash,
+            main,
+            verification_outboard,
+            fec_parity,
+            padding,
+            format,
+            explicit_nonce.as_ref(),
+            header_path,
+        )
+    }
+    #[cfg(feature = "backend-rust")]
+    {
+        let mut out = Vec::new();
+        stream_decode_outboard(
+            master_key,
+            hash,
+            Cursor::new(main),
+            verification_outboard.map(Cursor::new),
+            fec_parity.map(Cursor::new),
+            padding,
+            format,
+            explicit_nonce,
+            &mut out,
+        )?;
+        Ok(out)
+    }
 }
 
 /// Stream inboard decode from `input` to `output`.
@@ -71,6 +101,13 @@ pub fn stream_decode_outboard_buffer(
 ///
 /// Pass `encoded_body_len` when the reader may contain trailing bytes after the encoded
 /// body (FEC c8, compressed c4). When `Some`, excess or truncated input is rejected.
+///
+/// Under `backend-lean` (R5 E1 / W1b disk-backed): spool body (O(chunk) ingest) → Lean
+/// [`crate::backend::lean::decode`] → write plaintext. Peak RAM **O(encoded + logical)** at
+/// the Lean buffer boundary (not stream E2). See docs/LIMITS.md E1/E2 matrix.
+///
+/// **R10:** [`super::stream_decode_async`] stages the encoded body then calls this function
+/// (dual-aware; freeze never requires `async`).
 pub fn stream_decode<R: Read, W: Write>(
     master_key: &[u8],
     hash: &[u8],
@@ -80,18 +117,76 @@ pub fn stream_decode<R: Read, W: Write>(
     encoded_body_len: Option<u64>,
     output: &mut W,
 ) -> Result<u64, CarbonadoError> {
-    stream_decode_inboard_pipeline(
-        master_key,
-        hash,
-        input,
-        padding,
-        format,
-        encoded_body_len,
-        output,
-    )
+    #[cfg(feature = "backend-lean")]
+    {
+        let mut input = input;
+        let body = read_encoded_body(&mut input, encoded_body_len)?;
+        let plaintext = crate::backend::lean::decode(master_key, hash, &body, padding, format)?;
+        // Free encoded body before writing plaintext (avoid simultaneous body+pt peak).
+        drop(body);
+        output
+            .write_all(&plaintext)
+            .map_err(CarbonadoError::StdIoError)?;
+        Ok(plaintext.len() as u64)
+    }
+    #[cfg(feature = "backend-rust")]
+    {
+        stream_decode_inboard_pipeline(
+            master_key,
+            hash,
+            input,
+            padding,
+            format,
+            encoded_body_len,
+            output,
+        )
+    }
+}
+
+/// Read a bounded or unbounded encoded body for Lean E1 spool decode.
+///
+/// `encoded_body_len` must be a **trusted** length (typically header-derived
+/// `encoded_len`). Declared lengths above [`crate::filepack_manifest::MAX_SEGMENT_MAIN_LEN`]
+/// are rejected before allocation (DoS soft cap; same order as segment main limits).
+///
+/// **W1b:** unbounded path disk-spools first (O(chunk) ingest) then materializes once for
+/// the Lean buffer ABI. Bounded path pre-sizes exactly `declared` (same as prior E1).
+#[cfg(feature = "backend-lean")]
+fn read_encoded_body<R: Read>(
+    input: &mut R,
+    encoded_body_len: Option<u64>,
+) -> Result<Vec<u8>, CarbonadoError> {
+    use crate::filepack_manifest::MAX_SEGMENT_MAIN_LEN;
+
+    match encoded_body_len {
+        Some(declared) => {
+            if declared > MAX_SEGMENT_MAIN_LEN {
+                return Err(CarbonadoError::InternalStateError(format!(
+                    "encoded_body_len {declared} exceeds MAX_SEGMENT_MAIN_LEN {MAX_SEGMENT_MAIN_LEN}"
+                )));
+            }
+            let mut body = vec![0u8; declared as usize];
+            input
+                .read_exact(&mut body)
+                .map_err(CarbonadoError::StdIoError)?;
+            // Reject trailing bytes beyond declared length (same contract as rust path).
+            let mut extra = [0u8; 1];
+            match input.read(&mut extra) {
+                Ok(0) => Ok(body),
+                Ok(_) => Err(CarbonadoError::EncodedBodyExceedsDeclaredLength { declared }),
+                Err(e) => Err(CarbonadoError::StdIoError(e)),
+            }
+        }
+        None => {
+            // Unbounded: disk-spool with DoS cap, then materialize for Lean (W1b E1.5).
+            let body = SeekableSpool::spool_then_materialize(input, Some(MAX_SEGMENT_MAIN_LEN))?;
+            Ok(body)
+        }
+    }
 }
 
 /// Core inboard decode: Bao verify → FEC → decrypt → decompress.
+#[cfg_attr(feature = "backend-lean", allow(dead_code))] // rust stream_decode / buffer path only
 pub(crate) fn stream_decode_inboard_pipeline<R: Read, W: Write>(
     master_key: &[u8],
     hash: &[u8],
@@ -269,6 +364,7 @@ fn stream_decode_verified_inboard<R: Read, W: Write + Seek>(
     Ok(())
 }
 
+#[cfg_attr(feature = "backend-lean", allow(dead_code))] // rust stream_decode_inboard_pipeline only
 fn stream_decode_post_preprocess_seek<R: Read + Seek, W: Write>(
     master_key: &[u8],
     mut input: R,
@@ -298,8 +394,135 @@ fn stream_decode_post_preprocess_seek<R: Read + Seek, W: Write>(
 }
 
 /// Stream outboard decode (incremental Bao/FEC/decrypt chain).
+///
+/// Stream outboard decode from main + optional sidecars.
+///
+/// # Memory / dual-backend matrix (W1b)
+///
+/// | Backend | Path | Peak RAM | Engine |
+/// |---------|------|----------|--------|
+/// | `backend-rust` | all formats | **O(chunk/stripe)** S4 (FEC residual O(segment body)) | rust geometric + streaming EtM |
+/// | `backend-lean` | **public non-Compression** (c0/c4/c8/c12) | **O(chunk/stripe) E2** | rust S4 geometric composition (G9 no-compress; c4/c12 evidenced); **not** pure-Lean stream |
+/// | `backend-lean` | **public + Compression** (c2/c6/c10/c14) | **O(logical)** if decompress materializes | same composition; not advertised as E2 |
+/// | `backend-lean` | **encrypted** | O(logical) E1 | Lean `decode_outboard` (crypto dual) |
+///
+/// Buffer APIs remain Lean under `backend-lean` always. See docs/LIMITS.md.
 #[allow(clippy::too_many_arguments)]
 pub fn stream_decode_outboard<M: Read, O: Read, P: Read, W: Write>(
+    master_key: &[u8],
+    hash: &[u8],
+    main: M,
+    verification_outboard: Option<O>,
+    fec_parity: Option<P>,
+    padding: u32,
+    format: u8,
+    explicit_nonce: Option<[u8; 16]>,
+    output: &mut W,
+) -> Result<u64, CarbonadoError> {
+    #[cfg(feature = "backend-lean")]
+    {
+        let fmt = Format::from(format);
+        if !fmt.contains(Format::Encryption) {
+            // W1b: public S4 composition (E2 only when !Compression; see rustdoc matrix).
+            stream_decode_outboard_s4(
+                master_key,
+                hash,
+                main,
+                verification_outboard,
+                fec_parity,
+                padding,
+                format,
+                explicit_nonce,
+                output,
+            )
+        } else {
+            stream_decode_outboard_lean_e1(
+                master_key,
+                hash,
+                main,
+                verification_outboard,
+                fec_parity,
+                padding,
+                format,
+                explicit_nonce,
+                output,
+            )
+        }
+    }
+    #[cfg(feature = "backend-rust")]
+    {
+        stream_decode_outboard_s4(
+            master_key,
+            hash,
+            main,
+            verification_outboard,
+            fec_parity,
+            padding,
+            format,
+            explicit_nonce,
+            output,
+        )
+    }
+}
+
+/// Lean E1 outboard decode (encrypted dual crypto): disk-spool → buffer ABI → write.
+#[cfg(feature = "backend-lean")]
+#[allow(clippy::too_many_arguments)]
+fn stream_decode_outboard_lean_e1<M: Read, O: Read, P: Read, W: Write>(
+    master_key: &[u8],
+    hash: &[u8],
+    main: M,
+    verification_outboard: Option<O>,
+    fec_parity: Option<P>,
+    padding: u32,
+    format: u8,
+    explicit_nonce: Option<[u8; 16]>,
+    output: &mut W,
+) -> Result<u64, CarbonadoError> {
+    use crate::filepack_manifest::MAX_SEGMENT_MAIN_LEN;
+
+    let main_buf = SeekableSpool::spool_then_materialize(main, Some(MAX_SEGMENT_MAIN_LEN))?;
+    let ob_buf = match verification_outboard {
+        Some(r) => Some(SeekableSpool::spool_then_materialize(
+            r,
+            Some(MAX_SEGMENT_MAIN_LEN),
+        )?),
+        None => None,
+    };
+    let par_buf = match fec_parity {
+        Some(r) => Some(SeekableSpool::spool_then_materialize(
+            r,
+            Some(MAX_SEGMENT_MAIN_LEN),
+        )?),
+        None => None,
+    };
+    let header_path = explicit_nonce.is_some();
+    let plaintext = crate::backend::lean::decode_outboard(
+        master_key,
+        hash,
+        &main_buf,
+        ob_buf.as_deref(),
+        par_buf.as_deref(),
+        padding,
+        format,
+        explicit_nonce.as_ref(),
+        header_path,
+    )?;
+    drop(main_buf);
+    drop(ob_buf);
+    drop(par_buf);
+    output
+        .write_all(&plaintext)
+        .map_err(CarbonadoError::StdIoError)?;
+    Ok(plaintext.len() as u64)
+}
+
+/// S4 outboard decode: O(chunk/stripe) peak (public geometric + encrypted EtM spool).
+///
+/// Under `backend-lean` this is the **W1b public** composition path (caller gates Encryption).
+/// Peak is E2 O(chunk/stripe) only when !Compression; see public matrix on `stream_decode_outboard`.
+#[allow(clippy::too_many_arguments)]
+fn stream_decode_outboard_s4<M: Read, O: Read, P: Read, W: Write>(
     master_key: &[u8],
     hash: &[u8],
     mut main: M,

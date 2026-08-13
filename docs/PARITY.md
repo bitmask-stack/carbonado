@@ -2,9 +2,9 @@
 
 ## Method (dual-backend)
 
-1. **Primary parity bar (G8):** the same Rust tests under `tests/` pass on **`backend-rust`** and **`backend-lean`** (Lean AOT `libcarbonado` via C ABI). See [TEST_CONTRACT.md](./TEST_CONTRACT.md), [ABI.md](./ABI.md), [GAPS.md](./GAPS.md).
+1. **Primary parity bar (G8):** the same Rust tests under `tests/` pass on **`backend-rust`** and **`backend-lean`** (Lean AOT `libcarbonado` via C ABI). See [TEST_CONTRACT.md](./TEST_CONTRACT.md), [ABI.md](./ABI.md), [GAPS.md](./GAPS.md). **G8 full closed at R7** — `just test-lean-ci` / CI `dual-backend-lean` runs the **full** dual suite under lean features; permanent feature-gated / purity residuals only (`streaming_async` / `parallel_determinism` feature-gated off freeze — **R10** closed async dual policy; ~~pure Lean rkyv encode~~ **W3 closed** — dual-suite encode remains Rust rkyv composition SSOT; ~~W1a+W1b~~ dual honesty closed — public outboard stream E2 is S4 composition under lean; pure Lean chunked C residual).
 2. **Component oracles:** pin reference trees under `ref/`; keep offline drivers (`etm-vectors`, `rs-vectors`, `bao-vectors`) for fast regression against Lean goldens / AOT demos.
-3. **Cross-backend tests (G9):** Rust encode → Lean decode and reverse once ABI encode/decode are stable (after G8 Phase 2).
+3. **Cross-backend tests (G9):** **closed at R8** — Rust encode → Lean decode and reverse for no-compress body/headered/outboard (public + fixed-nonce encrypted); fixtures under `tests/fixtures/g9/`; contract `tests/g9_cross_backend.rs`. **W2d** same-engine codecode/decodec in `tests/determinism_roundtrip.rs`. **Permanent residuals (W2a/W2b):** cross-engine Compression / directory encode bit-match (decode interop only).
 
 **SSOT roles (do not invert):**
 
@@ -15,7 +15,7 @@
 | Lean `Carbonado/` + AOT `libcarbonado` | Second engine: proofs + wire/C-ABI compatible implementation |
 | `ref/` | Pinned third-party oracles and vector drivers |
 
-Pin the exact trees the Rust product used; Lean AOT must remain wire-compatible with that contract. Rust is **not** demoted to “oracle only” while dual-backend work is in progress (G1 optional freeze is a pin, not a product deletion).
+Pin the exact **third-party** trees the Rust product used (Bao, RS, crypto crates, zstd, bitcoinpqc, …); Lean AOT must remain wire-compatible with that contract. Rust product under `src/` + `tests/` is **first-class SSOT** — not demoted to “oracle only.” **G1 closed (W5a):** no `ref/carbonado-rust` product pin (permanent policy; see freeze strategy below).
 
 ## Pins (from Carbonado `Cargo.lock` / Surmount)
 
@@ -30,8 +30,8 @@ Pin the exact trees the Rust product used; Lean AOT must remain wire-compatible 
 | `ref/zstd` | `https://github.com/facebook/zstd.git` | tag **`v1.5.7`** → **`f8745da6ff1ad1e7bab384bd1f9d742439278e99`** — **product SSOT** for static libzstd in `nix/native` (not nixpkgs.src); Rust crate was zstd 0.13.3 |
 | `ref/bitcoinpqc` | `https://github.com/cryptoquick/libbitcoinpqc-bindings.git` | **`7936b56f15e86b6764947c9298215ecfe38b712b`** |
 | `ref/crates/ctr-0.9.2` | crates.io `ctr` 0.9.2 | checksum `0369ee1ad671834580515889b80f2ea915f23b8be8d0daa4bbaf2ac5c7590835` — **vendored (Program B)** |
-| `ref/carbonado-rust` | optional pin of live tree (`src/`, `tests/`, …) | freeze commit **pending** (G1); live tree remains first-class |
 | `ref/parity-harness` | in-repo | `drivers/etm-vectors` (B); `drivers/rs-vectors` (C); `drivers/bao-vectors` (D); directory/CFP2 vectors deferred (G residual) |
+| ~~`ref/carbonado-rust`~~ | **not used** | **G1/W5a permanent policy:** no product pin submodule — live `src/` + `tests/` are dual-suite SSOT |
 
 ## Submodules
 
@@ -107,8 +107,8 @@ cd ref/parity-harness/drivers/bao-vectors && cargo run --quiet
 2. **Goldens (AOT `demo`):** API frames for empty (`28b52ffd2000010000`) and `hello` (`28b52ffd200529000068656c6c6f`); corrupt frame → `decompressionFailed`; tight `maxOut` → `outputTooLarge`; zeros shrink; pipeline c2/c6 + **headered c3/c7**; full format matrix incl. compression at runtime.
 3. **Interpreter residual:** Lean `@[extern]` bodies are identity for elaborator; real frames only in AOT (LIMITS). CarbonadoTest `native_decide` covers non-compression formats + status maps.
 4. **SLH1 wire:** magic `SLH1`, signature 7856 B, sidecar 7860 B — matches `src/crypto.rs` `SLH1_*` and AGENTS §2.3. Pure suite: length errors + `parseMagicAtExactLen` / `badSlhMagic` gate theorems; full-length build/parse + all-zero magic in `demo`.
-5. **Bind-to-root:** Lean model requires signature message = Bao root (`verifyBoundToExpected`); wrong root → `verificationFailed`. Real SLH-DSA verify via libbitcoinpqc **not** linked (nested submodule empty).
-6. **Optional future drivers:** `ref/parity-harness/drivers/zstd-vectors`, `slh-vectors` once PQC FFI lands.
+5. **Bind-to-root + live SLH (R9 / G10):** Lean model requires signature message = Bao root (`verifyBoundToExpected`); wrong root → `verificationFailed`. Real SLH-DSA-SHA2-128s sign/verify is **linked** via flake pin `b309f444…` (same SSOT as `ref/bitcoinpqc` submodule target) into `libcarbonado_native.a` — C `carbonado_slh_*` + Lean `@[extern]`. Nested worktree emptiness is not a product residual when the flake fetch pin is present. Dual-suite product SLH may still use Rust `bitcoinpqc` composition.
+6. **Optional drivers:** `ref/parity-harness/drivers/zstd-vectors`, `slh-vectors` for cross-oracle goldens (live FFI already in product AOT / libcarbonado).
 
 ## Adding a gate
 
@@ -126,11 +126,19 @@ git -C ref/bao-tree checkout 02916e784bb0afe0fd5a73c291c8c5335865e166
 
 CI must checkout recursively once submodules are recorded on the default branch.
 
-## carbonado-rust freeze strategy (optional pin — G1 residual)
+## carbonado-rust freeze strategy (G1 / W5a — permanent policy: no product pin)
 
-Dual-backend model keeps **live** Rust under `src/` and `tests/` as first-class. An optional historical pin is separate:
+**Decision (closed 2026-07 W5a): do not add `ref/carbonado-rust`.**
 
-1. Keep production Rust under `src/`, `tests/`, etc. (do not delete for “Lean purity”).
-2. Optionally add submodule or subtree `ref/carbonado-rust` at a named freeze commit for long-lived oracle/goldens isolation.
-3. **Do not** treat Lean as a replacement that removes the Rust engine: G8 requires both backends against the same `tests/`.
-4. Record any freeze SHA here and in [GAPS.md](GAPS.md) G1 when created.
+Dual-backend model keeps **live** Rust under `src/` and `tests/` as first-class production + normative contract. A separate frozen product tree is **not required** and is **not** part of the dual-backend freeze.
+
+| Policy | Detail |
+|--------|--------|
+| Product SSOT | Live `src/` + `tests/` (G8: both backends against the same suite) |
+| What `ref/` pins | Third-party oracles only (bao-tree, zstd, bitcoinpqc, RustCrypto, blake3, reed-solomon-erasure, parity-harness, vendored crates) |
+| `ref/carbonado-rust` | **Absent by policy** — do not invent a submodule or SHA |
+| Why no product pin | (1) Dual-suite SSOT is the live tree, not a historical snapshot. (2) A product pin duplicates `src/`/`tests/`, confuses which tree is normative, and is unused by CI `dual-backend-lean`. (3) Third-party pins already freeze what Lean/goldens compare against. |
+| Future archaeology | A release-specific historical checkout remains *possible* outside this policy if needed; it is **non-required** and must not replace live `src/`/`tests/` or demote Rust to “oracle only.” |
+| Do not | Delete or demote live `src/` / `tests/` for “Lean purity”; treat Lean as a replacement that removes the Rust engine (G8 requires both). |
+
+G1 status: **closed** with this permanent no-pin policy — see [GAPS.md](GAPS.md).

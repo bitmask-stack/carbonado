@@ -232,4 +232,53 @@ theorem stream_slice_trailing :
      isTrailing (decodeSliceForFormat 4 root 100 0 1 long)) = true := by
   native_decide
 
+/-! ## W4a / W4b multi-leaf seekable slice (O(slice) retain) -/
+
+/-- ~3 × 4 KiB patterned payload (multi-leaf inboard + non-empty outboard). -/
+private def pat12k : ByteArray :=
+  Id.run do
+    let mut out := ByteArray.empty
+    for i in [:12288] do
+      out := out.push (UInt8.ofNat ((i / 4096 + i % 256) % 251))
+    pure out
+
+/-- W4a: middle leaf from inboard matches plaintext window. -/
+theorem w4a_inboard_mid_slice_matches :
+    (let (root, art) := encodeInboardForFormat 4 pat12k
+     match verifySliceInboardForFormat 4 root art 1 1 with
+     | .ok s => ctEq s (pat12k.extract 4096 8192)
+     | .error _ => false) = true := by
+  native_decide
+
+/-- W4a: multi-leaf count=2 span matches extract. -/
+theorem w4a_inboard_two_slices :
+    (let (root, art) := encodeInboardForFormat 4 pat12k
+     match verifySliceInboardForFormat 4 root art 0 2 with
+     | .ok s => ctEq s (pat12k.extract 0 8192)
+     | .error _ => false) = true := by
+  native_decide
+
+/-- W4a short-file single-leaf inboard slice = full body. -/
+theorem w4a_inboard_short_file :
+    (let (root, art) := encodeInboardForFormat 4 pat100
+     match verifySliceInboardForFormat 4 root art 0 1 with
+     | .ok s => ctEq s pat100
+     | .error _ => false) = true := by
+  native_decide
+
+/-- W4b: multi-leaf outboard mid slice matches bare window. -/
+theorem w4b_outboard_mid_slice_matches :
+    (let (root, ob) := encodeOutboardForFormat 4 pat12k
+     match verifySliceOutboardForFormat 4 root pat12k ob 1 1 with
+     | .ok s => ctEq s (pat12k.extract 4096 8192)
+     | .error _ => false) = true := by
+  native_decide
+
+/-- W4a: tampered multi-leaf inboard fails auth on mid slice. -/
+theorem w4a_tamper_mid_auth_fail :
+    (let (root, art) := encodeInboardForFormat 4 pat12k
+     let bad := art.set! (min 20 (art.size - 1)) (art.get! (min 20 (art.size - 1)) ^^^ 0x5a)
+     isAuthFail (verifySliceInboardForFormat 4 root bad 1 1)) = true := by
+  native_decide
+
 end CarbonadoTest.Bao

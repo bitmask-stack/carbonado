@@ -115,6 +115,7 @@ pub mod paths;
 pub mod stream;
 
 pub use encoding::encode;
+pub use encoding::encode_with_nonce;
 
 pub use encoding::encode_outboard;
 
@@ -139,8 +140,8 @@ pub use stream::stream_decode_async;
 pub use stream::{
     decode_shards_stream, encode_shard_stream, stream_decode, stream_decode_buffer,
     stream_decode_outboard, stream_decode_outboard_buffer, stream_encode_buffer,
-    stream_encode_outboard_buffer, verify_slice_inboard_seekable, verify_slice_outboard,
-    ShardEncodeResult, ShardSource, DEFAULT_SEGMENT_PLAINTEXT_BUDGET,
+    stream_encode_buffer_with_nonce, stream_encode_outboard_buffer, verify_slice_inboard_seekable,
+    verify_slice_outboard, ShardEncodeResult, ShardSource, DEFAULT_SEGMENT_PLAINTEXT_BUDGET,
 };
 
 pub use bao;

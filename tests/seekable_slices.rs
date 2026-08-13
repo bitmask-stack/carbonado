@@ -54,18 +54,75 @@ fn large_payload_seekable_slices_without_full_decode() -> Result<()> {
     Ok(())
 }
 
+/// Short single-leaf bare main + empty post-order outboard must verify successfully
+/// (regression for the pre-R9 `expected_chunks == count * 4` false-fail on short files).
+#[test]
+fn single_leaf_empty_outboard_verify_slice_succeeds() -> Result<()> {
+    // c12 (no zstd) keeps main ≈ plaintext; short payload → single 4 KiB leaf → empty .out.
+    const C12: u8 = 0x0C;
+    let input = b"single-leaf short outboard ok";
+    let master_key = [0u8; 32];
+    let oenc = encode_outboard(&master_key, input, C12)?;
+    let bao_ob = oenc
+        .verification_outboard
+        .as_ref()
+        .expect("bao sidecar present");
+    assert_eq!(
+        bao_ob.len(),
+        0,
+        "short c12 main should be single-leaf (empty outboard), got {} bytes",
+        bao_ob.len()
+    );
+    assert!(
+        oenc.main.len() < SLICE_LEN as usize,
+        "expected main under one slice, got {}",
+        oenc.main.len()
+    );
+
+    let got = verify_slice_outboard(
+        oenc.main.as_slice(),
+        bao_ob,
+        oenc.main.len() as u64,
+        0,
+        1,
+        oenc.hash.as_bytes(),
+        C12,
+    )?;
+    assert_eq!(got, oenc.main, "verified slice must equal bare main");
+
+    // count==0: empty success without geometry (parity with Rust extract semantics).
+    let empty = verify_slice_outboard(
+        oenc.main.as_slice(),
+        bao_ob,
+        oenc.main.len() as u64,
+        99, // OOB index ignored when count==0
+        0,
+        oenc.hash.as_bytes(),
+        C12,
+    )?;
+    assert!(empty.is_empty());
+    Ok(())
+}
+
 #[test]
 fn tamper_outboard_parent_hash_fails_verification() -> Result<()> {
-    let input = b"tamper outboard parent hash";
+    // Multi-leaf bare main so post-order outboard contains parent hash pairs.
+    // Use c12 (no zstd) + patterned payload so main stays multi-leaf; highly
+    // compressible c14 can shrink to a single leaf (empty .out).
+    const C12: u8 = 0x0C;
+    let input = patterned_payload((SLICE_LEN as usize) * 3 + 100);
     let master_key = [0u8; 32];
-    let oenc = encode_outboard(&master_key, input, C14)?;
+    let oenc = encode_outboard(&master_key, &input, C12)?;
     let bao_ob = oenc.verification_outboard.as_ref().expect("bao sidecar");
     let hash = oenc.hash;
+    assert!(
+        bao_ob.len() >= 64,
+        "fixture must produce parent pairs in outboard (got {} bytes)",
+        bao_ob.len()
+    );
 
     let mut bad_ob = bao_ob.clone();
-    if bad_ob.len() >= 32 {
-        bad_ob[0] ^= 0xFF;
-    }
+    bad_ob[0] ^= 0xFF;
 
     let err = verify_slice_outboard(
         oenc.main.as_slice(),
@@ -74,7 +131,7 @@ fn tamper_outboard_parent_hash_fails_verification() -> Result<()> {
         0,
         1,
         hash.as_bytes(),
-        C14,
+        C12,
     )
     .unwrap_err();
 

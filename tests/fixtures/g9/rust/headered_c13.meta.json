@@ -1,0 +1,10 @@
+{
+  "layout": "headered",
+  "engine": "rust",
+  "format": 13,
+  "hash_hex": "e23c15f72e1681aad36b5f585c917a79bbe4a06e73d9a083dd9ee63503ffa807",
+  "padding_len": 16294,
+  "nonce_hex": "0102030405060708090a0b0c0d0e0f10",
+  "plaintext_id": "g9_matrix_v1",
+  "encrypted": true
+}

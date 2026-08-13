@@ -215,6 +215,66 @@ partial def decodeRec (startLeaf : Nat) (contentLen : Nat) (isRoot : Bool)
         decodeRec midLeaf rightLen false rQ key rightH input pos
       pure (appendBA leftData rightData, pos)
 
+/-- Retain only the overlap of `[logicalOff, logicalOff + leafLen)` with
+  `[retainStart, retainEnd)` from leaf bytes (W4a SliceRegionWriter analogue). -/
+def retainLeafOverlap (leaf : ByteArray) (logicalOff leafLen retainStart retainEnd : Nat) :
+    ByteArray :=
+  let leafEnd := logicalOff + leafLen
+  let copyStart := max logicalOff retainStart
+  let copyEnd := min leafEnd retainEnd
+  if copyStart ≥ copyEnd then
+    ByteArray.empty
+  else
+    leaf.extract (copyStart - logicalOff) (copyEnd - logicalOff)
+
+/-- Full-layout inboard response walk that authenticates every leaf/parent but retains
+  only bytes in `[retainStart, retainEnd)`.
+
+  Callers pass the full inboard artifact (`[u64le|response]`) with `pos` starting at
+  **8** so the walk does **not** allocate a second full-response copy (W4a review #1).
+  Leaf hashing may temporarily extract up to one 4 KiB group (`O(leaf)` temps).
+
+  **Memory (retained output):** O(range) — not full logical body.
+  **Time / I/O:** O(N) over the embedded full-range bao response (inboard embeds
+  `ChunkRanges::all()`; partial range decode would desync the sequential stream).
+  Matches Rust `verify_slice_inboard_seekable` / `SliceRegionWriter` contract (W4a).
+-/
+partial def decodeRecRetainRange (startLeaf : Nat) (contentLen : Nat) (isRoot : Bool)
+    (key : ByteArray) (expected : ByteArray) (input : ByteArray) (pos : Nat)
+    (logicalOff retainStart retainEnd : Nat) : Except BaoError (ByteArray × Nat) := do
+  let nLeaves := leafGroupCount contentLen
+  if nLeaves ≤ 1 then
+    if pos + contentLen > input.size then
+      throw .truncatedResponse
+    let data := input.extract pos (pos + contentLen)
+    let startChunk := startLeaf * chunksPerSlice
+    let h := hashLeafGroup startChunk data isRoot key
+    if !ctEq h expected then
+      throw .authenticationFailed
+    let kept := retainLeafOverlap data logicalOff contentLen retainStart retainEnd
+    pure (kept, pos + contentLen)
+  else
+    let groups := nextPow2 nLeaves
+    let mid := groups / 2
+    let midBytes := mid * leafBytes
+    let leftLen := min midBytes contentLen
+    let rightLen := contentLen - leftLen
+    if pos + 64 > input.size then
+      throw .truncatedResponse
+    let leftH := input.extract pos (pos + 32)
+    let rightH := input.extract (pos + 32) (pos + 64)
+    let parentH := keyedParentCV leftH rightH isRoot key
+    if !ctEq parentH expected then
+      throw .authenticationFailed
+    let pos := pos + 64
+    let (leftKept, pos) ←
+      decodeRecRetainRange startLeaf leftLen false key leftH input pos
+        logicalOff retainStart retainEnd
+    let (rightKept, pos) ←
+      decodeRecRetainRange (startLeaf + mid) rightLen false key rightH input pos
+        (logicalOff + leftLen) retainStart retainEnd
+    pure (appendBA leftKept rightKept, pos)
+
 /-- Verify and decode full inboard `[u64le|response]` under `key` and expected root. -/
 def decodeInboard (key root input : ByteArray) : Except BaoError ByteArray := do
   if root.size != outLen then
@@ -241,10 +301,34 @@ def decodeInboard (key root input : ByteArray) : Except BaoError ByteArray := do
       throw .authenticationFailed
     pure data
 
+/-- Authenticate full inboard without retaining logical body (W4a auth-only walk).
+
+  Walks `input` from offset 8 (no second full-response `extract` copy).
+-/
+def verifyInboardAuth (key root input : ByteArray) : Except BaoError Unit := do
+  if root.size != outLen then
+    throw .invalidRootLength
+  let contentLen ← contentLenPrefix input
+  if contentLen == 0 then
+    let expect := keyedRoot key ByteArray.empty
+    if !ctEq expect root then
+      throw .authenticationFailed
+    if input.size > 8 then
+      throw .trailingData
+    pure ()
+  else
+    -- pos=8: sequential walk over inboard artifact without copying response tail.
+    let (_kept, endPos) ←
+      decodeRecRetainRange 0 contentLen true key root input 8 0 0 0
+    if endPos < input.size then
+      throw .trailingData
+    if endPos > input.size then
+      throw .truncatedResponse
+    pure ()
+
 /-- Verify inboard without retaining body. -/
-def verifyInboard (key root input : ByteArray) : Except BaoError Unit := do
-  let _ ← decodeInboard key root input
-  pure ()
+def verifyInboard (key root input : ByteArray) : Except BaoError Unit :=
+  verifyInboardAuth key root input
 
 /-- Verify bare main + post-order outboard against root. -/
 def verifyOutboard (key root bare outboard : ByteArray) : Except BaoError Unit := do
@@ -304,29 +388,163 @@ def sliceResponseMatchesEncode (key data : ByteArray) (index count : Nat)
   let (_root, enc) := encodeSliceResponse key data index count
   ctEq enc response
 
-/-- Decode full inboard (always authenticates), then extract `count` slices at `index`.
+/-- Authenticate full inboard response; retain only `count` slices at `index` (W4a).
 
-  Integrity runs **before** the `count = 0` empty return — corrupt inboard never succeeds.
-  `count = 0` after successful decode returns empty (extract semantics, not skip-auth).
+  Integrity runs **before** the `count = 0` empty return — corrupt inboard never succeeds
+  on this pure-Lean / C path. (Dual Rust API `lean::verify_slice` short-circuits empty
+  success on `count==0` without auth — parity with pure-Rust seekable.)
+
+  **Retained memory:** O(slice) output; walk starts at offset 8 (no second full-response
+  copy). Leaf hashing may use O(leaf) temporary extracts. **Time:** O(N) over embedded
+  full-range response. C ABI still passes the full inboard body as input.
 -/
 def extractSliceFromInboard (key root input : ByteArray) (index count : Nat) :
     Except BaoError ByteArray := do
-  let data ← decodeInboard key root input
+  if root.size != outLen then
+    throw .invalidRootLength
+  let contentLen ← contentLenPrefix input
   if count == 0 then
+    -- Auth-first empty extract (Lean C product): walk without retaining body.
+    verifyInboardAuth key root input
     return ByteArray.empty
-  let sliceStart := index * leafBytes
-  if sliceStart ≥ data.size then
+  if contentLen == 0 then
     throw .invalidSliceIndex
-  let sliceEnd := min data.size (sliceStart + count * leafBytes)
-  pure (data.extract sliceStart sliceEnd)
+  let sliceStart := index * leafBytes
+  if sliceStart ≥ contentLen then
+    throw .invalidSliceIndex
+  let sliceEnd := min contentLen (sliceStart + count * leafBytes)
+  let expectLen := sliceEnd - sliceStart
+  -- pos=8: walk full inboard artifact; do not copy response tail into a second buffer.
+  let (kept, endPos) ←
+    decodeRecRetainRange 0 contentLen true key root input 8 0 sliceStart sliceEnd
+  if endPos < input.size then
+    throw .trailingData
+  if endPos > input.size then
+    throw .truncatedResponse
+  -- Fail-closed if retain geometry under-produced (regression guard; W4 review #5).
+  if kept.size != expectLen then
+    throw .authenticationFailed
+  pure kept
 
-/-- Strict verify of slice inside full inboard: full decode then extract.
+/-- Strict verify of slice inside full inboard (W4a seekable retain).
 
   Same auth-first contract as `extractSliceFromInboard`.
 -/
 def verifySliceInboard (key root input : ByteArray) (index count : Nat) :
     Except BaoError ByteArray :=
   extractSliceFromInboard key root input index count
+
+/-- Post-order outboard byte length for bare main of size `dataLen` (matches `createOutboard`). -/
+partial def outboardLenFor (dataLen : Nat) : Nat :=
+  let nLeaves := leafGroupCount dataLen
+  if nLeaves ≤ 1 then
+    0
+  else
+    let groups := nextPow2 nLeaves
+    let mid := groups / 2
+    let midBytes := mid * leafBytes
+    let leftLen := min midBytes dataLen
+    let rightLen := dataLen - leftLen
+    outboardLenFor leftLen + outboardLenFor rightLen + 64
+
+/--
+  Seekable outboard slice verify over a sub-range of bare main (offset + len).
+
+  Avoids recursive `ByteArray.extract` of whole unqueried halves (W4b lean-side).
+  Unqueried subtrees consume only outboard geometry length (no main leaf hashes).
+
+  **Time:** O(slice + tree height) leaf hashing (not full re-encode of unqueried sides).
+  **Retained output:** O(slice). Input bare main + full outboard buffers still provided
+  at the C boundary (permanent full-buffer residual — no streaming ReadAt C ABI).
+
+  Sibling hashes for unqueried subtrees are taken from the outboard parent pairs
+  (bao-tree range-verify semantics). Full outboard length must match geometry.
+-/
+partial def verifyOutboardSliceRecAt (startLeaf : Nat) (bare : ByteArray)
+    (dataOff dataLen : Nat) (isRoot : Bool) (query : LeafQuery) (key expected : ByteArray)
+    (outboard : ByteArray) (obPos : Nat) : Except BaoError (ByteArray × Nat) := do
+  if query.isEmpty then
+    -- Unqueried subtree: parent already bound `expected` via outboard pair; no bytes.
+    pure (ByteArray.empty, obPos)
+  else
+    let nLeaves := leafGroupCount dataLen
+    if nLeaves ≤ 1 then
+      if dataOff + dataLen > bare.size then
+        throw .truncatedResponse
+      let data := bare.extract dataOff (dataOff + dataLen)
+      let startChunk := startLeaf * chunksPerSlice
+      let h := hashLeafGroup startChunk data isRoot key
+      if !ctEq h expected then
+        throw .authenticationFailed
+      pure (data, obPos)
+    else
+      let groups := nextPow2 nLeaves
+      let mid := groups / 2
+      let midBytes := mid * leafBytes
+      let midLeaf := startLeaf + mid
+      let leftLen := min midBytes dataLen
+      let rightLen := dataLen - leftLen
+      let leftObLen := outboardLenFor leftLen
+      let rightObLen := outboardLenFor rightLen
+      let pairPos := obPos + leftObLen + rightObLen
+      if pairPos + 64 > outboard.size then
+        throw .truncatedResponse
+      let leftH := outboard.extract pairPos (pairPos + 32)
+      let rightH := outboard.extract (pairPos + 32) (pairPos + 64)
+      let parentH := keyedParentCV leftH rightH isRoot key
+      if !ctEq parentH expected then
+        throw .authenticationFailed
+      let (lQ, rQ) := query.split startLeaf midLeaf
+      let (leftSlice, _) ←
+        verifyOutboardSliceRecAt startLeaf bare dataOff leftLen false lQ key leftH
+          outboard obPos
+      let (rightSlice, _) ←
+        verifyOutboardSliceRecAt midLeaf bare (dataOff + leftLen) rightLen false rQ
+          key rightH outboard (obPos + leftObLen)
+      pure (appendBA leftSlice rightSlice, pairPos + 64)
+
+/-- Back-compat wrapper: whole bare buffer as data region. -/
+partial def verifyOutboardSliceRec (startLeaf : Nat) (data : ByteArray) (isRoot : Bool)
+    (query : LeafQuery) (key expected : ByteArray) (outboard : ByteArray) (obPos : Nat) :
+    Except BaoError (ByteArray × Nat) :=
+  verifyOutboardSliceRecAt startLeaf data 0 data.size isRoot query key expected outboard obPos
+
+/--
+  Verified read of `count` contiguous 4 KiB slices at `index` from bare main +
+  post-order outboard.
+
+  * `count = 0` → empty success **immediately** (no root/geometry/OOB/auth checks) —
+    matches Rust `verify_slice_outboard` / `stream/slice.rs` extract semantics.
+  * When `count > 0`: wrong root / tampered outboard / tampered slice →
+    `authenticationFailed`; OOB index → `invalidSliceIndex`; outboard length
+    mismatch → `truncatedResponse` / `trailingData`.
+-/
+def verifySliceOutboard (key root bare outboard : ByteArray) (index count : Nat) :
+    Except BaoError ByteArray := do
+  if count == 0 then
+    -- Match Rust `verify_slice_outboard`: empty success before any geometry/auth.
+    return ByteArray.empty
+  if root.size != outLen then
+    throw .invalidRootLength
+  if bare.size == 0 then
+    throw .invalidSliceIndex
+  let expectObLen := outboardLenFor bare.size
+  if outboard.size < expectObLen then
+    throw .truncatedResponse
+  if outboard.size > expectObLen then
+    throw .trailingData
+  let sliceStart := index * leafBytes
+  if sliceStart ≥ bare.size then
+    throw .invalidSliceIndex
+  let sliceEnd := min bare.size (sliceStart + count * leafBytes)
+  let expectLen := sliceEnd - sliceStart
+  let (slice, _) ←
+    verifyOutboardSliceRecAt 0 bare 0 bare.size true (sliceLeafQuery index count) key
+      root outboard 0
+  -- Fail-closed if range walk under-produced (regression guard; W4 review #5).
+  if slice.size != expectLen then
+    throw .authenticationFailed
+  pure slice
 
 /-- Root equals keyed_hash (determinism / multi-dimensional naming basis). -/
 theorem root_eq_keyed_hash (key data : ByteArray) :

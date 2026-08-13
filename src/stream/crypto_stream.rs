@@ -95,6 +95,30 @@ pub fn stream_encrypt_with_nonce_seek<R: Read, W: Write + Seek>(
     stream_encrypt_with_nonce(master_key, nonce, input, output)
 }
 
+/// Low-level path with caller-supplied nonce: output `[nonce(16) | tag(64) | ct]`.
+///
+/// Used by deterministic fixture generators (G9) and by [`stream_encrypt`] after drawing
+/// a random nonce. Production callers should prefer [`stream_encrypt`] (CSPRNG nonce).
+///
+/// **Safety:** AES-CTR requires the nonce to be unique per `(master_key, operation)`.
+/// Reuse under the same master is catastrophic (keystream reuse). Fixed nonces are for
+/// tests/determinism only — see AGENTS.md §2.1.4.
+pub fn stream_encrypt_embedded_with_nonce<R: Read, W: Write + Seek>(
+    master_key: &[u8],
+    nonce: [u8; 16],
+    input: R,
+    output: &mut W,
+) -> Result<u64, CarbonadoError> {
+    output
+        .write_all(&nonce)
+        .map_err(CarbonadoError::StdIoError)?;
+    let tag_offset = output
+        .stream_position()
+        .map_err(CarbonadoError::StdIoError)?;
+    let inner = stream_encrypt_with_nonce_at(master_key, nonce, input, output, tag_offset)?;
+    Ok(NONCE_LEN as u64 + inner)
+}
+
 /// Low-level path: random nonce embedded in output `[nonce(16) | tag(64) | ct]`.
 pub fn stream_encrypt<R: Read, W: Write + Seek>(
     master_key: &[u8],
@@ -103,14 +127,8 @@ pub fn stream_encrypt<R: Read, W: Write + Seek>(
 ) -> Result<(u64, [u8; 16]), CarbonadoError> {
     let mut nonce = [0u8; 16];
     getrandom::getrandom(&mut nonce).map_err(|_| CarbonadoError::RandomnessError)?;
-    output
-        .write_all(&nonce)
-        .map_err(CarbonadoError::StdIoError)?;
-    let tag_offset = output
-        .stream_position()
-        .map_err(CarbonadoError::StdIoError)?;
-    let inner = stream_encrypt_with_nonce_at(master_key, nonce, input, output, tag_offset)?;
-    Ok((NONCE_LEN as u64 + inner, nonce))
+    let len = stream_encrypt_embedded_with_nonce(master_key, nonce, input, output)?;
+    Ok((len, nonce))
 }
 
 /// Header-path encrypt with tag placeholder at `tag_offset` (not necessarily 0).

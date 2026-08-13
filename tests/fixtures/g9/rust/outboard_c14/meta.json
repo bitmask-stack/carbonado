@@ -1,0 +1,13 @@
+{
+  "layout": "outboard",
+  "engine": "rust",
+  "format": 14,
+  "hash_hex": "0abe578176945b6a8e823cd2af95f5c7ae58fe055d3b6a20d6aae512b555bdcf",
+  "padding_len": 16349,
+  "header_path": false,
+  "has_verification_outboard": true,
+  "has_fec_parity": true,
+  "has_header": false,
+  "plaintext_id": "g9_matrix_v1",
+  "encrypted": false
+}

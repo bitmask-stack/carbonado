@@ -1,6 +1,8 @@
 //! Serial FEC encode path (`fec.rs` `rs.encode` branch) when `parallel` is disabled.
 //!
-//! CI runs this via `cargo test --no-default-features --features "pqc,ots,cli" --test serial_fec_path`.
+//! CI / `just test-serial`:
+//! `cargo test --no-default-features --features "backend-rust,pqc,ots,cli" --test serial_fec_path`
+//! (must name `backend-rust` under `--no-default-features`; never `--all-features`).
 
 #![cfg(not(feature = "parallel"))]
 

@@ -20,6 +20,7 @@ import Carbonado.Scrub
 import Carbonado.Shard
 import Carbonado.Fec.Inboard
 import Carbonado.Bao.Product
+import Carbonado.Ffi
 import CarbonadoTest.Scaffold
 
 namespace CarbonadoTest.Pipeline
@@ -34,6 +35,7 @@ open Carbonado.Scrub
 open Carbonado.Shard
 open Carbonado.Fec.Inboard
 open Carbonado.Bao.Product
+open Carbonado.Ffi
 
 private def master42 : ByteArray := replicate 32 0x42
 private def nonce11 : ByteArray := replicate 16 0x11
@@ -301,7 +303,7 @@ theorem truncated_body_path :
     (match encodeHeadered master42 nonce11 (utf8 "hello") (FormatBits.ofUInt8 0) 0
         zeroSlhPk zeroMeta with
      | .error _ => false
-     | .ok (_h, arch) =>
+     | .ok (_h, arch, _info) =>
        if arch.size ≤ headerLen + 1 then false
        else
          match decodeHeadered master42 (arch.extract 0 (headerLen + 1)) with
@@ -314,7 +316,7 @@ theorem trailer_ignored_c0 :
     (match encodeHeadered master42 nonce11 (utf8 "hello") (FormatBits.ofUInt8 0) 0
         zeroSlhPk zeroMeta with
      | .error _ => false
-     | .ok (_h, arch) =>
+     | .ok (_h, arch, _info) =>
        match decodeHeadered master42 (appendBA arch (ofList [0xaa, 0xbb])) with
        | .ok pt => ctEq pt (utf8 "hello")
        | .error _ => false) = true := by
@@ -406,5 +408,32 @@ theorem insufficient_nonces_path :
 theorem c15_odd : formatC15.toUInt8 % 2 = 1 := by native_decide
 
 theorem c14_even : formatC14.toUInt8 % 2 = 0 := by native_decide
+
+/-! ## R2 headered FFI: wrong-length SLH/meta fail-closed (encodeHeaderedBytes)
+
+  C ABI is length-implicit (null → empty BA; non-null always copies fixed 32/8).
+  Wrong sizes are only expressible on the Lean pure/export ByteArray surface.
+-/
+
+/-- SLH pk size ∉ {0, 32} → errInvalidArgument (before encode). -/
+theorem encode_headered_bytes_bad_slh_len :
+    (match encodeHeaderedBytes master42 nonce11 (utf8 "x") (replicate 16 0) ByteArray.empty 0 with
+     | .error e => e == errInvalidArgument
+     | .ok _ => false) = true := by
+  native_decide
+
+/-- Metadata size ∉ {0, 8} → errInvalidArgument (before encode). -/
+theorem encode_headered_bytes_bad_meta_len :
+    (match encodeHeaderedBytes master42 nonce11 (utf8 "x") ByteArray.empty (replicate 4 0) 0 with
+     | .error e => e == errInvalidArgument
+     | .ok _ => false) = true := by
+  native_decide
+
+/-- Empty SLH + empty meta accepted (zeros on wire) — control for length gates. -/
+theorem encode_headered_bytes_empty_slh_meta_ok :
+    (match encodeHeaderedBytes master42 nonce11 (utf8 "x") ByteArray.empty ByteArray.empty 0 with
+     | .ok _ => true
+     | .error _ => false) = true := by
+  native_decide
 
 end CarbonadoTest.Pipeline

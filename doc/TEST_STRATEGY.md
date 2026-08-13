@@ -132,10 +132,16 @@ Carbonado uses **reed-solomon-erasure 4/8**: any **4 of 8** shards reconstruct t
 ## Running tests
 
 ```bash
-# Full native gate (serial FEC path + full matrix)
-cargo test --features "pqc,ots,cli"
-cargo test --all-features
-cargo clippy --all-targets --all-features -- -D warnings
+# Full native gate (default + serial FEC + optional features)
+# Never --all-features: enables both backend-rust and backend-lean → compile_error!.
+cargo test
+cargo test --no-default-features --features "backend-rust,pqc,ots,cli" --test serial_fec_path
+cargo test --features "async,async-tokio,man-gen"
+cargo clippy --all-targets --features "async,async-tokio,man-gen" -- -D warnings
+
+# Dual-backend lean freeze (G11 + R7 G8 full): just test-lean-ci
+# = unfiltered cargo test --no-default-features --features "backend-lean,pqc,ots,cli"
+# Feature-gated async/parallel suites are 0 tests under this feature set (not dual residual).
 
 # FEC-focused
 cargo test --test fec_chaos --test fec_scrub_matrix --test shard_fec_scrub
@@ -154,9 +160,9 @@ cargo test --features async-tokio --test streaming_async
 cargo test --test parallel_determinism
 
 # Serial FEC path without `parallel` (exercises fec.rs rs.encode branch)
-cargo test --no-default-features --features "pqc,ots,cli" --test serial_fec_path
+cargo test --no-default-features --features "backend-rust,pqc,ots,cli" --test serial_fec_path
 
-# WASM lint (no pqc)
+# WASM lint (backend-rust only, no pqc)
 just lint-wasm
 ```
 
@@ -165,7 +171,9 @@ just lint-wasm
 - Keep chaos tests on native Linux (may be slow at 256 KiB × 4 public levels)
 - Shard FEC scrub tests parallel-safe (unique temp dirs per test)
 - **Default gate:** `cargo test` (includes `parallel` and `parallel_determinism`)
-- **Serial FEC gate:** `cargo test --no-default-features --features "pqc,ots,cli" --test serial_fec_path` — must run before or alongside `--all-features`
+- **Serial FEC gate:** `cargo test --no-default-features --features "backend-rust,pqc,ots,cli" --test serial_fec_path` — must name `backend-rust` under `--no-default-features`
+- **Optional rust matrix:** `cargo test --features "async,async-tokio,man-gen"` (never `--all-features`)
 - **Phase 3 determinism:** covered by default `cargo test --test parallel_determinism` (RS parity vs `encode_rs_parity_serial`, c12/c14 bytes + Bao root, scrub roundtrip)
-- **WASM `parallel`:** compile-only in `test-matrix` (`cargo check --target wasm32-unknown-unknown --all-features`); runtime serial fallback documented in `STREAMING_PARALLELISM.md` § Phase 3 WASM
+- **WASM `parallel`:** compile-only in `test-matrix` (`cargo check --target wasm32-unknown-unknown --features "async,async-tokio,man-gen"` and no-pqc `backend-rust` only); runtime serial fallback documented in `STREAMING_PARALLELISM.md` § Phase 3 WASM
+- **Lean dual freeze (G11 + R7 G8 full closed):** job `dual-backend-lean` / `just test-lean-ci` = unfiltered full lean suite; `streaming_async` needs `async`, `parallel_determinism` needs `parallel` (not in dual feature set)
 - Proptest cases capped at 32 for `fec_chaos` (raise when stable)

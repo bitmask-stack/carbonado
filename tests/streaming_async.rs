@@ -1,4 +1,8 @@
 //! Async streaming decode parity tests (Phase 2). Requires `--features async`.
+//!
+//! **R10:** Dual freeze (`just test-lean-ci`) never enables `async` → this file is 0 tests under
+//! freeze (permanent). Optional dual smoke: lean features + `async`/`async-tokio` +
+//! `CARBONADO_LEAN_LIB` — `stream_decode_async` is dual-aware via R5 E1 `stream_decode`.
 
 #![cfg(feature = "async")]
 
@@ -207,7 +211,10 @@ async fn stream_decode_async_truncated_bounded_body_staging_errors_c4_c8() {
     }
 }
 
-/// Verification c12: spool staging fails before Bao; sync fails at Bao (`BaoResponseTruncated`).
+/// Verification c12 truncated body: async always fails at spool staging
+/// (`truncated encoded body`). Sync taxonomy is engine-dependent (R10):
+/// - `backend-rust`: incremental Bao → `BaoResponseTruncated` (divergence from async).
+/// - `backend-lean`: R5 E1 spool `read_exact` → `UnexpectedEof` (both paths fail before Bao).
 #[tokio::test]
 async fn stream_decode_async_truncated_bounded_verification_diverges_from_sync_c12() {
     let input: Vec<u8> = (0..8192).map(|i| (i % 251) as u8).collect();
@@ -226,9 +233,18 @@ async fn stream_decode_async_truncated_bounded_verification_diverges_from_sync_c
         &mut sync_out,
     )
     .expect_err("sync truncated bounded c12");
+    #[cfg(feature = "backend-rust")]
     assert!(
         matches!(err_sync, CarbonadoError::BaoResponseTruncated(_)),
-        "sync must yield BaoResponseTruncated, got {err_sync:?}"
+        "sync rust must yield BaoResponseTruncated, got {err_sync:?}"
+    );
+    #[cfg(feature = "backend-lean")]
+    assert!(
+        matches!(
+            err_sync,
+            CarbonadoError::StdIoError(ref e) if e.kind() == ErrorKind::UnexpectedEof
+        ),
+        "sync lean E1 must yield UnexpectedEof on short body, got {err_sync:?}"
     );
     assert!(sync_out.is_empty());
 
@@ -403,7 +419,8 @@ async fn stream_decode_async_short_bao_body_invalid_header_length() {
     assert!(out.is_empty());
 }
 
-/// `async-tokio` compiles the `spawn_blocking` offload path (exercised under `--all-features` CI).
+/// `async-tokio` compiles the `spawn_blocking` offload path (desktop optional matrix:
+/// `cargo test --features "async,async-tokio,man-gen"`; never `--all-features`).
 #[cfg(feature = "async-tokio")]
 #[test]
 fn async_tokio_spawn_blocking_path_enabled() {

@@ -197,7 +197,12 @@ fn run_key_command(command: KeyCommands) -> Result<(), Box<dyn std::error::Error
             println!("{mnemonic}");
         }
         KeyCommands::Path => {
-            println!("{}", key_store::mnemonic_path().display());
+            println!(
+                "{}",
+                key_store::mnemonic_path()
+                    .map_err(cli_string_err)?
+                    .display()
+            );
         }
     }
     Ok(())

@@ -82,7 +82,7 @@ def encodeShards (master plaintext : ByteArray) (format : FormatBits)
             let seg := segments[i]!
             match encodeHeadered master nonce seg format (UInt32.ofNat i) slhPublicKey metadata with
             | .error e => err := some e
-            | .ok (hdr, archive) =>
+            | .ok (hdr, archive, _info) =>
               out := out.push {
                 chunkIndex := UInt32.ofNat i
                 header := hdr

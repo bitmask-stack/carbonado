@@ -17,6 +17,7 @@ import Carbonado.Scrub
 import Carbonado.Shard
 import Carbonado.Adamantine
 import Carbonado.Filepack
+import Carbonado.RkyvFilepack
 import Carbonado.Outboard
 import Carbonado.Directory
 import Carbonado.Cli

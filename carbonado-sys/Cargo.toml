@@ -8,4 +8,9 @@ publish = false
 
 [dependencies]
 
+# When enabled (by carbonado `backend-lean`), fail the build if CARBONADO_LEAN_LIB is unset
+# or does not contain libcarbonado shared/static artifacts.
+[features]
+require-lib = []
+
 [build-dependencies]

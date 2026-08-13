@@ -17,21 +17,14 @@ include = ["src/**/*", "LICENSE", "README.md", "doc/man/*.1", "doc/man/README.md
 # All Bao logic now uses the local keyed fork for 4KB chunk groups + format-keyed roots.
 bao = "0.13"
 
-# Local keyed fork (SurmountSystems/bao-tree) — default 4KB groups (BlockSize::from_chunk_log(2))
-# via BAO_BLOCK_SIZE. Keyed mode makes root = keyed_hash(key_from_format, data) so the
-# Bao hash commits to the exact format pipeline chosen (multi-dimensional naming).
-# See AGENTS.md and constants::BAO_BLOCK_SIZE.
-# Temporary until upstreamed to n0-computer/bao-tree.
-# To fetch the fork (for agents):
-#   git clone -b 76-keyed-bao git@github.com:SurmountSystems/bao-tree.git ../bao-tree
-#   (or: git clone -b 76-keyed-bao https://github.com/SurmountSystems/bao-tree.git ../bao-tree)
-# Keyed fork (SurmountSystems/bao-tree branch 76-keyed-bao). Git dep supports `cargo install`
-# from crates.io and `cargo install --path .` without a sibling checkout.
-# For faster local iteration, copy `.cargo/config.toml.example` → `.cargo/config.toml`
-# after `just setup-bao-tree` to patch in `../bao-tree`.
-# We set default-features = false because the fork's defaults pull in tokio/fs/etc
-# which are not needed (we only use sync keyed) and break some cross/wasm targets.
-bao_tree = { package = "bao-tree", git = "https://github.com/SurmountSystems/bao-tree.git", branch = "76-keyed-bao", default-features = false, features = ["validate"] }
+# Keyed Bao from n0-computer/bao-tree PR 78 (rklaehn `keyed-bao`, builds on #77).
+# Default 4KB groups (BlockSize::from_chunk_log(2)) via BAO_BLOCK_SIZE. Keyed mode
+# makes root = keyed_hash(key_from_format, data) so the Bao hash commits to the
+# exact format pipeline (multi-dimensional naming). See AGENTS.md and
+# constants::BAO_BLOCK_SIZE.
+# default-features = false: crate defaults pull in tokio/fs and break some
+# cross/wasm targets. We only need sync keyed + validate.
+bao_tree = { package = "bao-tree", git = "https://github.com/n0-computer/bao-tree.git", branch = "keyed-bao", default-features = false, features = ["validate"] }
 futures-lite = { version = "2", optional = true, default-features = false, features = ["std"] }
 tokio = { version = "1", features = ["rt"], optional = true }
 bitmask-enum = "2.1.0"
@@ -91,7 +84,8 @@ default = ["backend-rust", "pqc", "ots", "cli", "parallel"]
 # Pure Rust implementation (default engine).
 backend-rust = []
 # Lean AOT engine via carbonado-sys / libcarbonado (G8). Requires CARBONADO_LEAN_LIB.
-backend-lean = ["dep:carbonado-sys"]
+# `require-lib` fail-closes the build when the AOT shared library is missing.
+backend-lean = ["dep:carbonado-sys", "carbonado-sys/require-lib"]
 pqc = ["dep:bitcoinpqc"]
 # OpenTimestamps stub stamping (offline/testable; no network calendar in default build).
 ots = []

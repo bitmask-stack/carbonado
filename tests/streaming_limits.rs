@@ -443,6 +443,60 @@ fn stream_decode_encrypted_bounded_read_matches_buffer_path_c15() {
     assert_stream_decode_parity(&enc_master, 15, &input, Some(512));
 }
 
+/// W1a / M1: invalid `header_mac` fails before body I/O under both backends.
+///
+/// Uses a huge unauthenticated `encoded_len` so a MAC-after-body path would attempt
+/// a multi-MiB read. A `Read` that panics on body bytes proves fail-closed order.
+#[test]
+fn decode_stream_rejects_bad_header_mac_before_body_read() {
+    use std::io::{self, Read};
+
+    /// First `Header::LEN` bytes are the forged header; any further read panics.
+    struct HeaderOnlyThenPanic {
+        header: Cursor<Vec<u8>>,
+        body_reads: u64,
+    }
+
+    impl Read for HeaderOnlyThenPanic {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = self.header.read(buf)?;
+            if n > 0 {
+                return Ok(n);
+            }
+            self.body_reads += 1;
+            panic!(
+                "body read attempted after invalid header_mac (body_reads={})",
+                self.body_reads
+            );
+        }
+    }
+
+    let mut archive = encode(&[0u8; 32], b"mac-before-body", 14, None)
+        .expect("encode public c14")
+        .0;
+    assert!(archive.len() > Header::LEN);
+    // Flip a header_mac byte (bytes 28..92 of the 177-byte header).
+    archive[40] ^= 0xFF;
+    // Claim a large body so MAC-after-body would be expensive / force body read.
+    // encoded_len is at offset 12+16+64+32+32+1+4 = 161 (u32 LE).
+    let huge = (16 * 1024 * 1024u32).to_le_bytes();
+    archive[161..165].copy_from_slice(&huge);
+
+    let mut reader = HeaderOnlyThenPanic {
+        header: Cursor::new(archive[..Header::LEN].to_vec()),
+        body_reads: 0,
+    };
+    let mut out = Vec::new();
+    let err =
+        decode_stream(&[0u8; 32], &mut reader, &mut out).expect_err("bad header_mac must fail");
+    assert!(
+        matches!(err, CarbonadoError::AuthenticationFailed),
+        "expected AuthenticationFailed before body read, got {err:?}"
+    );
+    assert!(out.is_empty());
+    assert_eq!(reader.body_reads, 0, "must not touch body after bad MAC");
+}
+
 /// Header-path encode_stream / decode_stream roundtrip without intermediate body staging.
 #[test]
 fn encode_stream_decode_stream_roundtrip_c14_c15() {
