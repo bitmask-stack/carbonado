@@ -1053,6 +1053,9 @@ def runDemo : IO Unit := do
   | .ok ct =>
     expectTrue "zstd hello magic" (hasZstdMagic ct)
     expectHex "zstd hello level20" ct "28b52ffd200529000068656c6c6f"
+    match parseZstdFrameHeader ct with
+    | .error e => fail s!"zstd hello frame header: {repr e}"
+    | .ok h => expectTrue "zstd hello product buffer frame" (productBufferSmallFrameOk h 5)
     match decompress ct with
     | .error e => fail s!"zstd decompress hello: {repr e}"
     | .ok pt => expectTrue "zstd hello roundtrip" (ctEq pt hello)
@@ -1061,9 +1064,22 @@ def runDemo : IO Unit := do
   | .error e => fail s!"zstd empty compress: {repr e}"
   | .ok ct =>
     expectHex "zstd empty level20" ct "28b52ffd2000010000"
+    match parseZstdFrameHeader ct with
+    | .error e => fail s!"zstd empty frame header: {repr e}"
+    | .ok h => expectTrue "zstd empty product buffer frame" (productBufferSmallFrameOk h 0)
     match decompress ct with
     | .error e => fail s!"zstd empty decompress: {repr e}"
     | .ok pt => expectTrue "zstd empty roundtrip" (ctEq pt ByteArray.empty)
+  -- Committed G9 c14 prefixes (W2a residual is descriptor 0x20 vs 0x00; not a bitstream proof)
+  match parseZstdFrameHeader (ofList g9LeanC14Header) with
+  | .error e => fail s!"g9 lean c14 header: {repr e}"
+  | .ok h => expectTrue "g9 lean c14 buffer frame" (productBufferSmallFrameOk h 26)
+  match parseZstdFrameHeader (ofList g9RustC14Header) with
+  | .error e => fail s!"g9 rust c14 header: {repr e}"
+  | .ok h => expectTrue "g9 rust c14 stream frame" (productStreamUnknownSizeFrameOk h)
+  expectTrue "zstd checksum flag off" (!zstdContentChecksum)
+  expectTrue "zstd dict id flag none" (zstdDictionaryIdFlag == 0)
+  expectTrue "zstd level20 windowLog large" (zstdLevel20WindowLogLarge == 25)
   -- Corrupt frame → decompressionFailed (not lumped)
   match decompress (ofList [0x00, 0x01, 0x02, 0x03]) with
   | .error .decompressionFailed => pure ()
@@ -1087,6 +1103,7 @@ def runDemo : IO Unit := do
     | .error e => fail s!"zstd zeros dec: {repr e}"
     | .ok pt => expectTrue "zstd zeros roundtrip" (ctEq pt zeros)
   IO.println "zstd goldens + roundtrip + error paths ok"
+  IO.println "zstd frame header params ok"
 
   -- Pipeline c2 (compression only) roundtrip under AOT zstd
   match roundtripBody master42 nonce11 hello (FormatBits.ofUInt8 2) with

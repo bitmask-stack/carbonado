@@ -2,7 +2,7 @@
 
 **Policy:** product Lean under `Carbonado/` and `CarbonadoTest/` must contain **no** proof holes.
 
-**Dual-backend:** Lean theorems prove properties of the Lean engine and wire model. **Bit-match / behavioral parity** with production is additionally enforced by the Rust suite on `backend-lean` (G8) and `ref/` oracles ([PARITY.md](./PARITY.md)). Proofs do **not** replace `tests/`; they complement them.
+Lean theorems prove properties of the Lean wire model. **Bit-match / behavioral contract** for the production library is the Rust suite (`tests/`) plus `ref/` oracles ([PARITY.md](./PARITY.md)). Proofs do **not** replace `tests/`; they complement them. There is no Cargo Lean backend and no G8 C-ABI parity claim.
 
 **Hole vocabulary (forbidden):** `sorry`, `admit` (Lean alias for `sorry`).  
 Enforced by `nix build .#checks.x86_64-linux.no-sorry` / `nix flake check` (and explicit check builds). The gate fails closed if those directories or their `*.lean` roots are missing.
@@ -24,14 +24,14 @@ Enforced by `nix build .#checks.x86_64-linux.no-sorry` / `nix flake check` (and 
 | `Carbonado/Stream.lean` | `full_stripe_inboard_len`, `full_stripe_retain`, `empty_stripe_retain`, `one_byte_stripe_retain`, `chunk_eq_slice`, `stripe_eq_k_slices` |
 | `Carbonado/Scrub.lean` | Pure RS mask search + Bao root oracle (AOT + CarbonadoTest) |
 | `Carbonado/Shard.lean` | `split_empty_budget`, `split_hello_budget_2`, `split_empty_plaintext` |
-| `Carbonado/Compress.lean` | `zstdMagic_length`; `ofStatus_*`; `decode_status_*` for every status code; `statusOk_payload_identity` (pure framing helper; not an `@[extern]` decide) |
+| `Carbonado/Compress.lean` | `zstdMagic_length`; `ofStatus_*`; `decode_status_*` for every status code; `statusOk_payload_identity` (pure framing helper; not an `@[extern]` decide). **Frame header (2026-08-24):** RFC descriptor/window/FCS parse; product flags (level 20, checksum off, no dict, reserved/unused 0); AOT small-frame descriptor `0x20`; streaming unknown-size descriptor `0x00` + windowLog 25; hello/empty/G9 prefix parse theorems. Not a full bitstream proof (W2a). |
 | `Carbonado/Slh.lean` | Wire: `parse_short_length`, `parse_empty`, `build_bad_sig_len`, `slh1_magic_bytes`, **`parse_magic_bad` / `zeros_not_slh1_magic` / `parse_bad_magic_when_exact`** (`badSlhMagic` path). Binding: `bind_bad_{pk,root,sig}`, **`wrong_root_fails`**, `sign_unavailable`, `sign_bad_root`. Full 7856 B wire: AOT Main |
 | `CarbonadoTest/Scaffold.lean` | Re-exports / restates wire invariants |
 | `CarbonadoTest/EtM.lean` | Re-exports MAC + guard theorems; **`native_decide` matrix** for crypto goldens |
 | `CarbonadoTest/Fec.lean` | Geometry + RS; all 7 `FecError` paths |
 | `CarbonadoTest/Bao.lean` | Geometry; BLAKE3; stream slice; **exact** every `BaoError` |
 | `CarbonadoTest/Pipeline.lean` | Non-compression format matrix + path tests; **exact maps** incl. `ofZstdError` → `zstdInvalidInput` |
-| `CarbonadoTest/Compress.lean` | Every `ZstdError` status map; bit-clear compress/decompress; pipeline maps |
+| `CarbonadoTest/Compress.lean` | Every `ZstdError` status map; bit-clear compress/decompress; pipeline maps; restates frame-header product theorems (hello/empty/G9 prefixes, reserved/magic reject) |
 | `CarbonadoTest/Slh.lean` | Short-path every `SlhError` **except** full-length AOT-only wire (length/magic/sig/pk/root/unavailable/verification via prefix+gate theorems; full 7860 B `badSlhMagic` + roundtrip in Main) |
 | `Carbonado/Adamantine.lean` | `adamantineMagic_*`, `adamantineHeaderLen_eq`; encode/decode empty public; `invalid_flags_bit1`; `invalid_fmt_c0`; `short_header`; `dev_v2_rejected` |
 | `Carbonado/Filepack.lean` | `cfp2Magic_length`; path: `rel_empty`, `rel_traversal`, `rel_absolute`, `rel_backslash`, `rel_ok`, `rel_empty_component` |

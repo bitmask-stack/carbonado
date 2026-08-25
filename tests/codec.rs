@@ -1,5 +1,5 @@
 use std::{
-    fs::{read, OpenOptions},
+    fs::{OpenOptions, read},
     io::Write,
     path::PathBuf,
 };
@@ -11,7 +11,7 @@ use carbonado::{
     constants::Format, decode, encode, error::CarbonadoError, extract_slice, file::Header, scrub,
     structs::Encoded, verify_slice,
 };
-use common::corruption::{scattered_stream_knockout, InboardShardLayout};
+use common::corruption::{InboardShardLayout, scattered_stream_knockout};
 use log::{debug, info};
 use rand::{Rng, RngCore};
 use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};

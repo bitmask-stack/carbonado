@@ -314,24 +314,24 @@ fn outboard_and_keyed_c_number() -> Result<()> {
     assert!(matches!(err_z, CarbonadoError::MissingFecParity));
 
     // tampered sidecar (flip byte in a real ob if present) -> verification error (strict)
-    if let Some(mut good_ob) = o4.verification_outboard.clone() {
-        if !good_ob.is_empty() {
-            good_ob[0] ^= 0xff;
-            let err_verify = decode_outboard(
-                &PUBLIC_MASTER,
-                o4.hash.as_bytes(),
-                &o4.main,
-                Some(good_ob.as_slice()),
-                None,
-                o4.info.padding_len,
-                4,
-            )
-            .unwrap_err();
-            assert!(matches!(
-                err_verify,
-                CarbonadoError::OutboardVerificationFailed(_)
-            ));
-        }
+    if let Some(mut good_ob) = o4.verification_outboard.clone()
+        && !good_ob.is_empty()
+    {
+        good_ob[0] ^= 0xff;
+        let err_verify = decode_outboard(
+            &PUBLIC_MASTER,
+            o4.hash.as_bytes(),
+            &o4.main,
+            Some(good_ob.as_slice()),
+            None,
+            o4.info.padding_len,
+            4,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err_verify,
+            CarbonadoError::OutboardVerificationFailed(_)
+        ));
     }
 
     Ok(())

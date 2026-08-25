@@ -58,9 +58,6 @@
 
 ////////////////////////////////////////////////////////////////////////////////
 
-/// Dual-backend dispatch (`backend-rust` / `backend-lean`). See docs/TEST_CONTRACT.md.
-pub mod backend;
-
 /// For details on Carbonado formats and their uses, see the [Carbonado Format bitmask constant](constants::Format).
 pub mod constants;
 /// Symmetric cryptographic primitives for the v2 design.
@@ -97,13 +94,13 @@ pub mod filepack_manifest;
 pub mod ots;
 
 /// Deprecated: use [`filepack_manifest`] instead.
-#[deprecated(since = "2.1.0", note = "renamed to filepack_manifest")]
+#[deprecated(since = "0.7.0", note = "renamed to filepack_manifest")]
 #[allow(deprecated)]
 pub mod pack_index {
     pub use crate::filepack_manifest::*;
     pub use crate::{
-        PackEntry, PackIndex, PackSegmentRef, MAX_PACK_ENTRIES, PACK_INDEX_FORMAT_LEVEL,
-        PACK_INDEX_FORMAT_LEVEL_ENCRYPTED, PACK_INDEX_FORMAT_LEVEL_PUBLIC, PACK_INDEX_VERSION,
+        MAX_PACK_ENTRIES, PACK_INDEX_FORMAT_LEVEL, PACK_INDEX_FORMAT_LEVEL_ENCRYPTED,
+        PACK_INDEX_FORMAT_LEVEL_PUBLIC, PACK_INDEX_VERSION, PackEntry, PackIndex, PackSegmentRef,
     };
 }
 /// Clap schema for the `carbonado` binary (`cli` feature).
@@ -134,14 +131,14 @@ pub use decoding::scrub_outboard;
 #[doc(hidden)]
 pub use decoding::verify_inboard_keyed_oracle;
 
-pub use paths::{detect_archive_layout, ArchiveLayout};
+pub use paths::{ArchiveLayout, detect_archive_layout};
 #[cfg(feature = "async")]
 pub use stream::stream_decode_async;
 pub use stream::{
-    decode_shards_stream, encode_shard_stream, stream_decode, stream_decode_buffer,
-    stream_decode_outboard, stream_decode_outboard_buffer, stream_encode_buffer,
-    stream_encode_buffer_with_nonce, stream_encode_outboard_buffer, verify_slice_inboard_seekable,
-    verify_slice_outboard, ShardEncodeResult, ShardSource, DEFAULT_SEGMENT_PLAINTEXT_BUDGET,
+    DEFAULT_SEGMENT_PLAINTEXT_BUDGET, ShardEncodeResult, ShardSource, decode_shards_stream,
+    encode_shard_stream, stream_decode, stream_decode_buffer, stream_decode_outboard,
+    stream_decode_outboard_buffer, stream_encode_buffer, stream_encode_buffer_with_nonce,
+    stream_encode_outboard_buffer, verify_slice_inboard_seekable, verify_slice_outboard,
 };
 
 pub use bao;
@@ -149,71 +146,71 @@ pub use bao;
 pub use structs::OutboardEncoded;
 
 pub use filepack::{
-    pack_directory, parse_filepack_cbor, FilepackCborEntry, Packed, MAX_FILEPACK_CBOR_MANIFEST_LEN,
-    MAX_FILEPACK_PACKAGE_DEPTH,
+    FilepackCborEntry, MAX_FILEPACK_CBOR_MANIFEST_LEN, MAX_FILEPACK_PACKAGE_DEPTH, Packed,
+    pack_directory, parse_filepack_cbor,
 };
 
 pub use adamantine::{
-    decode_adamantine, encode_adamantine, AdamantineHeader, ADAMANTINE_CARBONADO_FMT_ENCRYPTED,
-    ADAMANTINE_CARBONADO_FMT_PUBLIC, ADAMANTINE_FLAG_REQUIRE_OTS, ADAMANTINE_HEADER_LEN,
-    ADAMANTINE_MAGIC,
+    ADAMANTINE_CARBONADO_FMT_ENCRYPTED, ADAMANTINE_CARBONADO_FMT_PUBLIC,
+    ADAMANTINE_FLAG_REQUIRE_OTS, ADAMANTINE_HEADER_LEN, ADAMANTINE_MAGIC, AdamantineHeader,
+    decode_adamantine, encode_adamantine,
 };
 pub use adamantine_payload::{
-    build_adamantine_payload, fec_slice_from_bundle, split_adamantine_payload,
-    verification_slice_from_bundle, MAX_ADAMANTINE_PAYLOAD_LEN, MAX_BAO_BUNDLE_LEN,
+    MAX_ADAMANTINE_PAYLOAD_LEN, MAX_BAO_BUNDLE_LEN, build_adamantine_payload,
+    fec_slice_from_bundle, split_adamantine_payload, verification_slice_from_bundle,
 };
 pub use directory::SegmentFormatPolicy;
 
 pub use filepack_manifest::{
-    expected_fec_parity_len, FilepackEntry, FilepackManifest, FilepackSegmentMap, SegmentRef,
     FILEPACK_MANIFEST_FORMAT_LEVEL, FILEPACK_MANIFEST_FORMAT_LEVEL_ENCRYPTED,
-    FILEPACK_MANIFEST_FORMAT_LEVEL_PUBLIC, FILEPACK_MANIFEST_VERSION,
-    MAX_FILEPACK_MANIFEST_ENTRIES, MAX_SEGMENT_MAIN_LEN,
+    FILEPACK_MANIFEST_FORMAT_LEVEL_PUBLIC, FILEPACK_MANIFEST_VERSION, FilepackEntry,
+    FilepackManifest, FilepackSegmentMap, MAX_FILEPACK_MANIFEST_ENTRIES, MAX_SEGMENT_MAIN_LEN,
+    SegmentRef, expected_fec_parity_len,
 };
 
 /// Deprecated: renamed to [`FilepackManifest`].
-#[deprecated(since = "2.1.0", note = "renamed to FilepackManifest")]
+#[deprecated(since = "0.7.0", note = "renamed to FilepackManifest")]
 pub type PackIndex = FilepackManifest;
 
 /// Deprecated: renamed to [`FilepackEntry`].
-#[deprecated(since = "2.1.0", note = "renamed to FilepackEntry")]
+#[deprecated(since = "0.7.0", note = "renamed to FilepackEntry")]
 pub type PackEntry = FilepackEntry;
 
 /// Deprecated: renamed to [`SegmentRef`].
-#[deprecated(since = "2.1.0", note = "renamed to SegmentRef")]
+#[deprecated(since = "0.7.0", note = "renamed to SegmentRef")]
 pub type PackSegmentRef = SegmentRef;
 
 /// Deprecated: renamed to [`FILEPACK_MANIFEST_VERSION`].
-#[deprecated(since = "2.1.0", note = "renamed to FILEPACK_MANIFEST_VERSION")]
+#[deprecated(since = "0.7.0", note = "renamed to FILEPACK_MANIFEST_VERSION")]
 pub const PACK_INDEX_VERSION: u32 = FILEPACK_MANIFEST_VERSION;
 
 /// Deprecated: renamed to [`FILEPACK_MANIFEST_FORMAT_LEVEL`].
-#[deprecated(since = "2.1.0", note = "renamed to FILEPACK_MANIFEST_FORMAT_LEVEL")]
+#[deprecated(since = "0.7.0", note = "renamed to FILEPACK_MANIFEST_FORMAT_LEVEL")]
 pub const PACK_INDEX_FORMAT_LEVEL: u8 = FILEPACK_MANIFEST_FORMAT_LEVEL;
 
 /// Deprecated: renamed to [`FILEPACK_MANIFEST_FORMAT_LEVEL_PUBLIC`].
 #[deprecated(
-    since = "2.1.0",
+    since = "0.7.0",
     note = "renamed to FILEPACK_MANIFEST_FORMAT_LEVEL_PUBLIC"
 )]
 pub const PACK_INDEX_FORMAT_LEVEL_PUBLIC: u8 = FILEPACK_MANIFEST_FORMAT_LEVEL_PUBLIC;
 
 /// Deprecated: renamed to [`FILEPACK_MANIFEST_FORMAT_LEVEL_ENCRYPTED`].
 #[deprecated(
-    since = "2.1.0",
+    since = "0.7.0",
     note = "renamed to FILEPACK_MANIFEST_FORMAT_LEVEL_ENCRYPTED"
 )]
 pub const PACK_INDEX_FORMAT_LEVEL_ENCRYPTED: u8 = FILEPACK_MANIFEST_FORMAT_LEVEL_ENCRYPTED;
 
 /// Deprecated: renamed to [`MAX_FILEPACK_MANIFEST_ENTRIES`].
-#[deprecated(since = "2.1.0", note = "renamed to MAX_FILEPACK_MANIFEST_ENTRIES")]
+#[deprecated(since = "0.7.0", note = "renamed to MAX_FILEPACK_MANIFEST_ENTRIES")]
 pub const MAX_PACK_ENTRIES: usize = MAX_FILEPACK_MANIFEST_ENTRIES;
 
 #[cfg(feature = "ots")]
-pub use ots::{stamp_bao_root, verify_stamp, OtsPolicy, OtsVerification};
+pub use ots::{OtsPolicy, OtsVerification, stamp_bao_root, verify_stamp};
 
 pub use file::{
-    decode_directory, encode_directory, encode_directory_with_options, DirectoryArchive,
-    DirectoryEncodeOptions, DIRECTORY_ARCHIVE_FORMAT, DIRECTORY_ARCHIVE_FORMAT_ENCRYPTED,
-    DIRECTORY_TEST_SEGMENT_BUDGET,
+    DIRECTORY_ARCHIVE_FORMAT, DIRECTORY_ARCHIVE_FORMAT_ENCRYPTED, DIRECTORY_TEST_SEGMENT_BUDGET,
+    DirectoryArchive, DirectoryEncodeOptions, decode_directory, encode_directory,
+    encode_directory_with_options,
 };

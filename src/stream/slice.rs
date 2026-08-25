@@ -3,13 +3,13 @@ use std::io::{Cursor, Read};
 #[cfg(feature = "backend-rust")]
 use bao_tree::io::{outboard::PostOrderMemOutboard, sync::keyed_valid_ranges};
 use bao_tree::{
+    BaoTree, ChunkNum, ChunkRanges,
     io::{
-        outboard::EmptyOutboard,
-        sync::{keyed_decode_ranges, ReadAt, WriteAt},
         DecodeError,
+        outboard::EmptyOutboard,
+        sync::{ReadAt, WriteAt, keyed_decode_ranges},
     },
     iter::BaoChunk,
-    BaoTree, ChunkNum, ChunkRanges,
 };
 
 use crate::{
@@ -183,7 +183,6 @@ pub fn verify_slice_inboard_seekable(
 /// Does not perform keyed hash checks; RS + re-bao oracle in scrub filters bad candidates.
 /// Returns [`CarbonadoError::BaoResponseTruncated`] if the response ends before the slice
 /// window is fully populated.
-#[cfg_attr(feature = "backend-lean", allow(dead_code))] // rust scrub path only
 pub(crate) fn extract_slice_inboard_for_scrub(
     input: &[u8],
     index: u32,
@@ -261,13 +260,8 @@ pub(crate) fn extract_slice_inboard_for_scrub(
 /// Verified read of `count` contiguous 4 KiB slices at `index` from bare data plus a
 /// post-order outboard sidecar.
 ///
-/// **Memory and time (backend-rust):** O(slice) — validates only the requested chunk
-/// ranges via `keyed_valid_ranges`, then reads the corresponding bare bytes.
-///
-/// **backend-lean (R9 / W4b permanent):** dispatches to `carbonado_verify_slice_outboard`
-/// (Lean range verify, O(slice+height) hash). The C ABI takes a full main buffer — when
-/// `data` is not already contiguous in process memory this path materializes `data_len`
-/// bytes once (honest LIMITS vs pure-Rust streaming `ReadAt`; no callback C ABI).
+/// **Memory and time:** O(slice) — validates only the requested chunk ranges via
+/// `keyed_valid_ranges`, then reads the corresponding bare bytes.
 pub fn verify_slice_outboard<D: ReadAt>(
     data: D,
     outboard_bytes: &[u8],
@@ -286,55 +280,34 @@ pub fn verify_slice_outboard<D: ReadAt>(
             content_len: data_len,
         });
     }
-    #[cfg(feature = "backend-lean")]
-    {
-        let len = usize::try_from(data_len).map_err(|_| {
-            CarbonadoError::OutboardVerificationFailed("data_len exceeds usize".into())
-        })?;
-        let mut buf = vec![0u8; len];
-        data.read_exact_at(0, &mut buf)
-            .map_err(map_valid_ranges_read_error)?;
-        crate::backend::lean::verify_slice_outboard(
-            &buf,
-            outboard_bytes,
-            data_len,
-            index,
-            count,
-            hash,
-            format,
-        )
+    let root = decode_bao_hash(hash)?;
+    let tree = BaoTree::new(data_len, BAO_BLOCK_SIZE);
+    let ob = PostOrderMemOutboard {
+        root,
+        tree,
+        data: outboard_bytes,
+    };
+    let key = carbonado_verification_key(format);
+    let ranges = slice_to_chunk_ranges(index, count);
+    // Cap expected chunks at content length (partial last leaf / short files).
+    let content_chunks = data_len.div_ceil(1024);
+    let expected_chunks = (u64::from(count) * CHUNKS_PER_SLICE)
+        .min(content_chunks.saturating_sub(u64::from(index) * CHUNKS_PER_SLICE));
+
+    let mut validated = ChunkRanges::empty();
+    for item in keyed_valid_ranges(&ob, &data, &ranges, &key) {
+        let range = item.map_err(map_valid_ranges_read_error)?;
+        validated |= ChunkRanges::from(range);
     }
-    #[cfg(feature = "backend-rust")]
-    {
-        let root = decode_bao_hash(hash)?;
-        let tree = BaoTree::new(data_len, BAO_BLOCK_SIZE);
-        let ob = PostOrderMemOutboard {
-            root,
-            tree,
-            data: outboard_bytes,
-        };
-        let key = carbonado_verification_key(format);
-        let ranges = slice_to_chunk_ranges(index, count);
-        // Cap expected chunks at content length (partial last leaf / short files).
-        let content_chunks = data_len.div_ceil(1024);
-        let expected_chunks = (u64::from(count) * CHUNKS_PER_SLICE)
-            .min(content_chunks.saturating_sub(u64::from(index) * CHUNKS_PER_SLICE));
-
-        let mut validated = ChunkRanges::empty();
-        for item in keyed_valid_ranges(&ob, &data, &ranges, &key) {
-            let range = item.map_err(map_valid_ranges_read_error)?;
-            validated |= ChunkRanges::from(range);
-        }
-        if chunk_count(&validated) < expected_chunks {
-            return Err(CarbonadoError::AuthenticationFailed);
-        }
-
-        let (slice_byte_start, _slice_byte_end, actual_len) =
-            slice_byte_range(index, count, data_len)?;
-
-        let mut out = vec![0u8; actual_len as usize];
-        data.read_exact_at(slice_byte_start, &mut out)
-            .map_err(map_valid_ranges_read_error)?;
-        Ok(out)
+    if chunk_count(&validated) < expected_chunks {
+        return Err(CarbonadoError::AuthenticationFailed);
     }
+
+    let (slice_byte_start, _slice_byte_end, actual_len) =
+        slice_byte_range(index, count, data_len)?;
+
+    let mut out = vec![0u8; actual_len as usize];
+    data.read_exact_at(slice_byte_start, &mut out)
+        .map_err(map_valid_ranges_read_error)?;
+    Ok(out)
 }

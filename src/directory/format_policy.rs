@@ -41,16 +41,16 @@ pub enum SegmentFormatPolicy {
     /// Force encrypted c15.
     ForceC15,
     /// Deprecated: use [`SegmentFormatPolicy::ForceC12`].
-    #[deprecated(since = "2.1.0", note = "directory segments are c12–c15; use ForceC12")]
+    #[deprecated(since = "0.7.0", note = "directory segments are c12–c15; use ForceC12")]
     ForceC4,
     /// Deprecated: use [`SegmentFormatPolicy::ForceC14`].
-    #[deprecated(since = "2.1.0", note = "directory segments are c12–c15; use ForceC14")]
+    #[deprecated(since = "0.7.0", note = "directory segments are c12–c15; use ForceC14")]
     ForceC6,
     /// Deprecated: use [`SegmentFormatPolicy::ForceC13`].
-    #[deprecated(since = "2.1.0", note = "directory segments are c12–c15; use ForceC13")]
+    #[deprecated(since = "0.7.0", note = "directory segments are c12–c15; use ForceC13")]
     ForceC5,
     /// Deprecated: use [`SegmentFormatPolicy::ForceC15`].
-    #[deprecated(since = "2.1.0", note = "directory segments are c12–c15; use ForceC15")]
+    #[deprecated(since = "0.7.0", note = "directory segments are c12–c15; use ForceC15")]
     ForceC7,
 }
 

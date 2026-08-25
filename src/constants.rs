@@ -11,12 +11,30 @@ pub const MAGICNO: &[u8; 12] = b"CARBONADO20\n";
 pub const SLICE_LEN: u32 = 4096;
 
 /// Default Bao tree block size for 4KB chunk groups (aligns with SSD/HDD sectors,
-/// reduces tree overhead, improves max segment size). Uses the local keyed bao-tree fork.
+/// reduces tree overhead, improves max segment size). Uses n0-computer/bao-tree keyed hashing.
 pub const BAO_BLOCK_SIZE: BlockSize = BlockSize::from_chunk_log(2);
 /// FEC data shards (k)
 pub const FEC_K: usize = 4;
 /// FEC total shards (m)
 pub const FEC_M: usize = 8;
+
+/// Normative zstd compression level (AGENTS / Lean `Carbonado.Compress.zstdLevel`).
+pub const ZSTD_LEVEL: i32 = 20;
+
+/// Zstandard frame magic, little-endian `0xFD2FB528`
+/// (Lean `zstdMagic`; `ref/zstd/doc/zstd_compression_format.md`).
+pub const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
+
+/// Product frames do not set `Content_Checksum_flag` (Lean `zstdContentChecksum`).
+pub const ZSTD_CONTENT_CHECKSUM: bool = false;
+
+/// Product frames do not emit a dictionary ID (Lean `zstdDictionaryIdFlag`).
+pub const ZSTD_DICTIONARY_ID_FLAG: u8 = 0;
+
+/// Level-20 `windowLog` from `ref/zstd` `ZSTD_defaultCParameters[0][20]`
+/// (srcSize > 256 KiB, and streaming `copy_encode` with unknown size).
+/// Lean `zstdLevel20WindowLogLarge`.
+pub const ZSTD_LEVEL20_WINDOW_LOG_LARGE: u32 = 25;
 
 /// ## Bitmask for Carbonado formats c0-c15
 ///

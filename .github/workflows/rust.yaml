@@ -4,14 +4,14 @@ on:
   - push
   - pull_request
 
-env:
-  CARGO_TERM_COLOR: always
-
-# bao-tree is a git dep (Cargo.toml: n0-computer/bao-tree branch keyed-bao).
+# bao-tree is a git dep (Cargo.toml: n0-computer/bao-tree rev = PR 78 merge SHA).
 # Checkout it *inside* GITHUB_WORKSPACE (`path: bao-tree`). actions/checkout
 # rejects anything outside the workspace, so `path: ../bao-tree` fails before rustc.
 # After checkout, append a CI-only [patch] so cargo uses that tree (do not commit
 # a machine-local path). Local optional sibling remains `just setup-bao-tree`.
+env:
+  CARGO_TERM_COLOR: always
+  BAO_TREE_REV: dbc952e32cbda8ffd14c106b770e72987b01618e
 
 jobs:
   lint:
@@ -20,11 +20,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout bao-tree keyed fork (in-workspace for path dep)
+      - name: Checkout bao-tree (PR 78 merge, in-workspace for path dep)
         uses: actions/checkout@v4
         with:
           repository: n0-computer/bao-tree
-          ref: keyed-bao
+          ref: ${{ env.BAO_TREE_REV }}
           path: bao-tree
           persist-credentials: false
 
@@ -33,14 +33,17 @@ jobs:
 
       - uses: extractions/setup-just@v2
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.0"
+          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
 
       - name: Format check
         run: just fmt
 
-      - name: Lint (native; backend-rust + optional features, never --all-features)
+      - name: Lint (native; backend-rust + optional features)
         run: just lint
 
   lint-wasm:
@@ -49,11 +52,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout bao-tree keyed fork (in-workspace for path dep)
+      - name: Checkout bao-tree (PR 78 merge, in-workspace for path dep)
         uses: actions/checkout@v4
         with:
           repository: n0-computer/bao-tree
-          ref: keyed-bao
+          ref: ${{ env.BAO_TREE_REV }}
           path: bao-tree
           persist-credentials: false
 
@@ -62,8 +65,10 @@ jobs:
 
       - uses: extractions/setup-just@v2
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.98.0"
+          components: rustfmt, clippy
           targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
@@ -78,11 +83,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout bao-tree keyed fork (in-workspace for path dep)
+      - name: Checkout bao-tree (PR 78 merge, in-workspace for path dep)
         uses: actions/checkout@v4
         with:
           repository: n0-computer/bao-tree
-          ref: keyed-bao
+          ref: ${{ env.BAO_TREE_REV }}
           path: bao-tree
           persist-credentials: false
 
@@ -91,7 +96,10 @@ jobs:
 
       - uses: extractions/setup-just@v2
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.0"
+          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
 
@@ -101,13 +109,11 @@ jobs:
           RUST_BACKTRACE: 1
 
       - name: Test (serial FEC path without parallel)
-        # Mutual exclusion: must name backend-rust under --no-default-features.
         run: cargo test --no-default-features --features "backend-rust,pqc,ots,cli" --test serial_fec_path
         env:
           RUST_BACKTRACE: 1
 
-      - name: Test (backend-rust + optional features; never --all-features)
-        # --all-features enables both backend-rust and backend-lean → compile_error!.
+      - name: Test (backend-rust + optional features)
         run: cargo test --features "async,async-tokio,man-gen"
         env:
           RUST_BACKTRACE: 1
@@ -139,25 +145,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout bao-tree keyed fork (in-workspace for path dep)
+      - name: Checkout bao-tree (PR 78 merge, in-workspace for path dep)
         uses: actions/checkout@v4
         with:
           repository: n0-computer/bao-tree
-          ref: keyed-bao
+          ref: ${{ env.BAO_TREE_REV }}
           path: bao-tree
           persist-credentials: false
 
       - name: Patch cargo to use workspace bao-tree
         uses: ./.github/actions/ci-patch-bao-tree
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.98.0"
+          components: rustfmt, clippy
           targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Check ${{ matrix.target }} (backend-rust + pqc/optional; never --all-features)
-        # --all-features enables both backends → compile_error!.
+      - name: Check ${{ matrix.target }} (backend-rust + pqc/optional)
         run: cargo check --target ${{ matrix.target }} --features "async,async-tokio,man-gen"
 
       - name: Check ${{ matrix.target }} (backend-rust only, no pqc)
@@ -173,19 +180,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout bao-tree keyed fork (in-workspace for path dep)
+      - name: Checkout bao-tree (PR 78 merge, in-workspace for path dep)
         uses: actions/checkout@v4
         with:
           repository: n0-computer/bao-tree
-          ref: keyed-bao
+          ref: ${{ env.BAO_TREE_REV }}
           path: bao-tree
           persist-credentials: false
 
       - name: Patch cargo to use workspace bao-tree
         uses: ./.github/actions/ci-patch-bao-tree
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.98.0"
+          components: rustfmt, clippy
           targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
@@ -193,36 +202,18 @@ jobs:
       - name: Check wasm32 (backend-rust only, no pqc)
         run: cargo check --target wasm32-unknown-unknown --no-default-features --features "backend-rust"
 
-  # Dual-backend Phase 5 / G11 + R7 G8 full close: Linux lean full dual suite freeze.
-  # Normative command: `just test-lean-ci` = unfiltered cargo test under lean features
-  # (builds libcarbonado via nix if needed; fail-closed if .so missing).
-  # backend-rust full suite remains the `desktop` job above — never regress.
-  dual-backend-lean:
+  # Lean proofs + AOT demo. No libcarbonado / carbonado-sys / Cargo backend-lean.
+  lean-proofs:
     runs-on: ubuntu-latest
     needs: lint
     timeout-minutes: 180
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Checkout bao-tree keyed fork (in-workspace for path dep)
-        uses: actions/checkout@v4
         with:
-          repository: n0-computer/bao-tree
-          ref: keyed-bao
-          path: bao-tree
-          persist-credentials: false
+          submodules: false
 
-      - name: Patch cargo to use workspace bao-tree
-        uses: ./.github/actions/ci-patch-bao-tree
-
-      - uses: extractions/setup-just@v2
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Free disk for nix + cargo
+      - name: Free disk for nix
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
           df -h
@@ -234,21 +225,10 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      - name: Build libcarbonado (Lean AOT)
-        run: nix build .#libcarbonado -o result-libcarbonado
-
-      - name: Fail-closed if libcarbonado missing
+      - name: Lean no-sorry + demo
         run: |
           set -euo pipefail
-          test -f result-libcarbonado/lib/libcarbonado.so
-          test -d result-libcarbonado/include
-          ls -la result-libcarbonado/lib/
-          ls -la result-libcarbonado/include/
-
-      - name: Dual-backend lean freeze matrix (just test-lean-ci)
-        run: just test-lean-ci
-        env:
-          RUST_BACKTRACE: 1
-          CARBONADO_LEAN_LIB: ${{ github.workspace }}/result-libcarbonado/lib
-          CARBONADO_LEAN_INCLUDE: ${{ github.workspace }}/result-libcarbonado/include
-          LD_LIBRARY_PATH: ${{ github.workspace }}/result-libcarbonado/lib
+          nix build .#checks.x86_64-linux.no-sorry
+          nix build .#checks.x86_64-linux.tooling-purity
+          nix build .#checks.x86_64-linux.carbonado
+          nix build .#checks.x86_64-linux.demo

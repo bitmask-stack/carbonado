@@ -19,12 +19,12 @@ use carbonado::cli_app::{Cli, Commands, KeyCommands};
 use carbonado::constants::Format;
 
 use carbonado::file::{
-    decode_directory, decode_stream, encode_directory_with_options, encode_stream,
-    DirectoryEncodeOptions, DIRECTORY_ARCHIVE_FORMAT_ENCRYPTED,
+    DIRECTORY_ARCHIVE_FORMAT_ENCRYPTED, DirectoryEncodeOptions, decode_directory, decode_stream,
+    encode_directory_with_options, encode_stream,
 };
 use carbonado::paths::{
-    detect_archive_layout, guess_format_from_filename, parse_bao_root_from_filename,
-    sidecar_sibling_path, ArchiveLayout,
+    ArchiveLayout, detect_archive_layout, guess_format_from_filename, parse_bao_root_from_filename,
+    sidecar_sibling_path,
 };
 use carbonado::stream::decode::stream_decode_outboard;
 use carbonado::stream::encode::stream_encode_outboard;

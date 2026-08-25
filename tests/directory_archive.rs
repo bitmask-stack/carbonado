@@ -3,11 +3,11 @@
 mod common;
 
 #[cfg(feature = "ots")]
-use carbonado::ots::{verify_stamp, OtsPolicy};
+use carbonado::ots::{OtsPolicy, verify_stamp};
 use carbonado::{
     adamantine::{
-        decode_adamantine, encode_adamantine, ADAMANTINE_CARBONADO_FMT_ENCRYPTED,
-        ADAMANTINE_CARBONADO_FMT_PUBLIC, ADAMANTINE_FLAG_REQUIRE_OTS, ADAMANTINE_MAGIC,
+        ADAMANTINE_CARBONADO_FMT_ENCRYPTED, ADAMANTINE_CARBONADO_FMT_PUBLIC,
+        ADAMANTINE_FLAG_REQUIRE_OTS, ADAMANTINE_MAGIC, decode_adamantine, encode_adamantine,
     },
     adamantine_payload::{
         build_adamantine_payload, fec_slice_from_bundle, split_adamantine_payload,
@@ -15,18 +15,18 @@ use carbonado::{
     },
     decode_outboard,
     directory::format_policy::{
-        SegmentFormatPolicy, SEGMENT_FORMAT_PUBLIC_COMPRESSED, SEGMENT_FORMAT_PUBLIC_RAW,
+        SEGMENT_FORMAT_PUBLIC_COMPRESSED, SEGMENT_FORMAT_PUBLIC_RAW, SegmentFormatPolicy,
     },
     encode_outboard,
     error::CarbonadoError,
     file::{
-        decode, decode_directory, encode_directory, encode_directory_with_options,
-        DirectoryEncodeOptions, DIRECTORY_ARCHIVE_FORMAT, DIRECTORY_ARCHIVE_FORMAT_ENCRYPTED,
-        DIRECTORY_TEST_SEGMENT_BUDGET,
+        DIRECTORY_ARCHIVE_FORMAT, DIRECTORY_ARCHIVE_FORMAT_ENCRYPTED,
+        DIRECTORY_TEST_SEGMENT_BUDGET, DirectoryEncodeOptions, decode, decode_directory,
+        encode_directory, encode_directory_with_options,
     },
     filepack_manifest::{
-        FilepackEntry, FilepackManifest, FILEPACK_MANIFEST_FORMAT_LEVEL_PUBLIC,
-        FILEPACK_MANIFEST_VERSION, MAX_SEGMENT_MAIN_LEN,
+        FILEPACK_MANIFEST_FORMAT_LEVEL_PUBLIC, FILEPACK_MANIFEST_VERSION, FilepackEntry,
+        FilepackManifest, MAX_SEGMENT_MAIN_LEN,
     },
     scrub_outboard,
 };
@@ -679,6 +679,68 @@ fn decode_rejects_tampered_catalog_body_returns_verification_failed() {
         matches!(err, CarbonadoError::AuthenticationFailed),
         "tampered catalog body must yield AuthenticationFailed, got {err:?}"
     );
+}
+
+/// Same tree, opposite creation order and a reversed `read_dir` walk, must produce
+/// one catalog Bao root. Bundle FEC/outboard append order follows sorted `rel_path`.
+#[test]
+#[cfg(debug_assertions)]
+fn directory_encode_independent_of_readdir_order() {
+    use carbonado::file::directory_encode_test_hooks::with_reverse_readdir;
+
+    let src_ab = tempdir("order_src_ab");
+    fs::write(src_ab.join("a.txt"), b"phase3 g9 hello").expect("a.txt first");
+    fs::create_dir_all(src_ab.join("sub")).expect("sub");
+    fs::write(src_ab.join("sub/b.bin"), b"nested data").expect("b.bin second");
+
+    let src_ba = tempdir("order_src_ba");
+    fs::create_dir_all(src_ba.join("sub")).expect("sub first");
+    fs::write(src_ba.join("sub/b.bin"), b"nested data").expect("b.bin first");
+    fs::write(src_ba.join("a.txt"), b"phase3 g9 hello").expect("a.txt second");
+
+    let enc_ab = tempdir("order_enc_ab");
+    let arch_ab = encode_directory(&ZERO_KEY, &src_ab, &enc_ab).expect("encode creation a-then-b");
+
+    let enc_ba = tempdir("order_enc_ba");
+    let arch_ba = encode_directory(&ZERO_KEY, &src_ba, &enc_ba).expect("encode creation b-then-a");
+
+    let enc_rev = tempdir("order_enc_rev");
+    let arch_rev = with_reverse_readdir(|| {
+        encode_directory(&ZERO_KEY, &src_ab, &enc_rev).expect("encode reversed read_dir")
+    });
+
+    assert_eq!(
+        arch_ab.catalog_bao_root, arch_ba.catalog_bao_root,
+        "catalog Bao root must not depend on file creation order"
+    );
+    assert_eq!(
+        arch_ab.catalog_bao_root, arch_rev.catalog_bao_root,
+        "catalog Bao root must not depend on read_dir listing order"
+    );
+
+    let catalog_path =
+        adam_catalog_path(&enc_ab, &arch_ab.catalog_bao_root, DIRECTORY_ARCHIVE_FORMAT);
+    let (manifest, _) = load_catalog_manifest_and_parts(&catalog_path, &arch_ab.catalog_bao_root);
+    assert_eq!(
+        manifest
+            .entries
+            .iter()
+            .map(|e| e.rel_path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a.txt", "sub/b.bin"]
+    );
+    let a_off = manifest.entries[0].segments[0].fec_parity_offset;
+    let b_off = manifest.entries[1].segments[0].fec_parity_offset;
+    assert!(
+        a_off < b_off,
+        "FEC blobs must be appended in sorted rel_path order, got a.txt offset {a_off} sub/b.bin {b_off}"
+    );
+
+    let _ = fs::remove_dir_all(&src_ab);
+    let _ = fs::remove_dir_all(&src_ba);
+    let _ = fs::remove_dir_all(&enc_ab);
+    let _ = fs::remove_dir_all(&enc_ba);
+    let _ = fs::remove_dir_all(&enc_rev);
 }
 
 #[test]
@@ -1388,7 +1450,7 @@ fn decode_rejects_headered_segment_main_layout() {
 /// `scrub_outboard` recovers corrupt bare mains (≤4 shard taints) using bundle parity slices.
 #[test]
 fn directory_segment_corruption_bao_bundle_extract_scrub_roundtrip() {
-    use common::corruption::{scattered_outboard_main_knockout, OutboardShardLayout};
+    use common::corruption::{OutboardShardLayout, scattered_outboard_main_knockout};
     use rand::thread_rng;
 
     let src = tempdir("fec_scrub_src");
@@ -1549,7 +1611,7 @@ fn directory_segment_corruption_bao_bundle_extract_scrub_roundtrip() {
 
 #[test]
 fn directory_fec_scrub_matrix_c12_c13_c14_c15() {
-    use common::corruption::{scattered_outboard_main_knockout, OutboardShardLayout};
+    use common::corruption::{OutboardShardLayout, scattered_outboard_main_knockout};
     use rand::thread_rng;
 
     for (label, policy, key, encrypted) in [

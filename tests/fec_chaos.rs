@@ -11,8 +11,8 @@ use carbonado::{
     structs::Encoded,
 };
 use common::corruption::{
-    scattered_outboard_main_knockout, scattered_stream_knockout, InboardShardLayout,
-    OutboardShardLayout,
+    InboardShardLayout, OutboardShardLayout, scattered_outboard_main_knockout,
+    scattered_stream_knockout,
 };
 use common::format_matrix::{format_label, verification_fec_levels};
 use proptest::prelude::*;

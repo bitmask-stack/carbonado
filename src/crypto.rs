@@ -81,13 +81,13 @@
 
 use std::path::Path;
 
-use aes::cipher::{KeyIvInit, StreamCipher};
 use aes::Aes256;
+use aes::cipher::{KeyIvInit, StreamCipher};
 use blake3;
-use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, Key, Nonce};
+use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce, aead::Aead};
 use ctr::Ctr128BE;
 use hmac::{Hmac, Mac};
-use secp256k1::{ecdh::SharedSecret, Secp256k1};
+use secp256k1::{Secp256k1, ecdh::SharedSecret};
 use sha2::Sha512;
 
 use crate::error::CarbonadoError;
@@ -184,13 +184,12 @@ pub fn derive_subkey(master: &[u8], label: &str) -> Result<[u8; 64], CarbonadoEr
 /// See AGENTS.md §2.1.5 (Keyed Bao KDF) and `tests/bao_keyed_contract.rs`.
 pub fn carbonado_verification_key(format: u8) -> [u8; 32] {
     // Public KDF (not secret-key material). Always pure blake3 so the API is
-    // infallible on both backends. Lean AOT parity is checked via
-    // `backend::lean::verification_key` in `tests/lean_backend_smoke.rs`.
+    // infallible. Lean AOT demo checks the same domain string in Carbonado/Bao.
     blake3::derive_key("carbonado-v2/verification", &[format])
 }
 
 /// Deprecated: use [`carbonado_verification_key`].
-#[deprecated(since = "2.1.0", note = "renamed to carbonado_verification_key")]
+#[deprecated(since = "0.7.0", note = "renamed to carbonado_verification_key")]
 pub fn carbonado_bao_key(format: u8) -> [u8; 32] {
     carbonado_verification_key(format)
 }

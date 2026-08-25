@@ -11,13 +11,13 @@ use std::io::Cursor;
 use carbonado::constants::FEC_M;
 use carbonado::decode as low_level_decode;
 use carbonado::error::CarbonadoError;
-use carbonado::file::{decode, decode_stream, encode, encode_stream, Header};
+use carbonado::file::{Header, decode, decode_stream, encode, encode_stream};
 use carbonado::stream::crypto_stream::{
     stream_decrypt, stream_decrypt_seek, stream_decrypt_with_nonce, stream_decrypt_with_nonce_seek,
 };
 use carbonado::stream::encode::stream_encode_outboard;
-use carbonado::stream::encode::{stream_encode_inboard_body, PreprocessStats};
-use carbonado::stream::fec::{encode_inboard_buffer, FecInboardEncoder};
+use carbonado::stream::encode::{PreprocessStats, stream_encode_inboard_body};
+use carbonado::stream::fec::{FecInboardEncoder, encode_inboard_buffer};
 use carbonado::stream::{
     stream_decode, stream_decode_buffer, stream_decode_outboard, stream_decode_outboard_buffer,
     stream_encode_buffer,
@@ -26,7 +26,7 @@ use carbonado::{encode_outboard, scrub, scrub_outboard, verify_inboard_keyed_ora
 use rand::RngCore;
 
 use common::inboard_parity::{
-    assert_bounded_inboard_body_roundtrip, assert_inboard_body_roundtrip, BoundedReadSeek,
+    BoundedReadSeek, assert_bounded_inboard_body_roundtrip, assert_inboard_body_roundtrip,
 };
 
 const MASTER: [u8; 32] = [0x42; 32];

@@ -7,15 +7,14 @@ use carbonado::{
     adamantine::decode_adamantine,
     adamantine_payload::split_adamantine_payload,
     error::CarbonadoError,
-    file::{decode, encode_directory, DirectoryArchive, DIRECTORY_ARCHIVE_FORMAT},
+    file::{DIRECTORY_ARCHIVE_FORMAT, DirectoryArchive, decode, encode_directory},
     filepack::{self, parse_filepack_cbor},
     filepack_manifest::{
-        FilepackEntry, FilepackManifest, FilepackSegmentMap, SegmentRef,
-        FILEPACK_MANIFEST_FORMAT_LEVEL_PUBLIC, FILEPACK_MANIFEST_VERSION, MAX_REL_PATH_LEN,
+        FILEPACK_MANIFEST_FORMAT_LEVEL_PUBLIC, FILEPACK_MANIFEST_VERSION, FilepackEntry,
+        FilepackManifest, FilepackSegmentMap, MAX_REL_PATH_LEN, SegmentRef,
     },
 };
 use ciborium::value::Value as CborValue;
-#[cfg(feature = "backend-rust")]
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -327,7 +326,6 @@ fn parse_rejects_oversized_rel_path_at_flatten() {
     );
 }
 
-#[cfg(feature = "backend-rust")]
 fn golden_fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/directory_interop_golden.json")
 }
@@ -398,10 +396,6 @@ fn adamantine_decimal_segment_naming_contract() {
 }
 
 /// Pins rust-engine directory roots / rkyv SHA-256 for `tests/samples`.
-/// Under `backend-lean`, segment crypto differs until full G9 encode bit-match;
-/// dual-suite directory green is exercised by `lean_backend_phase3` + functional
-/// `directory_archive` tests (not rust-root checksums).
-#[cfg(feature = "backend-rust")]
 #[test]
 fn golden_directory_interop_checksums_and_manifest_wire() {
     let fixture_text = fs::read_to_string(golden_fixture_path()).expect("read golden fixture");

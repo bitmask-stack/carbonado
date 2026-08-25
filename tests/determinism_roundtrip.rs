@@ -28,18 +28,16 @@
 //! ## Directory (**W2b**)
 //!
 //! Same-engine catalog+segment codecode/decodec under pinned options. Cross-engine
-//! encode residual is **live rust root vs live lean root** (hard-asserted pins),
-//! not the committed decode seed. `tests/fixtures/phase3_g9_directory` is
-//! **decode-only SSOT** (catalog root may lag live re-encode).
-//!
-//! Runs under default `backend-rust` and lean freeze features (auto-include).
+//! encode residual is **live rust root vs historical Lean AOT catalog pin**.
+//! `tests/fixtures/phase3_g9_directory` matches live rust encode after catalog
+//! bundle append follows sorted `rel_path` (not `read_dir` order).
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use carbonado::{
-    constants::Format, decode, decode_outboard, encode_with_nonce, file,
-    stream_encode_outboard_buffer, structs::Encoded, OutboardEncoded,
+    OutboardEncoded, constants::Format, decode, decode_outboard, encode_with_nonce, file,
+    stream_encode_outboard_buffer, structs::Encoded,
 };
 
 /// Same master as G9 / Phase 2.
@@ -72,32 +70,19 @@ const OUTBOARD_COMPRESS: &[u8] = &[6, 7, 14, 15];
 
 /// Live `backend-rust` catalog Bao root for [`dir_files`] + zero master + default options.
 ///
-/// **Not** the committed `phase3_g9_directory` catalog (that seed is decode-only SSOT;
-/// catalog packaging can lag while segment mains stay stable).
+/// Matches [`PHASE3_SEED_DIR_CATALOG_ROOT`]: encode sorts by `rel_path` before appending
+/// verification outboard / FEC (`a.txt` then `sub/b.bin`).
 const LIVE_RUST_DIR_CATALOG_ROOT: &str =
-    "0b119f121a003dd4136f340cdcb8de9dc91d8e15d6f402df485e9ffd123cea4e";
-
-/// Live `backend-lean` catalog Bao root for the same tree/options as [`LIVE_RUST_DIR_CATALOG_ROOT`].
-const LIVE_LEAN_DIR_CATALOG_ROOT: &str =
-    "f67b6f49b9d2f3d8ac8b3906e9771dfaa6e2101fe8501b48d24700c3eb64d189";
-
-/// Committed phase3 G9 directory catalog root — **decode seed only**, not live re-encode golden.
-const PHASE3_SEED_DIR_CATALOG_ROOT: &str =
     "16e2369f4f4465014e5e92740e3f76403f681cd60c01f7605ee11acd5423024f";
 
-#[cfg(feature = "backend-lean")]
-fn require_lean_lib() {
-    if std::env::var_os("CARBONADO_LEAN_LIB").is_none() {
-        panic!(
-            "CARBONADO_LEAN_LIB unset. Build and export first:\n  \
-             nix build .#libcarbonado -o result-libcarbonado\n  \
-             export CARBONADO_LEAN_LIB=$PWD/result-libcarbonado/lib\n  \
-             export CARBONADO_LEAN_INCLUDE=$PWD/result-libcarbonado/include\n  \
-             export LD_LIBRARY_PATH=$CARBONADO_LEAN_LIB\n  \
-             # or: just test-lean-ci"
-        );
-    }
-}
+/// Historical Lean AOT catalog Bao root for the same tree/options as [`LIVE_RUST_DIR_CATALOG_ROOT`].
+const LIVE_LEAN_DIR_CATALOG_ROOT: &str =
+    "d468ea7a9e8afc13f3c4a533c0d9614ecc6d032dae2255013bcf433c592e07b5";
+
+/// Committed phase3 G9 directory catalog root. Live rust encode of [`dir_files`] matches this
+/// seed once the catalog bundle is appended in sorted `rel_path` order.
+const PHASE3_SEED_DIR_CATALOG_ROOT: &str =
+    "16e2369f4f4465014e5e92740e3f76403f681cd60c01f7605ee11acd5423024f";
 
 fn is_encrypted(format: u8) -> bool {
     Format::from(format).contains(Format::Encryption)
@@ -112,11 +97,7 @@ fn nonce_for(format: u8) -> Option<[u8; 16]> {
 }
 
 fn active_engine() -> &'static str {
-    if cfg!(feature = "backend-lean") {
-        "lean"
-    } else {
-        "rust"
-    }
+    "rust"
 }
 
 // ---------------------------------------------------------------------------
@@ -367,8 +348,6 @@ fn decodec_outboard(format: u8, pt: &[u8]) {
 
 #[test]
 fn codecode_body_no_compress_matrix() {
-    #[cfg(feature = "backend-lean")]
-    require_lean_lib();
     for &format in BODY_NO_COMPRESS {
         codecode_body(format, PLAINTEXT);
     }
@@ -376,8 +355,6 @@ fn codecode_body_no_compress_matrix() {
 
 #[test]
 fn decodec_body_no_compress_matrix() {
-    #[cfg(feature = "backend-lean")]
-    require_lean_lib();
     for &format in BODY_NO_COMPRESS {
         decodec_body(format, PLAINTEXT);
     }
@@ -385,8 +362,6 @@ fn decodec_body_no_compress_matrix() {
 
 #[test]
 fn codecode_headered_no_compress_matrix() {
-    #[cfg(feature = "backend-lean")]
-    require_lean_lib();
     for &format in HEADERED_NO_COMPRESS {
         codecode_headered(format, PLAINTEXT);
     }
@@ -394,8 +369,6 @@ fn codecode_headered_no_compress_matrix() {
 
 #[test]
 fn decodec_headered_no_compress_matrix() {
-    #[cfg(feature = "backend-lean")]
-    require_lean_lib();
     for &format in HEADERED_NO_COMPRESS {
         decodec_headered(format, PLAINTEXT);
     }
@@ -403,8 +376,6 @@ fn decodec_headered_no_compress_matrix() {
 
 #[test]
 fn codecode_outboard_no_compress_matrix() {
-    #[cfg(feature = "backend-lean")]
-    require_lean_lib();
     for &format in OUTBOARD_NO_COMPRESS {
         codecode_outboard(format, PLAINTEXT);
     }
@@ -412,8 +383,6 @@ fn codecode_outboard_no_compress_matrix() {
 
 #[test]
 fn decodec_outboard_no_compress_matrix() {
-    #[cfg(feature = "backend-lean")]
-    require_lean_lib();
     for &format in OUTBOARD_NO_COMPRESS {
         decodec_outboard(format, PLAINTEXT);
     }
@@ -425,8 +394,6 @@ fn decodec_outboard_no_compress_matrix() {
 
 #[test]
 fn codecode_body_compress_same_engine() {
-    #[cfg(feature = "backend-lean")]
-    require_lean_lib();
     for &format in BODY_COMPRESS {
         codecode_body(format, PLAINTEXT);
     }
@@ -434,8 +401,6 @@ fn codecode_body_compress_same_engine() {
 
 #[test]
 fn decodec_body_compress_same_engine() {
-    #[cfg(feature = "backend-lean")]
-    require_lean_lib();
     for &format in BODY_COMPRESS {
         decodec_body(format, PLAINTEXT);
     }
@@ -443,8 +408,6 @@ fn decodec_body_compress_same_engine() {
 
 #[test]
 fn codecode_headered_compress_same_engine() {
-    #[cfg(feature = "backend-lean")]
-    require_lean_lib();
     for &format in HEADERED_COMPRESS {
         codecode_headered(format, PLAINTEXT);
     }
@@ -452,8 +415,6 @@ fn codecode_headered_compress_same_engine() {
 
 #[test]
 fn decodec_headered_compress_same_engine() {
-    #[cfg(feature = "backend-lean")]
-    require_lean_lib();
     for &format in HEADERED_COMPRESS {
         decodec_headered(format, PLAINTEXT);
     }
@@ -461,8 +422,6 @@ fn decodec_headered_compress_same_engine() {
 
 #[test]
 fn codecode_outboard_compress_same_engine() {
-    #[cfg(feature = "backend-lean")]
-    require_lean_lib();
     for &format in OUTBOARD_COMPRESS {
         codecode_outboard(format, PLAINTEXT);
     }
@@ -470,8 +429,6 @@ fn codecode_outboard_compress_same_engine() {
 
 #[test]
 fn decodec_outboard_compress_same_engine() {
-    #[cfg(feature = "backend-lean")]
-    require_lean_lib();
     for &format in OUTBOARD_COMPRESS {
         decodec_outboard(format, PLAINTEXT);
     }
@@ -533,8 +490,6 @@ fn compress_cross_engine_encode_not_bit_identical_documented() {
 /// bit-matches the golden wire under the same pins.
 #[test]
 fn decodec_body_from_g9_fixture_no_compress() {
-    #[cfg(feature = "backend-lean")]
-    require_lean_lib();
 
     let engine = active_engine();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -648,8 +603,6 @@ fn dir_files() -> [(&'static str, &'static [u8]); 2] {
 
 #[test]
 fn codecode_directory_public_same_engine() {
-    #[cfg(feature = "backend-lean")]
-    require_lean_lib();
 
     let src = tempdir("dir_src");
     write_tree(&src, &dir_files());
@@ -697,8 +650,6 @@ fn codecode_directory_public_same_engine() {
 
 #[test]
 fn decodec_directory_public_same_engine() {
-    #[cfg(feature = "backend-lean")]
-    require_lean_lib();
 
     let src = tempdir("dir_src_ded");
     write_tree(&src, &dir_files());
@@ -751,28 +702,26 @@ fn decodec_directory_public_same_engine() {
 /// W2b residual canary: **live-vs-live** catalog roots under identical pins.
 ///
 /// Compares pinned live rust encode root vs pinned live lean encode root for
-/// [`dir_files`] + zero master + default options. Does **not** use
-/// `phase3_g9_directory` catalog as a re-encode golden (that seed is decode-only;
-/// its catalog root lags live rust while segment mains may still match).
+/// [`dir_files`] + zero master + default options. Live rust matches the committed
+/// `phase3_g9_directory` catalog (sorted `rel_path` bundle append). Cross-engine
+/// residual is rust vs lean catalog bytes (zstd / catalog packaging), not readdir order.
 ///
 /// Hard asserts:
 /// - active engine live root matches its pin (`LIVE_RUST_*` / `LIVE_LEAN_*`)
 /// - `LIVE_RUST_DIR_CATALOG_ROOT != LIVE_LEAN_DIR_CATALOG_ROOT` (cross-engine residual)
-/// - live rust root ≠ phase3 seed catalog (documents seed packaging drift)
+/// - live rust root equals the phase3 seed catalog
 /// - seed catalog file still present (decode SSOT)
 #[test]
 fn directory_cross_engine_live_roots_residual() {
-    #[cfg(feature = "backend-lean")]
-    require_lean_lib();
 
-    // Pin table integrity: residual is live-vs-live, not seed-vs-live.
+    // Pin table integrity: residual is live rust vs live lean, not readdir drift.
     assert_ne!(
         LIVE_RUST_DIR_CATALOG_ROOT, LIVE_LEAN_DIR_CATALOG_ROOT,
         "W2b residual pin table: live rust and live lean catalog roots must differ"
     );
-    assert_ne!(
+    assert_eq!(
         LIVE_RUST_DIR_CATALOG_ROOT, PHASE3_SEED_DIR_CATALOG_ROOT,
-        "phase3_g9_directory catalog is decode-only SSOT — not equal to live rust re-encode"
+        "live rust directory encode must match the phase3_g9_directory catalog seed"
     );
 
     let fixture =
@@ -791,40 +740,19 @@ fn directory_cross_engine_live_roots_residual() {
         .unwrap_or_else(|e| panic!("[{}] dir encode for residual: {e}", active_engine()));
     let live = hex32(&arch.catalog_bao_root);
 
-    #[cfg(feature = "backend-rust")]
-    {
-        assert_eq!(
-            live, LIVE_RUST_DIR_CATALOG_ROOT,
-            "live rust directory catalog root drifted from W2b pin — update \
-             LIVE_RUST_DIR_CATALOG_ROOT (and re-check lean residual) if intentional"
-        );
-        assert_ne!(
-            live, PHASE3_SEED_DIR_CATALOG_ROOT,
-            "live rust catalog must not silently equal stale seed (decode-only SSOT)"
-        );
-        assert_ne!(
-            live, LIVE_LEAN_DIR_CATALOG_ROOT,
-            "W2b residual: live rust catalog must still differ from live lean pin"
-        );
-    }
-
-    #[cfg(feature = "backend-lean")]
-    {
-        assert_eq!(
-            live, LIVE_LEAN_DIR_CATALOG_ROOT,
-            "live lean directory catalog root drifted from W2b pin — update \
-             LIVE_LEAN_DIR_CATALOG_ROOT (and re-check rust residual) if intentional"
-        );
-        assert_ne!(
-            live, LIVE_RUST_DIR_CATALOG_ROOT,
-            "W2b residual evidence: live lean catalog must still differ from live rust pin \
-             (if equal, residual may have closed — investigate zstd/catalog packaging)"
-        );
-        assert_ne!(
-            live, PHASE3_SEED_DIR_CATALOG_ROOT,
-            "live lean catalog must not equal decode-only seed root"
-        );
-    }
+    assert_eq!(
+        live, LIVE_RUST_DIR_CATALOG_ROOT,
+        "live rust directory catalog root drifted from pin — update \
+         LIVE_RUST_DIR_CATALOG_ROOT if intentional"
+    );
+    assert_eq!(
+        live, PHASE3_SEED_DIR_CATALOG_ROOT,
+        "live rust catalog must match the phase3_g9_directory seed (sorted rel_path bundle)"
+    );
+    assert_ne!(
+        live, LIVE_LEAN_DIR_CATALOG_ROOT,
+        "historical Lean AOT catalog pin must still differ from live rust encode"
+    );
 
     let _ = fs::remove_dir_all(&src);
     let _ = fs::remove_dir_all(&enc);

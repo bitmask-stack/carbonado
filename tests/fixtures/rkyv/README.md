@@ -25,6 +25,5 @@ cargo run --example dump_rkyv_r9 --features backend-rust
 **W3 acceptance:** Lean `encodeRkyvManifest` must bit-match these fixtures (encode twice → same bytes).
 AOT demo greps: `rkyv FilepackManifestWire encode/decode goldens ok`.
 
-**Dual-suite honesty:** directory encode/decode under `backend-lean` still uses **Rust rkyv
-composition** as product SSOT (segment/catalog *crypto* via Lean C ABI). Pure Lean path is
-wire-compatible when claimed; dual-suite does **not** require pure Lean encode.
+Rust directory encode uses this rkyv wire. Pure Lean `encodeRkyvManifest` must bit-match
+these fixtures. There is no Cargo Lean directory encoder.

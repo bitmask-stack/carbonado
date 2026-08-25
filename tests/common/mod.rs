@@ -9,6 +9,7 @@ pub mod corruption;
 pub mod format_matrix;
 pub mod header_layout;
 pub mod inboard_parity;
+pub mod zstd_frame;
 
 use std::fs;
 use std::path::Path;

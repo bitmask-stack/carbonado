@@ -6,8 +6,8 @@ Trees under `ref/` are **third-party oracles / vendors only** — not product en
 
 | Engine | Location |
 |--------|----------|
-| **Rust** (first-class + dual-suite SSOT) | live `src/`, `tests/` (also benches/examples/CLI) |
-| **Lean 4** (proofs + AOT `libcarbonado`) | `Carbonado/`, `CarbonadoTest/`; built via Nix flakes |
+| **Rust** (production engine) | live `src/`, `tests/` (also benches/examples/CLI) |
+| **Lean 4** (proofs + AOT demo) | `Carbonado/`, `CarbonadoTest/`; built via Nix flakes |
 
 **G1/W5a permanent policy:** no `ref/carbonado-rust` product pin. Do not invent a submodule that freezes or demotes live Rust.
 
@@ -17,7 +17,7 @@ See [docs/PARITY.md](../docs/PARITY.md) for pin table and [docs/SPEC-MATRIX.md](
 
 | Path | Purpose | Status |
 |------|---------|--------|
-| `bao-tree` | Surmount keyed Bao fork | **pinned** |
+| `bao-tree` | Keyed Bao oracle (Surmount snapshot of the work now in n0-computer PR 78) | **pinned** |
 | `reed-solomon-erasure` | RS 4/8 | **pinned** |
 | `rustcrypto-block-ciphers` | AES 0.8.4 | **pinned** |
 | `rustcrypto-macs` | HMAC 0.12.1 | **pinned** |

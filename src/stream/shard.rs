@@ -5,7 +5,7 @@ use std::io::{BufRead, Read, Write};
 use crate::{
     constants::Format,
     error::CarbonadoError,
-    file::{decode_stream, Header},
+    file::{Header, decode_stream},
     structs::EncodeInfo,
 };
 

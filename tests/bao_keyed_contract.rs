@@ -14,12 +14,11 @@ use std::io::Cursor;
 
 use anyhow::Result;
 use bao_tree::{
-    blake3,
+    BaoTree, ChunkNum, ChunkRanges, blake3,
     io::{
         outboard::PostOrderMemOutboard,
         sync::{decode_ranges, keyed_encode_ranges_validated, keyed_valid_ranges},
     },
-    BaoTree, ChunkNum, ChunkRanges,
 };
 use carbonado::{
     carbonado_verification_key,

@@ -1,6 +1,6 @@
 # G9 cross-backend fixtures (Milestone R8)
 
-Committed wire goldens for **Rust ↔ Lean** encode/decode parity on **no-compress** formats.
+Committed wire goldens. Rust still **decodes** historical Lean AOT bytes. There is no live Cargo Lean encoder.
 
 ## Pins
 
@@ -20,7 +20,7 @@ Committed wire goldens for **Rust ↔ Lean** encode/decode parity on **no-compre
 ```text
 g9/
   rust/   # encoded under default backend-rust
-  lean/   # encoded under backend-lean + fixed NONCE when encrypted
+  lean/   # historical Lean AOT encode + fixed NONCE when encrypted
 ```
 
 ### Body (`body_c{fmt}.bin` + `.meta.json`)
@@ -53,38 +53,29 @@ geometry yields an empty post-order outboard for some tiny payloads.
 
 ## Matrix scope (R8 DoD)
 
-- **In scope:** body/headered/outboard public + encrypted fixed-nonce, **both directions**.
-- **Continuous re-encode bit-match (CI under lean):** body c0/c1/c4/c5/c8/c9/c12/c13;
-  headered c4/c5/c12/c13; outboard c4/c5/c12/c13 (no compress). Live lean re-encode vs
-  rust golden.
-- **Committed fixture identity:** rust/ and lean/ trees are regenerated together under the
-  same pins; c14 outboard mains may differ (Compression residual).
+- **In scope now:** Rust decode of committed `lean/` goldens + rust self-roundtrip.
+- **Committed fixture identity:** `lean/` is frozen historical AOT output; `just g9-gen-fixtures`
+  regenerates `rust/` only. c14 outboard mains may differ (Compression residual).
 - **Residuals (W2 settled):** cross-engine Compression encode bit-match is **permanent**
-  (W2a — zstd frames differ; decode interop only). Cross-engine directory encode bit-match
+  (W2a — zstd frames differ; decode interop only). Frame **parameters** (magic, checksum
+  off, no dict, rust `0x00`+windowLog 25 vs lean `0x20`+FCS) are specified in
+  `Carbonado.Compress` and checked by `tests/zstd_frame_params.rs`. Cross-engine directory encode bit-match
   is **permanent** (W2b; `phase3_g9_directory` decode seed remains SSOT). Same-engine
   codecode/decodec shipped in `tests/determinism_roundtrip.rs` (W2d).
 
 ## Regeneration
 
 ```bash
-# Both engines (recommended)
 just g9-gen-fixtures
-
-# Or manually:
+# or:
 G9_WRITE_FIXTURES=1 cargo test --test g9_cross_backend write_fixtures -- --ignored --nocapture
-
-eval "$(just _lean-env)"
-G9_WRITE_FIXTURES=1 cargo test --no-default-features --features "backend-lean,pqc,ots" \
-  --test g9_cross_backend write_fixtures -- --ignored --nocapture
 ```
 
-Do **not** hand-edit binaries; regenerate and commit both `rust/` and `lean/` trees together.
+Do **not** hand-edit binaries. `lean/` goldens are historical; do not invent a Cargo Lean encoder to regenerate them.
 
 ## Tests
 
-| Command | Direction |
+| Command | What it does |
 |---------|-----------|
-| `cargo test --test g9_cross_backend` | lean→rust + self RT + zero-nonce contract (no libcarbonado) |
-| lean features + `CARBONADO_LEAN_LIB` | rust→lean + continuous re-encode bit-match + self RT |
-| `just test-g9` | both directions |
-| `just test-lean-ci` | full dual suite (includes this file after R7 freeze) |
+| `cargo test --test g9_cross_backend` | Rust decode of `lean/` goldens + rust self-roundtrip + zero-nonce contract |
+| `just test-g9` | same |

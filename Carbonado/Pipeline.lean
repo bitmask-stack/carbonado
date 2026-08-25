@@ -325,7 +325,7 @@ def natToU32Field (n : Nat) : Except PipelineError UInt32 :=
 
 /-- Headered encode: body + authenticated 177-byte Header (header-path encrypt).
 
-  Third component is pipeline `EncodeInfo` (stage counters for C ABI / dual-backend).
+  Third component is pipeline `EncodeInfo` (stage counters).
 -/
 def encodeHeadered (master nonce plaintext : ByteArray) (format : FormatBits)
     (chunkIndex : UInt32) (slhPublicKey metadata : ByteArray) :

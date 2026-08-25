@@ -16,16 +16,16 @@ use carbonado::constants::{FEC_K, FEC_M};
 use carbonado::error::CarbonadoError;
 use carbonado::stream::encode::stream_encode_inboard_body;
 use carbonado::stream::fec::{
-    encode_inboard_buffer, encode_outboard_parity_buffer, write_outboard_parity, FecInboardEncoder,
-    FecStripe,
+    FecInboardEncoder, FecStripe, encode_inboard_buffer, encode_outboard_parity_buffer,
+    write_outboard_parity,
 };
 use carbonado::stream::parallel::{
-    encode_rs_parity_serial, encode_rs_parity_with_config, rs_parity_parallelism_active,
-    ParallelConfig,
+    ParallelConfig, encode_rs_parity_serial, encode_rs_parity_with_config,
+    rs_parity_parallelism_active,
 };
 use carbonado::stream::{stream_decode_buffer, stream_encode_buffer};
 use carbonado::{decode, encode, scrub, structs::Encoded};
-use common::corruption::{flip_byte, InboardShardLayout};
+use common::corruption::{InboardShardLayout, flip_byte};
 use reed_solomon_erasure::galois_8::ReedSolomon;
 
 use common::inboard_parity::{assert_inboard_body_roundtrip, preprocess_and_body};

@@ -1,4 +1,4 @@
-//! Golden vectors for Carbonado keyed Bao (bao-tree 76-keyed-bao, 4 KiB groups).
+//! Golden vectors for Carbonado keyed Bao (n0-computer/bao-tree PR 78 keyed APIs, 4 KiB groups).
 use std::io::Cursor;
 
 use bao_tree::{

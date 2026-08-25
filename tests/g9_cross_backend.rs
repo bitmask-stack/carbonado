@@ -1,31 +1,21 @@
-//! Milestone R8 / G9: full cross-backend encode/decode matrix (no-compress formats).
+//! G9: Rust decode of committed Lean AOT goldens, plus rust self-roundtrip.
 //!
-//! Both directions:
-//! - **rust→lean** (`#[cfg(feature = "backend-lean")]`): decode committed `tests/fixtures/g9/rust/*`
-//! - **lean→rust** (`#[cfg(feature = "backend-rust")]`): decode committed `tests/fixtures/g9/lean/*`
+//! There is no Cargo Lean engine. Committed `tests/fixtures/g9/lean/*` bytes stay as
+//! historical Lean-AOT goldens that the Rust library must still decode.
 //!
-//! Fixtures are no-compress formats only (c0/c1/c4/c5/c8/c9/c12/c13 + selected headered/outboard)
-//! so re-encode bit-match is meaningful. Compression (Zstd) is an intentional residual.
-//!
-//! Regenerate (writes under `tests/fixtures/g9/{rust,lean}/` for the active backend):
+//! Regenerate rust goldens:
 //! ```bash
-//! # Rust goldens
 //! G9_WRITE_FIXTURES=1 cargo test --test g9_cross_backend write_fixtures -- --ignored --nocapture
-//! # Lean goldens (needs libcarbonado)
-//! eval "$(just _lean-env)"
-//! G9_WRITE_FIXTURES=1 cargo test --no-default-features --features "backend-lean,pqc,ots" \
-//!   --test g9_cross_backend write_fixtures -- --ignored --nocapture
-//! # or: just g9-gen-fixtures
 //! ```
 //!
-//! Pins: [`MASTER`], [`NONCE`], [`PLAINTEXT`] — same MASTER/NONCE as `lean_backend_phase2`.
+//! Pins: [`MASTER`], [`NONCE`], [`PLAINTEXT`].
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use carbonado::{
-    constants::Format, decode, decode_outboard, encode_with_nonce, file,
-    stream_encode_outboard_buffer, structs::Encoded, OutboardEncoded,
+    OutboardEncoded, constants::Format, decode, decode_outboard, encode_with_nonce, file,
+    stream_encode_outboard_buffer, structs::Encoded,
 };
 use serde::{Deserialize, Serialize};
 
@@ -74,20 +64,6 @@ fn require_write_env() {
     match std::env::var("G9_WRITE_FIXTURES") {
         Ok(v) if v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes") => {}
         _ => panic!("set G9_WRITE_FIXTURES=1 to regenerate fixtures"),
-    }
-}
-
-#[cfg(feature = "backend-lean")]
-fn require_lean_lib() {
-    if std::env::var_os("CARBONADO_LEAN_LIB").is_none() {
-        panic!(
-            "CARBONADO_LEAN_LIB unset. Build and export first:\n  \
-             nix build .#libcarbonado -o result-libcarbonado\n  \
-             export CARBONADO_LEAN_LIB=$PWD/result-libcarbonado/lib\n  \
-             export CARBONADO_LEAN_INCLUDE=$PWD/result-libcarbonado/include\n  \
-             export LD_LIBRARY_PATH=$CARBONADO_LEAN_LIB\n  \
-             # or: just test-lean-ci / just g9-gen-fixtures"
-        );
     }
 }
 
@@ -148,11 +124,7 @@ fn write_json<T: Serialize>(path: &Path, value: &T) {
 }
 
 fn active_engine() -> &'static str {
-    if cfg!(feature = "backend-lean") {
-        "lean"
-    } else {
-        "rust"
-    }
+    "rust"
 }
 
 fn is_encrypted(format: u8) -> bool {
@@ -227,8 +199,6 @@ fn encode_outboard_fixture(format: u8) -> (OutboardEncoded, Option<Vec<u8>>, boo
 #[ignore = "set G9_WRITE_FIXTURES=1 to regenerate tests/fixtures/g9/{engine}/"]
 fn write_fixtures() {
     require_write_env();
-    #[cfg(feature = "backend-lean")]
-    require_lean_lib();
 
     let engine = active_engine();
     let root = engine_dir(engine);
@@ -556,11 +526,10 @@ fn decode_outboard_fixture(engine: &str, format: u8) {
 }
 
 // ---------------------------------------------------------------------------
-// lean→rust: decode lean fixtures under default backend-rust
+// Decode committed Lean AOT goldens with the Rust library
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "backend-rust")]
-mod lean_to_rust {
+mod lean_goldens {
     use super::*;
 
     #[test]
@@ -585,149 +554,12 @@ mod lean_to_rust {
     }
 }
 
-// ---------------------------------------------------------------------------
-// rust→lean: decode rust fixtures under backend-lean (+ optional re-encode bit-match)
-// ---------------------------------------------------------------------------
-
-#[cfg(feature = "backend-lean")]
-mod rust_to_lean {
-    use super::*;
-    use carbonado::structs::Encoded;
-
-    #[test]
-    fn body_matrix() {
-        require_lean_lib();
-        for &format in BODY_FORMATS {
-            decode_body_fixture("rust", format);
-        }
-    }
-
-    #[test]
-    fn headered_matrix() {
-        require_lean_lib();
-        for &format in HEADERED_FORMATS {
-            decode_headered_fixture("rust", format);
-        }
-    }
-
-    #[test]
-    fn outboard_matrix() {
-        require_lean_lib();
-        for &format in OUTBOARD_FORMATS {
-            decode_outboard_fixture("rust", format);
-        }
-    }
-
-    /// Public no-compress body re-encode under lean must bit-match rust golden.
-    #[test]
-    fn public_body_reencode_bit_match() {
-        require_lean_lib();
-        for &format in &[0u8, 4, 8, 12] {
-            let (rust_body, meta) = load_body("rust", format);
-            let Encoded(lean_body, lean_hash, _) =
-                encode_with_nonce(&MASTER, PLAINTEXT, format, None)
-                    .unwrap_or_else(|e| panic!("lean re-encode c{format}: {e}"));
-            assert_eq!(
-                lean_body, rust_body,
-                "lean re-encode must bit-match rust body c{format}"
-            );
-            assert_eq!(
-                to_hex(lean_hash.as_bytes()),
-                meta.hash_hex,
-                "lean re-encode hash c{format}"
-            );
-        }
-    }
-
-    /// Encrypted fixed-nonce body re-encode under lean must bit-match rust golden.
-    #[test]
-    fn encrypted_body_reencode_bit_match() {
-        require_lean_lib();
-        for &format in &[1u8, 5, 9, 13] {
-            let (rust_body, meta) = load_body("rust", format);
-            let Encoded(lean_body, lean_hash, _) =
-                encode_with_nonce(&MASTER, PLAINTEXT, format, Some(NONCE))
-                    .unwrap_or_else(|e| panic!("lean re-encode enc c{format}: {e}"));
-            assert_eq!(
-                lean_body, rust_body,
-                "lean re-encode must bit-match rust encrypted body c{format}"
-            );
-            assert_eq!(
-                to_hex(lean_hash.as_bytes()),
-                meta.hash_hex,
-                "lean re-encode enc hash c{format}"
-            );
-        }
-    }
-
-    /// Headered re-encode under lean must bit-match rust golden (no-compress formats).
-    #[test]
-    fn headered_reencode_bit_match() {
-        require_lean_lib();
-        for &format in HEADERED_FORMATS {
-            let (rust_arch, meta) = load_headered("rust", format);
-            let nonce = if is_encrypted(format) {
-                Some(NONCE)
-            } else {
-                None
-            };
-            let (lean_arch, _) = file::encode_with_nonce(&MASTER, PLAINTEXT, format, None, nonce)
-                .unwrap_or_else(|e| panic!("lean re-encode headered c{format}: {e}"));
-            assert_eq!(
-                lean_arch, rust_arch,
-                "lean re-encode must bit-match rust headered c{format}"
-            );
-            let (hdr, _) = file::decode(&MASTER, &lean_arch).expect("decode lean headered");
-            assert_eq!(to_hex(hdr.hash.as_bytes()), meta.hash_hex);
-        }
-    }
-
-    /// Outboard re-encode under lean must bit-match rust golden (skip compressed c14).
-    #[test]
-    fn outboard_reencode_bit_match_no_compress() {
-        require_lean_lib();
-        for &format in &[4u8, 5, 12, 13] {
-            let loaded = load_outboard("rust", format);
-            let (oenc, header, _) = encode_outboard_fixture(format);
-            assert_eq!(
-                oenc.main, loaded.main,
-                "lean re-encode main must bit-match rust outboard c{format}"
-            );
-            assert_eq!(
-                oenc.verification_outboard.as_deref(),
-                loaded.verification_outboard.as_deref(),
-                "outboard c{format} verification outboard"
-            );
-            assert_eq!(
-                oenc.fec_parity.as_deref(),
-                loaded.fec_parity.as_deref(),
-                "outboard c{format} fec parity"
-            );
-            if is_encrypted(format) {
-                assert_eq!(
-                    header.as_deref(),
-                    loaded.header.as_deref(),
-                    "outboard c{format} header.bin"
-                );
-            }
-            assert_eq!(
-                to_hex(oenc.hash.as_bytes()),
-                loaded.meta.hash_hex,
-                "outboard c{format} hash"
-            );
-        }
-    }
-}
-
-/// `Some([0u8; 16])` must be honored literally on the active backend (no CSPRNG override).
+/// `Some([0u8; 16])` must be honored literally (no CSPRNG override).
 ///
 /// Uses c1 (encryption-only body, embedded layout) and c5 headered so the zero nonce is
-/// visible on the wire. Dual-backend identity is the same contract on both engines.
+/// visible on the wire.
 #[test]
 fn explicit_zero_nonce_is_honored_headered_and_body() {
-    #[cfg(feature = "backend-lean")]
-    require_lean_lib();
-
     let zero = [0u8; 16];
     let pt = b"g9 zero nonce dual contract";
 
@@ -763,9 +595,6 @@ fn explicit_zero_nonce_is_honored_headered_and_body() {
 
 #[test]
 fn active_backend_self_roundtrip_matrix() {
-    #[cfg(feature = "backend-lean")]
-    require_lean_lib();
-
     for &format in BODY_FORMATS {
         let (body, hash, pad) = encode_body(format);
         let d = decode(&MASTER, &hash, &body, pad, format).expect("body decode");

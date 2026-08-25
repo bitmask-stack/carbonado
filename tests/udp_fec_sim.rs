@@ -27,7 +27,7 @@ use carbonado::{
     scrub,
     structs::Encoded,
 };
-use common::corruption::{erase_shards, InboardShardLayout, OutboardShardLayout};
+use common::corruption::{InboardShardLayout, OutboardShardLayout, erase_shards};
 
 /// Chaos-injection datagram: `shard_index` + payload at `InboardShardLayout` coordinates.
 #[derive(Clone, Debug)]
@@ -323,8 +323,8 @@ fn directory_bundle_parity_outboard_scrub_recovery() -> Result<()> {
         directory::SegmentFormatPolicy,
         encode_outboard,
         file::{
-            decode, decode_directory, encode_directory_with_options, DirectoryEncodeOptions,
-            DIRECTORY_ARCHIVE_FORMAT,
+            DIRECTORY_ARCHIVE_FORMAT, DirectoryEncodeOptions, decode, decode_directory,
+            encode_directory_with_options,
         },
         filepack_manifest::FilepackManifest,
         scrub_outboard,

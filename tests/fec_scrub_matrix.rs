@@ -7,7 +7,7 @@ use carbonado::{
     decode, decode_outboard, encode, encode_outboard, error::CarbonadoError, scrub, scrub_outboard,
     structs::Encoded,
 };
-use common::corruption::{flip_byte, InboardShardLayout};
+use common::corruption::{InboardShardLayout, flip_byte};
 use common::format_matrix::{format_label, public_fec_levels, verification_fec_levels};
 use rand::Rng;
 

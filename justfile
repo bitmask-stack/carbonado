@@ -1,33 +1,50 @@
 # Carbonado development tasks. Run `just` to list recipes.
 # Before a release: `just all`
+#
+# Full quality gate (fmt, clippy, nextest, then Lean proof/demo checks) on
+# the Nix remote builder: `just check` / `just check-remote`. Sequential.
+# There is no Cargo Lean backend. GitHub Actions must not call check-remote;
+# GHA keeps `just fmt` / `just lint` / `just test` / Lean nix checks.
+# Force-remote nix: caller max-jobs 0, --store ssh-ng (machines file),
+# --eval-store auto, --cores 64. rustc requires surmount-remote.
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
+
+# Host system for flake check attributes. Prefer CI_SYSTEM. Do not call nix
+# at just parse time.
+system := env_var_or_default("CI_SYSTEM", `case "$(uname -s)-$(uname -m)" in Linux-x86_64) echo x86_64-linux;; Linux-aarch64|Linux-arm64) echo aarch64-linux;; Darwin-x86_64) echo x86_64-darwin;; Darwin-arm64) echo aarch64-darwin;; *) echo "unsupported $(uname -s)-$(uname -m); set CI_SYSTEM=..." >&2; exit 1;; esac`)
 
 default:
     @just --list
 
-# Clone the keyed bao-tree sibling (../bao-tree, branch 76-keyed-bao).
+# Clone n0-computer/bao-tree at the PR 78 merge SHA (optional sibling path patch).
+bao_tree_rev := "dbc952e32cbda8ffd14c106b770e72987b01618e"
+
 setup-bao-tree:
     #!/usr/bin/env bash
     set -euo pipefail
+    PIN="{{bao_tree_rev}}"
     if [[ -f ../bao-tree/Cargo.toml ]]; then
       echo "../bao-tree already present"
     else
-      git clone -b 76-keyed-bao https://github.com/SurmountSystems/bao-tree.git ../bao-tree
+      git clone https://github.com/n0-computer/bao-tree.git ../bao-tree
     fi
-    rg -q 'keyed_hash_subtree|KeyedHash|create_keyed' ../bao-tree/src
-    echo "bao-tree OK (keyed fork)"
+    git -C ../bao-tree fetch --all --tags
+    git -C ../bao-tree checkout "$PIN"
+    rg -q 'create_keyed|keyed_outboard_post_order' ../bao-tree/src
+    echo "bao-tree OK (n0-computer $PIN)"
 
 # Optional: verify sibling bao-tree when using `.cargo/config.toml` path patch.
 require-bao-tree:
     #!/usr/bin/env bash
     set -euo pipefail
+    PIN="{{bao_tree_rev}}"
     if [[ ! -f ../bao-tree/Cargo.toml ]]; then
       echo "Missing ../bao-tree. Run: just setup-bao-tree (optional path patch for faster local builds)"
       exit 1
     fi
-    if ! rg -q 'keyed_hash_subtree|KeyedHash|create_keyed' ../bao-tree/src 2>/dev/null; then
-      echo "Wrong bao-tree at ../bao-tree — need SurmountSystems branch 76-keyed-bao"
+    if ! rg -q 'create_keyed|keyed_outboard_post_order' ../bao-tree/src 2>/dev/null; then
+      echo "Wrong bao-tree at ../bao-tree — need n0-computer PR 78 merge ($PIN)"
       exit 1
     fi
 
@@ -40,25 +57,356 @@ dev-local-bao:
     cp -f .cargo/config.toml.example .cargo/config.toml
     echo "Local bao-tree path patch enabled (.cargo/config.toml)"
 
+# Host cargo fmt (CI `lint` job). Check gate uses --all -- --check, not a write.
 fmt:
-    cargo fmt --check
+    cargo fmt --all -- --check
 
 fmt-fix:
-    cargo fmt
+    cargo fmt --all
 
-# rustfmt has no `-W`; `--check` is the fail-if-unformatted equivalent of `cargo fmt --all -W`.
-# Never `--all-features` on clippy: that enables both `backend-rust` and `backend-lean`
-# and hits `compile_error!`. This is the rust-compatible stand-in (same as `just lint` / CI).
-# Rust-only gate: fmt --check, clippy (rust features), nextest. Stops on first failure.
-check:
-    cargo fmt --all -- --check
-    cargo clippy --all-targets --features "async,async-tokio,man-gen" -- -D warnings
-    cargo nextest run
+# Fail loud before force-remote nix. Reuses the trusted-user machines file
+# (default $HOME/.config/nix/machines). Does not bake a host address. Does
+# not fall back to local Nix store builds. Override: GROK_NIX_BUILDERS_FILE.
+[private]
+require_remote_builder:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    file="${GROK_NIX_BUILDERS_FILE:-$HOME/.config/nix/machines}"
+    known_hosts="${GROK_NIX_KNOWN_HOSTS:-$HOME/.ssh/known_hosts}"
+    extra_ssh="-o UserKnownHostsFile=${known_hosts} -o StrictHostKeyChecking=yes"
+    if [[ -n "${NIX_SSHOPTS:-}" ]]; then
+      export NIX_SSHOPTS="${NIX_SSHOPTS} ${extra_ssh}"
+    else
+      export NIX_SSHOPTS="${extra_ssh}"
+    fi
+    if [[ ! -s "${file}" ]]; then
+      echo "The Nix builders file is missing or empty: ${file}." >&2
+      echo "just check-remote reuses the trusted-user machines file already named in the user Nix config (override with GROK_NIX_BUILDERS_FILE)." >&2
+      echo "Host cargo recipes (just fmt, just lint, just test) do not need this file." >&2
+      exit 2
+    fi
+    if ! grep -q 'ssh-ng://' "${file}"; then
+      echo "The Nix builders file ${file} has no ssh-ng:// builder line." >&2
+      echo "just check-remote will not fall back to local Nix store builds." >&2
+      exit 2
+    fi
+    ssh_ng_host() {
+      local u="${1#ssh-ng://}"
+      u="${u%%\?*}"
+      u="${u#*@}"
+      u="${u%%/*}"
+      if [[ "${u}" == \[* ]]; then
+        u="${u#\[}"
+        u="${u%%]*}"
+      else
+        u="${u%%:*}"
+      fi
+      printf '%s' "${u}"
+    }
+    host_key_present() {
+      local host="$1"
+      [[ -s "${known_hosts}" ]] || return 1
+      ssh-keygen -F "${host}" -f "${known_hosts}" 2>/dev/null | awk '!/^#/ && $2 ~ /^ssh-/ { found=1; exit } END { exit !found }'
+    }
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+      [[ "${line}" == ssh-ng://* ]] || continue
+      set -- ${line}
+      host="$(ssh_ng_host "${1}")"
+      if [[ -z "${host}" ]] || ! host_key_present "${host}"; then
+        echo "This account's known_hosts has no host key for the machines-file builder." >&2
+        echo "User ssh to Host surmount-1 is not the nix build SSH path (nix-daemon opens ssh-ng)." >&2
+        echo "just check-remote sets NIX_SSHOPTS to this account's known_hosts and will not fall back to a local rustc." >&2
+        exit 2
+      fi
+    done < "${file}"
+    inject_feats="${GROK_NIX_REMOTE_SYSTEM_FEATURES-}"
+    if [[ -z "${inject_feats}" ]]; then
+      if ! ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes surmount-1 true; then
+        echo "SSH BatchMode to Host surmount-1 failed." >&2
+        echo "just check-remote requires that existing remote builder and will not fall back to local Nix store builds." >&2
+        exit 2
+      fi
+    fi
+    remote_feats=""
+    if [[ -n "${inject_feats}" ]]; then
+      remote_feats="${inject_feats}"
+    else
+      set +e
+      feats_out="$(ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes surmount-1 'nix config show' 2>/dev/null)"
+      feats_status=$?
+      set -e
+      if [[ "${feats_status}" -ne 0 ]]; then
+        echo "Could not read the remote builder nix-daemon system-features over SSH BatchMode." >&2
+        echo "just check-remote will not start the long quality build until that query works." >&2
+        exit 2
+      fi
+      remote_feats="$(awk -F' = ' '/^system-features / { print $2; exit }' <<<"${feats_out}")"
+      if [[ -z "${remote_feats}" ]]; then
+        echo "The remote builder SSH reply had no system-features line." >&2
+        echo "just check-remote will not start the long quality build until the remote nix-daemon reports its feature list." >&2
+        exit 2
+      fi
+    fi
+    if ! grep -Eq '(^|[[:space:],{])surmount-remote($|[[:space:],}])' <<<"${remote_feats}"; then
+      echo "The remote nix-daemon does not list surmount-remote in its system-features." >&2
+      echo "The client machines file advertises that feature, so Nix will schedule rustc on the remote, then the daemon will refuse: missing system features." >&2
+      echo "Add surmount-remote to the builder daemon (NixOS extra-system-features / nix.conf) and restart or switch. just check-remote will not start the long quality build until that feature is present." >&2
+      exit 2
+    fi
+    echo "==> just check-remote: using builders file ${file}"
+    echo "==> just check-remote: NIX_SSHOPTS uses this account's known_hosts (host-key checks stay on)"
+    echo "==> just check-remote: rustc, clippy, and nextest require the remote builder surmount-remote feature (fallback=false). This laptop does not advertise that feature, so local nixbld cannot take the rustc job."
+    echo "==> just check-remote: force-remote nix sets max-jobs 0. This laptop must not build. Fixed-output derivations and toolchain downloads go to the remote builder."
+    echo "==> just check-remote: force-remote nix uses --store ssh-ng (same machines-file builder) and --eval-store auto. -L logs still stream. nix build --no-link skips a local result symlink."
+    echo "==> just check-remote: force-remote nix uses --cores 64. Host machines max-jobs should advertise that many jobs on the builder."
+
+# Retry a nix command. When GROK_NIX_FORCE_REMOTE=1, append force-remote
+# flags (max-jobs 0, ssh-ng --store, --eval-store auto). Hard SSH /
+# missing-system-features / rustfmt Diff-in / clippy could-not-compile /
+# nextest fail exit on attempt 1.
+[private]
+[positional-arguments]
+nix_retry +cmd:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    raw_attempts="${NIX_RETRY_ATTEMPTS:-4}"
+    if [[ ! "${raw_attempts}" =~ ^[1-9][0-9]*$ ]]; then
+      echo "==> nix_retry: NIX_RETRY_ATTEMPTS must be a positive integer, got: ${raw_attempts}" >&2
+      exit 2
+    fi
+    attempts="${raw_attempts}"
+    backoff=5
+    n=1
+    attempt_log="$(mktemp)"
+    enriched_builders=""
+    cleanup_nix_retry_log() { rm -f "${attempt_log}" "${enriched_builders}"; }
+    trap cleanup_nix_retry_log EXIT
+    force_remote_opts=()
+    if [[ "${GROK_NIX_FORCE_REMOTE:-}" == "1" ]]; then
+      builders_file="${GROK_NIX_BUILDERS_FILE:-$HOME/.config/nix/machines}"
+      known_hosts="${GROK_NIX_KNOWN_HOSTS:-$HOME/.ssh/known_hosts}"
+      extra_ssh="-o UserKnownHostsFile=${known_hosts} -o StrictHostKeyChecking=yes"
+      if [[ -n "${NIX_SSHOPTS:-}" ]]; then
+        export NIX_SSHOPTS="${NIX_SSHOPTS} ${extra_ssh}"
+      else
+        export NIX_SSHOPTS="${extra_ssh}"
+      fi
+      ssh_ng_host() {
+        local u="${1#ssh-ng://}"
+        u="${u%%\?*}"
+        u="${u#*@}"
+        u="${u%%/*}"
+        if [[ "${u}" == \[* ]]; then
+          u="${u#\[}"
+          u="${u%%]*}"
+        else
+          u="${u%%:*}"
+        fi
+        printf '%s' "${u}"
+      }
+      host_key_b64() {
+        local host="$1"
+        local line typ key
+        [[ -s "${known_hosts}" ]] || return 1
+        line="$(ssh-keygen -F "${host}" -f "${known_hosts}" 2>/dev/null | awk '!/^#/ && $2=="ssh-ed25519" {print; exit}')"
+        if [[ -z "${line}" ]]; then
+          line="$(ssh-keygen -F "${host}" -f "${known_hosts}" 2>/dev/null | awk '!/^#/ && $2 ~ /^ssh-/ {print; exit}')"
+        fi
+        [[ -n "${line}" ]] || return 1
+        typ="$(awk '{print $2}' <<<"${line}")"
+        key="$(awk '{print $3}' <<<"${line}")"
+        printf '%s' "${typ} ${key}" | base64 -w0
+      }
+      max_conn="${GROK_NIX_SSH_NG_MAX_CONNECTIONS:-8}"
+      if [[ ! "${max_conn}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "==> nix_retry: GROK_NIX_SSH_NG_MAX_CONNECTIONS must be a positive integer, got: ${max_conn}" >&2
+        exit 2
+      fi
+      enriched_builders="$(mktemp)"
+      chmod 600 "${enriched_builders}"
+      while IFS= read -r line || [[ -n "${line}" ]]; do
+        if [[ "${line}" != ssh-ng://* ]]; then
+          printf '%s\n' "${line}" >>"${enriched_builders}"
+          continue
+        fi
+        uri="" systems="" ssh_key="" max_jobs="" speed="" supported="" mandatory="" host_key=""
+        read -r uri systems ssh_key max_jobs speed supported mandatory host_key _rest <<<"${line}" || true
+        if [[ "${uri}" != *"max-connections="* ]]; then
+          if [[ "${uri}" == *\?* ]]; then
+            uri="${uri}&max-connections=${max_conn}"
+          else
+            uri="${uri}?max-connections=${max_conn}"
+          fi
+        fi
+        if [[ -n "${host_key:-}" && "${host_key}" != "-" ]]; then
+          printf '%s %s %s %s %s %s %s %s\n' \
+            "${uri}" "${systems:--}" "${ssh_key:--}" "${max_jobs:--}" "${speed:--}" "${supported:--}" "${mandatory:--}" "${host_key}" >>"${enriched_builders}"
+          continue
+        fi
+        host="$(ssh_ng_host "${uri}")"
+        if ! b64="$(host_key_b64 "${host}")"; then
+          echo "==> nix_retry: this account's known_hosts has no host key for the machines-file builder. User ssh to Host surmount-1 is not the nix build SSH path." >&2
+          exit 2
+        fi
+        printf '%s %s %s %s %s %s %s %s\n' \
+          "${uri}" "${systems:--}" "${ssh_key:--}" "${max_jobs:--}" "${speed:--}" "${supported:--}" "${mandatory:--}" "${b64}" >>"${enriched_builders}"
+      done < "${builders_file}"
+      builders_file="${enriched_builders}"
+      store_uri=""
+      while IFS= read -r bline || [[ -n "${bline}" ]]; do
+        if [[ "${bline}" == ssh-ng://* ]]; then
+          read -r store_uri _ <<<"${bline}" || true
+          break
+        fi
+      done < "${builders_file}"
+      if [[ -z "${store_uri}" || "${store_uri}" != ssh-ng://* ]]; then
+        echo "==> nix_retry: GROK_NIX_FORCE_REMOTE needs an ssh-ng:// builder URI in the machines file so nix can use --store on that builder. This laptop must not realize the graph into the local store." >&2
+        exit 2
+      fi
+      force_remote_opts=(
+        --option builders "@${builders_file}"
+        --option builders-use-substitutes true
+        --option fallback false
+        --option system-features "kvm nixos-test uid-range"
+        --option max-jobs 0
+        --cores 64
+        --store "${store_uri}"
+        --eval-store auto
+      )
+      if [[ "${2:-}" == "build" ]]; then
+        force_remote_opts+=(--no-link)
+      fi
+    fi
+    if [[ "${1:-}" == ssh-ng://* ]]; then
+      echo "==> nix_retry: the first argument is a machines-file line, not the nix command. Pass --option builders @file after the command; do not put the machines line in \"\$@\"." >&2
+      exit 2
+    fi
+    while true; do
+      if ((${#force_remote_opts[@]})); then
+        banner_opts=()
+        skip_store_uri=0
+        for opt in "${force_remote_opts[@]}"; do
+          if [[ "${skip_store_uri}" -eq 1 ]]; then
+            banner_opts+=("<builder>")
+            skip_store_uri=0
+            continue
+          fi
+          if [[ "${opt}" == "--store" ]]; then
+            banner_opts+=(--store)
+            skip_store_uri=1
+            continue
+          fi
+          banner_opts+=("${opt}")
+        done
+        echo "==> nix attempt ${n}/${attempts}: $* ${banner_opts[*]}"
+      else
+        echo "==> nix attempt ${n}/${attempts}: $*"
+      fi
+      set +e
+      set +o pipefail
+      "$@" "${force_remote_opts[@]}" 2>&1 | tee "${attempt_log}"
+      status="${PIPESTATUS[0]}"
+      set -o pipefail
+      set -e
+      if [[ "${status}" -eq 0 ]]; then
+        exit 0
+      fi
+      if grep -qE 'failed to start SSH connection|Failed to find a machine for remote build' "${attempt_log}"; then
+        echo "==> nix_retry: the builder is listed, but SSH did not start. rustc was not run locally. Not retrying this hard remote miss." >&2
+        exit "${status}"
+      fi
+      if grep -qE 'missing system features' "${attempt_log}"; then
+        echo "==> nix_retry: the remote builder refused this derivation: missing system features. Add surmount-remote to the builder daemon and retry. Not retrying this hard remote miss." >&2
+        exit "${status}"
+      fi
+      if grep -qE 'Diff in ' "${attempt_log}"; then
+        echo "==> nix_retry: cargo fmt / rustfmt check failed (Diff in). Format the listed files and retry. Not retrying this hard quality miss." >&2
+        exit "${status}"
+      fi
+      if grep -qE 'error: could not compile|clippy::' "${attempt_log}"; then
+        echo "==> nix_retry: cargo clippy / rustc quality failed (could not compile). Fix the listed errors and retry. Not retrying this hard quality miss." >&2
+        exit "${status}"
+      fi
+      if grep -qE 'cannot update the lock file|--locked was passed' "${attempt_log}"; then
+        echo "==> nix_retry: cargo lockfile / --locked mismatch. Not retrying this hard quality miss." >&2
+        exit "${status}"
+      fi
+      if grep -qE 'hash mismatch in fixed-output derivation' "${attempt_log}"; then
+        echo "==> nix_retry: nix fixed-output hash mismatch. Update the listed sha256 and retry. Not retrying this hard quality miss." >&2
+        exit "${status}"
+      fi
+      if grep -qE 'error: test run failed|test run failed' "${attempt_log}"; then
+        echo "==> nix_retry: cargo nextest / test run failed. Fix the listed tests and retry. Not retrying this hard quality miss." >&2
+        exit "${status}"
+      fi
+      if [[ "${status}" -eq 127 ]] && grep -qE 'ssh-ng://.*No such file or directory' "${attempt_log}"; then
+        echo "==> nix_retry: the command was a machines-file line (exit 127). Force-remote builders belong in --option builders @file after nix. Not retrying this hard recipe miss." >&2
+        exit "${status}"
+      fi
+      if [[ "${n}" -ge "${attempts}" ]]; then
+        echo "==> nix FAILED after ${n} attempt(s) (exit ${status}): $*" >&2
+        exit "${status}"
+      fi
+      echo "==> nix attempt ${n} failed (exit ${status}); retrying in ${backoff}s..." >&2
+      sleep "${backoff}"
+      backoff=$((backoff * 3))
+      n=$((n + 1))
+    done
+
+# Sequential host-Nix flake checks (fmt, clippy, nextest, then Lean proofs).
+# Does not force the remote builder; this laptop may rustc.
+check-local:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    sys="{{ system }}"
+    echo "==> just check-local: fmt"
+    nix build --impure -L --print-out-paths "path:.#checks.${sys}.fmt"
+    echo "==> just check-local: clippy (backend-rust + async,async-tokio,man-gen)"
+    nix build --impure -L --print-out-paths "path:.#checks.${sys}.clippy-rust"
+    echo "==> just check-local: nextest (backend-rust)"
+    nix build --impure -L --print-out-paths "path:.#checks.${sys}.nextest-rust"
+    echo "==> just check-local: Lean gates"
+    nix build --impure -L --print-out-paths "path:.#checks.${sys}.no-sorry"
+    nix build --impure -L --print-out-paths "path:.#checks.${sys}.tooling-purity"
+    nix build --impure -L --print-out-paths "path:.#checks.${sys}.carbonado"
+    nix build --impure -L --print-out-paths "path:.#checks.${sys}.demo"
+    nix build --impure -L --print-out-paths "path:.#checks.${sys}.rustc-1_98"
+
+# Sequential force-remote gate. rustc requires surmount-remote. Quote
+# .#attr; unquoted # is a bash comment.
+check-remote: require_remote_builder
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export GROK_NIX_FORCE_REMOTE=1
+    export GROK_NIX_BUILDERS_FILE="${GROK_NIX_BUILDERS_FILE:-$HOME/.config/nix/machines}"
+    known_hosts="${GROK_NIX_KNOWN_HOSTS:-$HOME/.ssh/known_hosts}"
+    extra_ssh="-o UserKnownHostsFile=${known_hosts} -o StrictHostKeyChecking=yes"
+    if [[ -n "${NIX_SSHOPTS:-}" ]]; then
+      export NIX_SSHOPTS="${NIX_SSHOPTS} ${extra_ssh}"
+    else
+      export NIX_SSHOPTS="${extra_ssh}"
+    fi
+    sys="{{ system }}"
+    echo "==> just check-remote: fmt"
+    just nix_retry nix build --impure -L --print-out-paths "path:.#fmt-quality"
+    echo "==> just check-remote: clippy (backend-rust + async,async-tokio,man-gen)"
+    just nix_retry nix build --impure -L --print-out-paths "path:.#clippy-rust-quality"
+    echo "==> just check-remote: nextest (backend-rust)"
+    just nix_retry nix build --impure -L --print-out-paths "path:.#nextest-rust-quality"
+    echo "==> just check-remote: Lean gates"
+    just nix_retry nix build --impure -L --print-out-paths "path:.#checks.${sys}.no-sorry"
+    just nix_retry nix build --impure -L --print-out-paths "path:.#checks.${sys}.tooling-purity"
+    just nix_retry nix build --impure -L --print-out-paths "path:.#checks.${sys}.carbonado"
+    just nix_retry nix build --impure -L --print-out-paths "path:.#checks.${sys}.demo"
+    just nix_retry nix build --impure -L --print-out-paths "path:.#checks.${sys}.rustc-1_98"
+
+# Full gate on the remote builder (Surmount split: check-remote is the
+# builder path; check is the name operators type).
+check: check-remote
 
 # Clippy + project-specific source checks (things clippy does not know about).
 lint: _clippy _lint-source
 
-# Never use `--all-features` here: that enables both `backend-rust` and `backend-lean` → compile_error!.
 # Cover optional features mutually compatible with default `backend-rust`.
 [private]
 _clippy:
@@ -153,9 +501,8 @@ _lint-source:
     fi
     echo ""
     echo "--- 4. NotImplemented only on intentional residual / map sites ---"
-    # Allowed (documented dual-backend / platform residuals — not silent crypto stubs):
+    # Allowed (documented residuals — not silent crypto stubs):
     # - error.rs enum variant definition
-    # - backend lean ABI code → CarbonadoError map arm
     # - stream_decode_async on wasm32 (documented NotImplemented residual)
     # - doc comments mentioning the variant
     # (R2: file::encode metadata/SLH are plumbed — no longer NotImplemented)
@@ -167,7 +514,7 @@ _lint-source:
         if echo "$line" | rg -q '^\S+:\d+:[[:space:]]*(//|///|\*)'; then continue; fi
         # enum variant
         if echo "$line" | rg -q 'src/error\.rs:'; then continue; fi
-        # match-arm mapping from C ABI
+        # match-arm mapping to the variant
         if echo "$line" | rg -q '=>[[:space:]]*CarbonadoError::NotImplemented'; then continue; fi
         # intentional wasm async residual
         if echo "$line" | rg -q 'src/stream/decode_async\.rs:'; then continue; fi
@@ -175,7 +522,7 @@ _lint-source:
       done || true)
     fi
     if [[ -z "$notimpl_bad" ]]; then
-      pass "NotImplemented only at allowlisted residual/map sites (dual-backend + wasm async)"
+      pass "NotImplemented only at allowlisted residual/map sites (wasm async)"
       if [[ -n "$notimpl_hits" ]]; then
         echo "  Allowlisted evidence:"
         echo "$notimpl_hits" | sed 's/^/    /'
@@ -232,12 +579,11 @@ _lint-source:
       exit 1
     fi
 
-# wasm32: always name backend-rust under --no-default-features (mutual exclusion).
+# wasm32: name backend-rust under --no-default-features (empty marker + lib).
 lint-wasm:
     cargo clippy --target wasm32-unknown-unknown --no-default-features --features "backend-rust" -- -D warnings
 
-# Default features (includes `parallel`), serial FEC, then backend-rust + optional features.
-# Never `--all-features` (enables both backends → compile_error!).
+# Default features (includes `parallel`), serial FEC, then optional features.
 test:
     cargo test
     cargo test --no-default-features --features "backend-rust,pqc,ots,cli" --test serial_fec_path
@@ -253,104 +599,23 @@ test-parallel:
 test-smoke:
     cargo test --test streaming --test seekable_slices --test sharding --test bao_keyed_contract
 
-# Shared lean env: build libcarbonado if CARBONADO_LEAN_LIB unset; fail-closed if .so/.dylib missing.
-# stdout: only `export …` lines (safe for `eval "$(just _lean-env)"`); diagnostics on stderr.
-[private]
-_lean-env:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [[ -z "${CARBONADO_LEAN_LIB:-}" ]]; then
-      # Dedicated symlink so other `nix build` targets do not clobber `result/`.
-      nix build .#libcarbonado -o result-libcarbonado
-      export CARBONADO_LEAN_LIB="$PWD/result-libcarbonado/lib"
-      export CARBONADO_LEAN_INCLUDE="$PWD/result-libcarbonado/include"
-    fi
-    if [[ ! -f "${CARBONADO_LEAN_LIB}/libcarbonado.so" && ! -f "${CARBONADO_LEAN_LIB}/libcarbonado.dylib" ]]; then
-      echo "FATAL: libcarbonado shared library missing under CARBONADO_LEAN_LIB=${CARBONADO_LEAN_LIB}" >&2
-      echo "  Build: nix build .#libcarbonado -o result-libcarbonado" >&2
-      echo "  Then:  export CARBONADO_LEAN_LIB=\$PWD/result-libcarbonado/lib" >&2
-      echo "         export CARBONADO_LEAN_INCLUDE=\$PWD/result-libcarbonado/include" >&2
-      exit 1
-    fi
-    if [[ -z "${CARBONADO_LEAN_INCLUDE:-}" ]]; then
-      if [[ -d "$(dirname "${CARBONADO_LEAN_LIB}")/include" ]]; then
-        export CARBONADO_LEAN_INCLUDE="$(dirname "${CARBONADO_LEAN_LIB}")/include"
-      else
-        echo "FATAL: CARBONADO_LEAN_INCLUDE unset and cannot infer from CARBONADO_LEAN_LIB" >&2
-        exit 1
-      fi
-    fi
-    export LD_LIBRARY_PATH="${CARBONADO_LEAN_LIB}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-    echo "CARBONADO_LEAN_LIB=$CARBONADO_LEAN_LIB" >&2
-    echo "CARBONADO_LEAN_INCLUDE=$CARBONADO_LEAN_INCLUDE" >&2
-    printf 'export CARBONADO_LEAN_LIB=%q\n' "$CARBONADO_LEAN_LIB"
-    printf 'export CARBONADO_LEAN_INCLUDE=%q\n' "$CARBONADO_LEAN_INCLUDE"
-    printf 'export LD_LIBRARY_PATH=%q\n' "$LD_LIBRARY_PATH"
-
-# Dual-backend Phase 1: build libcarbonado and run lean allowlist smoke.
-test-lean-smoke:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    eval "$(just _lean-env)"
-    cargo test --no-default-features --features "backend-lean,pqc,ots" --test lean_backend_smoke
-
-# Dual-backend Phase 2: outboard/scrub/slice + G9 buffer seeds (+ Phase 1 smoke).
-test-lean-phase2:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    eval "$(just _lean-env)"
-    cargo test --no-default-features --features "backend-lean,pqc,ots" \
-      --test lean_backend_smoke --test lean_backend_phase2
-
-# Dual-backend Phase 3: directory composition (rkyv catalog + Lean segment/catalog crypto).
-test-lean-phase3:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    eval "$(just _lean-env)"
-    cargo test --no-default-features --features "backend-lean,pqc,ots" \
-      --test lean_backend_smoke --test lean_backend_phase2 --test lean_backend_phase3 \
-      --test format_policy
-
-# Dual-backend Phase 4: SLH composition (G10-A) + CLI dual path + directory OTS.
-# `cli` enables lean-linked binary: directory subprocess = dual-engine; single-file stream = link smoke.
-test-lean-phase4:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    eval "$(just _lean-env)"
-    cargo test --no-default-features --features "backend-lean,pqc,ots,cli" \
-      --test lean_backend_smoke --test lean_backend_phase2 --test lean_backend_phase3 \
-      --test format_policy --test slh_outboard --test lean_backend_phase4
-
-# Dual-backend Phase 5 / G11 + R7 G8 full close: shared CI + human gate.
-# Freeze = full dual suite under lean features (G8 closed 2026-07 R7). See docs/GAPS.md.
-# Permanent feature-gated exclusions under this feature set (0 tests, not dual residual):
-#   streaming_async needs `async` (R10 closed: freeze never requires async; lean+async dual-aware);
-#   parallel_determinism needs `parallel` (Lean RS serial).
-# Post-G8 residuals (not dual-suite failures): stream E2, file::decode_stream pure-Rust,
-# pure Lean rkyv encode residual — composition paths remain SSOT for those layers.
+# Lean proof + AOT demo gates (no Rust -sys / libcarbonado).
 test-lean-ci:
     #!/usr/bin/env bash
     set -euo pipefail
-    eval "$(just _lean-env)"
-    # Full dual suite (lib units + all integration tests, including bin_*). Never add async.
-    cargo test --no-default-features --features "backend-lean,pqc,ots,cli"
+    sys="{{ system }}"
+    nix build --impure -L --print-out-paths "path:.#checks.${sys}.no-sorry"
+    nix build --impure -L --print-out-paths "path:.#checks.${sys}.tooling-purity"
+    nix build --impure -L --print-out-paths "path:.#checks.${sys}.carbonado"
+    nix build --impure -L --print-out-paths "path:.#checks.${sys}.demo"
 
-# G9 / R8: cross-backend matrix both directions (lean fixtures → rust; rust fixtures → lean).
+# Rust decode of committed Lean AOT goldens under tests/fixtures/g9/lean/.
 test-g9:
-    #!/usr/bin/env bash
-    set -euo pipefail
     cargo test --test g9_cross_backend
-    eval "$(just _lean-env)"
-    cargo test --no-default-features --features "backend-lean,pqc,ots" --test g9_cross_backend
 
-# Regenerate G9 goldens under tests/fixtures/g9/{rust,lean}/ (requires libcarbonado for lean).
+# Regenerate rust goldens under tests/fixtures/g9/rust/.
 g9-gen-fixtures:
-    #!/usr/bin/env bash
-    set -euo pipefail
     G9_WRITE_FIXTURES=1 cargo test --test g9_cross_backend write_fixtures -- --ignored --nocapture
-    eval "$(just _lean-env)"
-    G9_WRITE_FIXTURES=1 cargo test --no-default-features --features "backend-lean,pqc,ots" \
-      --test g9_cross_backend write_fixtures -- --ignored --nocapture
 
 build:
     cargo build --bin carbonado --release

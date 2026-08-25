@@ -14,9 +14,9 @@ use std::io::Cursor;
 use carbonado::constants::FEC_M;
 use carbonado::stream::fec::FecInboardEncoder;
 use carbonado::stream::parallel::{
-    encode_rs_parity_serial, encode_rs_parity_with_config, ParallelConfig,
+    ParallelConfig, encode_rs_parity_serial, encode_rs_parity_with_config,
 };
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use reed_solomon_erasure::galois_8::ReedSolomon;
 
 fn patterned(len: usize) -> Vec<u8> {

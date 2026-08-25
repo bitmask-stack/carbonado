@@ -59,11 +59,15 @@ pub enum CarbonadoError {
     InvalidScrubbedHash,
 
     /// FEC padding should be zero when encoding (Carbonado adds its own)
-    #[error("Padding from FEC should always be zero, since Carbonado adds its own padding. Padding was {0}.")]
+    #[error(
+        "Padding from FEC should always be zero, since Carbonado adds its own padding. Padding was {0}."
+    )]
     EncodeFecPaddingError(usize),
 
     /// Invalid chunk length
-    #[error("Chunk length should be as calculated. Calculated chunk length was {0}, but actual chunk length was {1}")]
+    #[error(
+        "Chunk length should be as calculated. Calculated chunk length was {0}, but actual chunk length was {1}"
+    )]
     EncodeInvalidChunkLength(u32, usize),
 
     /// Invalid verifiable slice length
@@ -71,7 +75,9 @@ pub enum CarbonadoError {
     InvalidVerifiableSliceCount(u32),
 
     /// Invalid magic number
-    #[error("File header lacks Carbonado magic number and may not be a proper Carbonado file. Magic number found was {0}.")]
+    #[error(
+        "File header lacks Carbonado magic number and may not be a proper Carbonado file. Magic number found was {0}."
+    )]
     InvalidMagicNumber(String),
 
     /// Invalid header length calculation
@@ -277,9 +283,7 @@ pub enum CarbonadoError {
     MissingShardIndex { expected: u32, found: u32 },
 
     /// Caller-supplied `ShardSource.chunk_index` does not match the authenticated header value.
-    #[error(
-        "Shard index mismatch: caller claimed {claimed}, header authenticated {authenticated}"
-    )]
+    #[error("Shard index mismatch: caller claimed {claimed}, header authenticated {authenticated}")]
     ShardIndexMismatch { claimed: u32, authenticated: u32 },
 }
 

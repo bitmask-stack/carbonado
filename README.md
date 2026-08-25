@@ -81,8 +81,8 @@ Here is what changed and why we made each decision:
   Use `carbonado::crypto::{hybrid_encrypt, hybrid_decrypt, SecpPublicKey, SecpSecretKey, ...}` (and the lower `ecc_aead_*` if desired).  
   **Composition**: hybrid replaces the encryption step. For full archives with header/FEC/Bao, run hybrid on (optionally compressed) data first, then continue with zfec/bao using a format that does *not* have the Encrypted bit set (standard decode paths will not attempt a pure-symmetric decrypt). On read, recover the hybrid-blob then call hybrid_decrypt with master + recipient secret. The outer EtM of the hybrid still uses your master key for the wrap. Pure symmetric (Encrypted bit) stays the default single-layer path. This is deliberate defense-in-depth for the truly paranoid.
 
-- **Magic number and versioning**: We bumped the crate to version 2.0.0 and changed the magic number at the start of every file to `CARBONADO20\n`.  
-  The old development magic (`CARBONADO02\n`) will be rejected with a clear error. This marks the point where the format is considered stabilized.
+- **Magic number and versioning**: The crate version on crates.io is **0.7.0** (after 0.6.0 v1). The on-disk format magic is `CARBONADO20\n`.  
+  The old development magic (`CARBONADO02\n`) will be rejected with a clear error. This marks the point where the v2 format is considered stabilized.
 
 - **Clean break on old files**: The library will not read or write files created with the old ECIES design.  
   If you have old encrypted archives, you must extract them with an older version of the tools and re-encode them with a fresh master key. We made this decision so the code stays simple and we don't have to carry security baggage from the old design forever.
@@ -345,24 +345,26 @@ Code, dependencies, and programs can be vendored and preserved wherever they are
 
 ## Development
 
-Requires [just](https://github.com/casey/just), [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`), and a keyed `bao-tree` sibling at `../bao-tree` (branch `76-keyed-bao`):
+Requires [just](https://github.com/casey/just), [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`), and **Rust 1.98** (edition 2024; see `rust-toolchain.toml`). Cargo fetches keyed `bao-tree` from n0-computer at the PR 78 merge SHA. An optional sibling checkout at `../bao-tree` speeds clean builds (`just setup-bao-tree`):
 
 ```bash
-just setup-bao-tree   # once, if ../bao-tree is missing
+just setup-bao-tree   # optional; pins n0-computer/bao-tree at the merge SHA
 just                  # list recipes
 just all              # everything (fmt, lint, tests, release build, source grep)
 ```
 
 | Recipe | What it does |
 |--------|----------------|
-| `just fmt` | Formatting |
+| `just check` / `just check-remote` | Full sequential gate on the Nix remote builder: fmt, clippy, nextest, then Lean proofs/demo. |
+| `just check-local` | Same sequence as host Nix flake checks (this machine may run rustc) |
+| `just fmt` | `cargo fmt --all -- --check` (CI `lint` job; does not write) |
 | `just lint` | Clippy **and** source checks (no v1 ECIES, prod `unwrap`, magic string, etc.) |
 | `just test` | Full test suite (`backend-rust` default) |
 | `just test-smoke` | Slice/streaming/sharding/bao contract tests |
-| `just test-lean-ci` | Dual-backend lean **full suite** freeze (G8 closed at R7; needs Nix + `libcarbonado`; CI `dual-backend-lean`) |
+| `just test-lean-ci` | Lean no-sorry + AOT demo (`nix`); not a Cargo Lean engine. CI job `lean-proofs`. |
 | `just build` + `just test-cli` | Release binary + CLI tests |
 
-**Dual-backend (Rust + Lean AOT):** default `cargo test` is pure Rust. Lean engine tests require `nix build .#libcarbonado -o result-libcarbonado`, then `CARBONADO_LEAN_LIB` / `CARBONADO_LEAN_INCLUDE` / `LD_LIBRARY_PATH` (or just `just test-lean-ci`, which builds and fail-closes if the shared library is missing). CI runs both: job `desktop` (`backend-rust`) and job `dual-backend-lean` (`just test-lean-ci`). Full lean suite parity (**G8**) is **closed at R7** — freeze = full dual suite under lean features; see [docs/GAPS.md](docs/GAPS.md) and [docs/TEST_CONTRACT.md](docs/TEST_CONTRACT.md).
+**Rust engine + Lean proofs:** default `cargo test` is the production library. Lean is spec + theorems + an AOT demo (`nix build .#carbonado`). There is no `carbonado-sys` / `libcarbonado` Rust link and no Cargo `backend-lean`. Do not claim G8 C-ABI parity. See [docs/GAPS.md](docs/GAPS.md) and [docs/TEST_CONTRACT.md](docs/TEST_CONTRACT.md).
 
 CI runs the same recipes — see `.github/workflows/rust.yaml`.
 
@@ -446,7 +448,7 @@ Running scrub on an input that has no errors in it actually returns an error; th
 
 The 4/8 RS parameters mean only 4 valid shards are needed while 8 are stored — half can fail. This roughly doubles payload size (on top of encryption and Bao overhead). Shard size aligns with 4 KiB Bao slice/leaf geometry (`SLICE_LEN=4096`).
 
-Carbonado now uses 4 KiB chunk groups for Bao trees (via the local keyed bao-tree fork at BlockSize log=2). Slices for verification are 4 KiB content units (`SLICE_LEN=4096`, one slice = one Bao leaf). This aligns with 4 KiB SSD/HDD sectors and reduces tree overhead for small and large files. The root hash is keyed on the format bitmask for multi-dimensional naming.
+Carbonado now uses 4 KiB chunk groups for Bao trees (n0-computer/bao-tree keyed hashing, BlockSize log=2). Slices for verification are 4 KiB content units (`SLICE_LEN=4096`, one slice = one Bao leaf). This aligns with 4 KiB SSD/HDD sectors and reduces tree overhead for small and large files. The root hash is keyed on the format bitmask for multi-dimensional naming.
 
 Storage providers will not need to use RAID to protect storage volumes so long as `carbonadod` is configured to store archive chunks on 8 separate storage volumes. In case a volume fails, scrubbing will recover the missing data. When data is served, only 4 of the chunks are needed. This results in a sort of user-level "application RAID", which is inline with Carbonado's design principles of being a flexible format with user-friendly configuration options. It's designed to be as approachable for "Uncle Jim" hobbyists to use as it is for professional mining datacenters bagged in FIL or XCH.
 

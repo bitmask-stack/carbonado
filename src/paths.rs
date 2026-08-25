@@ -206,19 +206,21 @@ fn is_segment_main_name(name: &str) -> bool {
     if is_adam_catalog_name(name) || name.contains(".adam.c") {
         return false;
     }
-    if let Some((stem, ext)) = name.rsplit_once('.') {
-        if (ext == "out" || ext == "par") && is_decimal_sidecar_stem(stem) {
-            return false;
-        }
+    if let Some((stem, ext)) = name.rsplit_once('.')
+        && (ext == "out" || ext == "par")
+        && is_decimal_sidecar_stem(stem)
+    {
+        return false;
     }
     if strip_decimal_suffix(name).is_some() {
         return true;
     }
-    if let Some((_, ext)) = name.rsplit_once('.') {
-        if ext.len() == 3 && ext.starts_with('c') && ext[1..].chars().all(|c| c.is_ascii_hexdigit())
-        {
-            return !name.ends_with(".out") && !name.ends_with(".par");
-        }
+    if let Some((_, ext)) = name.rsplit_once('.')
+        && ext.len() == 3
+        && ext.starts_with('c')
+        && ext[1..].chars().all(|c| c.is_ascii_hexdigit())
+    {
+        return !name.ends_with(".out") && !name.ends_with(".par");
     }
     false
 }

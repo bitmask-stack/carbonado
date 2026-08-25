@@ -212,9 +212,7 @@ async fn stream_decode_async_truncated_bounded_body_staging_errors_c4_c8() {
 }
 
 /// Verification c12 truncated body: async always fails at spool staging
-/// (`truncated encoded body`). Sync taxonomy is engine-dependent (R10):
-/// - `backend-rust`: incremental Bao → `BaoResponseTruncated` (divergence from async).
-/// - `backend-lean`: R5 E1 spool `read_exact` → `UnexpectedEof` (both paths fail before Bao).
+/// (`truncated encoded body`). Sync incremental Bao → `BaoResponseTruncated`.
 #[tokio::test]
 async fn stream_decode_async_truncated_bounded_verification_diverges_from_sync_c12() {
     let input: Vec<u8> = (0..8192).map(|i| (i % 251) as u8).collect();
@@ -233,18 +231,9 @@ async fn stream_decode_async_truncated_bounded_verification_diverges_from_sync_c
         &mut sync_out,
     )
     .expect_err("sync truncated bounded c12");
-    #[cfg(feature = "backend-rust")]
     assert!(
         matches!(err_sync, CarbonadoError::BaoResponseTruncated(_)),
-        "sync rust must yield BaoResponseTruncated, got {err_sync:?}"
-    );
-    #[cfg(feature = "backend-lean")]
-    assert!(
-        matches!(
-            err_sync,
-            CarbonadoError::StdIoError(ref e) if e.kind() == ErrorKind::UnexpectedEof
-        ),
-        "sync lean E1 must yield UnexpectedEof on short body, got {err_sync:?}"
+        "sync must yield BaoResponseTruncated, got {err_sync:?}"
     );
     assert!(sync_out.is_empty());
 

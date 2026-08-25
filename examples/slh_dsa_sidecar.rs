@@ -10,7 +10,7 @@
 use carbonado::crypto::{
     read_slh_sidecar, slh_dsa_generate_keypair, slh_dsa_sign, slh_dsa_verify, write_slh_sidecar,
 };
-use carbonado::file::{encode, Header};
+use carbonado::file::{Header, encode};
 use getrandom::getrandom;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -85,7 +85,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert!(!still_valid);
 
     println!("\nSLH-DSA sidecar signing example completed successfully.");
-    println!("Remember: SLH-DSA public key is stored in the Carbonado Header; only the signature is handled in the sidecar. Never embed signatures inside the container.");
+    println!(
+        "Remember: SLH-DSA public key is stored in the Carbonado Header; only the signature is handled in the sidecar. Never embed signatures inside the container."
+    );
 
     Ok(())
 }

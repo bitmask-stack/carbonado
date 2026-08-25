@@ -21,7 +21,6 @@ import Carbonado.RkyvFilepack
 import Carbonado.Outboard
 import Carbonado.Directory
 import Carbonado.Cli
-import Carbonado.Ffi
 
 /-- Library root namespace. -/
-def Carbonado.versionString : String := "lean-dual-backend-0"
+def Carbonado.versionString : String := "lean-program-g-0"

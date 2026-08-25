@@ -14,8 +14,8 @@
 
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 
-use aes::cipher::{KeyIvInit, StreamCipher};
 use aes::Aes256;
+use aes::cipher::{KeyIvInit, StreamCipher};
 use ctr::Ctr128BE;
 use hmac::{Hmac, Mac};
 use sha2::Sha512;
@@ -194,10 +194,10 @@ fn decrypt_ct_stream<R: Read, W: Write>(
         }
         let n = input.read(&mut buf[..cap]).map_err(map_read_err)?;
         if n == 0 {
-            if let Some(r) = remaining {
-                if r > 0 {
-                    return Err(CarbonadoError::InvalidCiphertextLength);
-                }
+            if let Some(r) = remaining
+                && r > 0
+            {
+                return Err(CarbonadoError::InvalidCiphertextLength);
             }
             break;
         }
@@ -255,10 +255,10 @@ pub fn stream_decrypt_with_nonce_bounded<R: Read, W: Write>(
         if n == 0 {
             break;
         }
-        if let Some(limit) = ct_len {
-            if total.saturating_add(n as u64) > limit {
-                return Err(excess_ct_error(limit));
-            }
+        if let Some(limit) = ct_len
+            && total.saturating_add(n as u64) > limit
+        {
+            return Err(excess_ct_error(limit));
         }
         mac.update(&buf[..n]);
         spool
@@ -311,10 +311,10 @@ pub fn stream_decrypt_with_nonce_seek<R: Read + Seek, W: Write>(
         if n == 0 {
             break;
         }
-        if let Some(limit) = ct_len {
-            if total.saturating_add(n as u64) > limit {
-                return Err(excess_ct_error(limit));
-            }
+        if let Some(limit) = ct_len
+            && total.saturating_add(n as u64) > limit
+        {
+            return Err(excess_ct_error(limit));
         }
         mac.update(&buf[..n]);
         total += n as u64;

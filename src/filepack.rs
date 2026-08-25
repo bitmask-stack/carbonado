@@ -600,10 +600,12 @@ mod tests {
         let parsed = parse_filepack_cbor(&packed.manifest).expect("parse");
         assert!(!parsed.is_empty());
         for (rel, size) in parsed.iter().map(|e| (e.rel_path.as_str(), e.size)) {
-            assert!(packed
-                .files
-                .iter()
-                .any(|(p, data)| p == rel && data.len() as u64 == size));
+            assert!(
+                packed
+                    .files
+                    .iter()
+                    .any(|(p, data)| p == rel && data.len() as u64 == size)
+            );
         }
     }
 

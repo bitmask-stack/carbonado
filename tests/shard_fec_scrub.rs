@@ -8,7 +8,7 @@ use anyhow::Result;
 use carbonado::{
     error::CarbonadoError,
     scrub,
-    stream::{decode_shards_stream, encode_shard_stream, ShardEncodeResult, ShardSource},
+    stream::{ShardEncodeResult, ShardSource, decode_shards_stream, encode_shard_stream},
 };
 use common::corruption::InboardShardLayout;
 

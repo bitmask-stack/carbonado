@@ -1,16 +1,23 @@
 {
-  description = "carbonado — apocalypse-resistant archival format (Lean 4 AOT + Nix)";
+  description = "carbonado — apocalypse-resistant archival format (Rust engine + Lean 4 proofs + Nix)";
 
   inputs = {
     nixpkgs.follows = "lean4-nix/nixpkgs";
     flake-parts.url = "github:hercules-ci/flake-parts";
     lean4-nix.url = "github:lenianiva/lean4-nix";
+    # rustc 1.98 matching Cargo.toml rust-version / rust-toolchain.toml.
+    # Overlay only; Lean AOT still uses lean4-nix's nixpkgs + toolchain file.
+    rust-overlay.url = "github:oxalica/rust-overlay";
+    rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
+    crane.url = "github:ipetkov/crane";
   };
 
   outputs = inputs @ {
     nixpkgs,
     flake-parts,
     lean4-nix,
+    rust-overlay,
+    crane,
     ...
   }:
     flake-parts.lib.mkFlake {inherit inputs;} {
@@ -43,6 +50,7 @@
             && !(base == "examples" && type == "directory")
             && !(base == ".git" && type == "directory")
             && !(base == "result" || pkgs.lib.hasPrefix "result-" base)
+            && !(base == "rust-toolchain.toml")
             && pkgs.lib.cleanSourceFilter path type;
         };
 
@@ -50,18 +58,18 @@
         holePattern = ''(^|[^a-zA-Z_])(sorry|admit)([^a-zA-Z_]|$)'';
 
         # Program F: static zstd from the **same pin as ref/zstd** (v1.5.7 /
-        # f8745da6…) + FFI glue → libcarbonado_native.a. Fetched by fixed rev/hash
-        # so flake purity does not require the submodule worktree to be git-tracked
-        # in the parent tree; SHA must stay in lockstep with docs/PARITY.md.
+        # f8745da6…) + Lean @[extern] glue → carbonado-native archive (AOT demo).
+        # Fetched by fixed rev/hash so flake purity does not require the submodule
+        # worktree to be git-tracked; SHA must stay in lockstep with docs/PARITY.md.
         zstdPinned = pkgs.fetchFromGitHub {
           owner = "facebook";
           repo = "zstd";
           rev = "f8745da6ff1ad1e7bab384bd1f9d742439278e99";
           hash = "sha256-tNFWIT9ydfozB8dWcmTMuZLCQmQudTFJIkSr0aG7S44=";
         };
-        # R9 / G10: libbitcoinpqc pin matching ref/bitcoinpqc submodule
+        # libbitcoinpqc pin matching ref/bitcoinpqc submodule
         # (b309f444… / branch 27-slh-dsa-sha-2-128s). SLH-DSA-SHA2-128s only
-        # (no secp/ML-DSA) is compiled into libcarbonado_native.a.
+        # (no secp/ML-DSA) is compiled into the Lean AOT demo native archive.
         bitcoinpqcPinned = pkgs.fetchFromGitHub {
           owner = "cryptoquick";
           repo = "libbitcoinpqc";
@@ -73,18 +81,14 @@
           leanAll = pkgs.lean.lean-all;
           zstdSrc = zstdPinned;
           bitcoinpqcSrc = bitcoinpqcPinned;
-          carbonadoInclude = ./include;
         };
 
         leanPkg = pkgs.lean.buildLeanPackage {
           name = "carbonado";
           # Separate roots so CarbonadoTest compiles without product → test imports.
           # lean4-nix only discovers modules under the root name of each entry.
-          # Carbonado.Ffi is a root so `@[export] l_carbonado_*` AOT objects land in
-          # staticLib even when Main does not import Ffi.
           roots = [
             "Carbonado.Main"
-            "Carbonado.Ffi"
             "Carbonado.RkyvFilepack"
             "CarbonadoTest.Scaffold"
             "CarbonadoTest.EtM"
@@ -98,71 +102,10 @@
           src = productSrc;
           debug = false;
           leancFlags = ["-O3" "-DNDEBUG"];
-          # Static zstd + C ABI glue (no shared libzstd — avoids lld shlib-undefined/pthread).
+          # Static zstd + SLH @[extern] glue for the Lean AOT demo (no shared libzstd).
           staticLibDeps = [carbonadoNative];
           linkFlags = [];
         };
-
-        # Dual-backend product archive: Lean AOT objects + native zstd/ABI glue,
-        # packaged as a shared library (leanc links Lean runtime) plus a static
-        # archive for `nm` / partial static consumers.
-        libcarbonado =
-          pkgs.runCommand "libcarbonado" {
-            nativeBuildInputs = [pkgs.binutils pkgs.stdenv.cc pkgs.lean.leanc];
-          } ''
-            set -euo pipefail
-            mkdir -p $out/lib $out/include
-
-            LEAN_A="${leanPkg.staticLib}/libcarbonado.a"
-            NATIVE_A="${carbonadoNative}/libcarbonado_native.a"
-            test -f "$LEAN_A"
-            test -f "$NATIVE_A"
-
-            # Shared library via leanc + Lean shared stdlib (Init/runtime).
-            # lean4-nix staticLib is a *thin* archive; leanc/ld accept it with whole-archive.
-            # --whole-archive keeps @[export] + C ABI symbols from being GC'd.
-            # Pass libleanshared the same way buildLeanPackage.executable does (withSharedStdlib).
-            ${pkgs.lean.leanc}/bin/leanc -shared -fPIC \
-              -Wl,--whole-archive "$LEAN_A" "$NATIVE_A" -Wl,--no-whole-archive \
-              ${pkgs.lean.leanshared}/* \
-              -o $out/lib/libcarbonado.so
-
-            # Regular static archive for `nm` / consumers: thin member paths + native objects.
-            WORK=$(mktemp -d)
-            cd "$WORK"
-            mapfile -t LEAN_OBJS < <(${pkgs.binutils}/bin/ar t "$LEAN_A")
-            ${pkgs.binutils}/bin/ar x "$NATIVE_A"
-            ${pkgs.binutils}/bin/ar rcs $out/lib/libcarbonado.a "''${LEAN_OBJS[@]}" ./*.o
-
-            cp ${./include}/carbonado.h $out/include/
-            echo "libcarbonado: packaged static + shared" >&2
-          '';
-
-        leanAbiCheck =
-          pkgs.runCommand "carbonado-lean-abi" {
-            nativeBuildInputs = [pkgs.binutils];
-          } ''
-            set -euo pipefail
-            test -f ${libcarbonado}/include/carbonado.h
-            test -f ${libcarbonado}/lib/libcarbonado.a
-            test -f ${libcarbonado}/lib/libcarbonado.so
-            nm ${libcarbonado}/lib/libcarbonado.a | grep -q carbonado_abi_version
-            nm ${libcarbonado}/lib/libcarbonado.a | grep -q carbonado_free
-            nm ${libcarbonado}/lib/libcarbonado.a | grep -q carbonado_encode
-            nm ${libcarbonado}/lib/libcarbonado.a | grep -q carbonado_decode
-            nm ${libcarbonado}/lib/libcarbonado.a | grep -q carbonado_encode_headered
-            nm ${libcarbonado}/lib/libcarbonado.a | grep -q carbonado_decode_headered
-            nm ${libcarbonado}/lib/libcarbonado.a | grep -q carbonado_verification_key
-            nm ${libcarbonado}/lib/libcarbonado.a | grep -q l_carbonado_encode_headered
-            nm ${libcarbonado}/lib/libcarbonado.a | grep -q l_carbonado_verification_key
-            # R9 / G10 SLH + seekable outboard slice
-            nm ${libcarbonado}/lib/libcarbonado.a | grep -q carbonado_slh_keygen
-            nm ${libcarbonado}/lib/libcarbonado.a | grep -q carbonado_slh_sign
-            nm ${libcarbonado}/lib/libcarbonado.a | grep -q carbonado_slh_verify
-            nm ${libcarbonado}/lib/libcarbonado.a | grep -q carbonado_verify_slice_outboard
-            nm ${libcarbonado}/lib/libcarbonado.a | grep -q l_carbonado_verify_slice_outboard
-            echo ok > $out
-          '';
 
         noSorry =
           pkgs.runCommand "carbonado-no-sorry" {
@@ -203,6 +146,66 @@
           inherit pkgs;
           src = productSrc;
         };
+
+        # Separate nixpkgs + rust-overlay so Lean AOT does not rebuild when
+        # the Rust toolchain pin moves. Crane runs fmt/clippy/nextest with
+        # named feature sets (never --all-features).
+        pkgsRust = import nixpkgs {
+          inherit system;
+          overlays = [rust-overlay.overlays.default];
+        };
+        rustToolchain = pkgsRust.rust-bin.stable."1.98.0".default.override {
+          extensions = ["rust-src" "clippy" "rustfmt"];
+        };
+        craneLib = (crane.mkLib pkgsRust).overrideToolchain rustToolchain;
+
+        # bitcoinpqc CMake FetchContent pin (libbitcoinpqc CMakeLists.txt GIT_TAG v0.5.0).
+        secp256k1Src = pkgsRust.fetchFromGitHub {
+          owner = "bitcoin-core";
+          repo = "secp256k1";
+          rev = "e3a885d42a7800c1ccebad94ad1e2b82c4df5c65";
+          hash = "sha256-XcxBzOJngrm1szs48bBS6pcH2yaLfLKPUtyQ51eItaw=";
+        };
+
+        mkCargoSrc = root:
+          pkgsRust.lib.fileset.toSource {
+            root = root;
+            fileset = pkgsRust.lib.fileset.unions [
+              (root + "/Cargo.toml")
+              (root + "/Cargo.lock")
+              (root + "/src")
+              (root + "/tests")
+              (root + "/benches")
+              (root + "/examples")
+              (root + "/.cargo")
+            ];
+          };
+
+        # --impure just check reads the working tree so uncommitted Rust is in
+        # the crate source. Pure eval (nix flake check, GHA) uses the flake copy.
+        worktreePwd = builtins.getEnv "PWD";
+        worktreeIsCarbonado =
+          worktreePwd
+          != ""
+          && builtins.pathExists (worktreePwd + "/flake.nix")
+          && builtins.pathExists (worktreePwd + "/Cargo.toml")
+          && builtins.pathExists (worktreePwd + "/src");
+        cargoRoot =
+          if worktreeIsCarbonado
+          then /. + worktreePwd
+          else ./.;
+        cargoSrc = mkCargoSrc cargoRoot;
+
+        mkCargoQuality = remote:
+          import ./nix/cargo-quality.nix {
+            inherit secp256k1Src craneLib rustToolchain;
+            lib = pkgsRust.lib;
+            pkgs = pkgsRust;
+            src = cargoSrc;
+            inherit remote;
+          };
+        cargoChecks = mkCargoQuality false;
+        cargoQuality = mkCargoQuality true;
 
         # Run AOT binary as a check (constants + EtM + FEC + Bao + pipeline + Program F).
         demo =
@@ -294,6 +297,7 @@
             grep -q "zstd status mapping ok" $out
             grep -q "PipelineError zstd maps ok" $out
             grep -q "zstd goldens + roundtrip + error paths ok" $out
+            grep -q "zstd frame header params ok" $out
             grep -q "pipeline compression formats c2/c6 + headered c3/c7 ok" $out
             grep -q "SLH1 wire framing ok" $out
             grep -q "SLH live sign/verify ok" $out
@@ -343,13 +347,17 @@
           default = leanPkg.executable;
           carbonado = leanPkg.executable;
           carbonado-release = carbonadoRelease;
-          libcarbonado = libcarbonado;
+          # Remote-builder rustc (just check-remote). Not used by GHA.
+          fmt-quality = cargoQuality.fmt;
+          clippy-rust-quality = cargoQuality.clippy-rust;
+          nextest-rust-quality = cargoQuality.nextest-rust;
+          nextest-rust-cargo-on-builder-quality = cargoQuality.nextest-rust-cargo-on-builder;
         };
 
         apps.default = {
           type = "app";
           program = "${leanPkg.executable}/bin/carbonado";
-          meta.description = "Carbonado Lean 4 AOT product binary (Programs A–G: Adamantine dirs + CLI)";
+          meta.description = "Carbonado Lean 4 AOT demo (proofs + goldens; not a Rust -sys engine)";
         };
 
         checks = {
@@ -358,7 +366,18 @@
           demo = demo;
           # Building the package is itself a check of Lean compile (includes CarbonadoTest roots).
           carbonado = leanPkg.executable;
-          lean-abi = leanAbiCheck;
+          rustc-1_98 = pkgs.runCommand "carbonado-rustc-1.98" {
+            nativeBuildInputs = [rustToolchain];
+          } ''
+            set -euo pipefail
+            rustc --version | tee "$out"
+            grep -q '^rustc 1\.98' "$out"
+          '';
+          # Cargo trio (never --all-features). GHA may realize these; they do
+          # not require surmount-remote. just check-remote uses *-quality packages.
+          fmt = cargoChecks.fmt;
+          clippy-rust = cargoChecks.clippy-rust;
+          nextest-rust = cargoChecks.nextest-rust;
         };
 
         devShells.default = pkgs.mkShell {
@@ -368,6 +387,7 @@
             gnupg
             ripgrep
             scc
+            rustToolchain
             # Host elan/lake may be used; lean4-nix provides leanc via package builds.
           ];
           shellHook = ''
@@ -377,14 +397,11 @@
               echo "carbonado Lean 4 + Nix dev shell"
               echo "Lean toolchain pin: $(cat lean-toolchain)"
               echo "Build: nix build .#carbonado"
-              echo "Lib:   nix build .#libcarbonado"
-              echo "Check: nix flake check"
+              echo "Check: just check   # sequential fmt/clippy/nextest/Lean on the remote builder"
+              echo "       nix flake check"
               echo "Run:   nix run"
-              echo "Lean backend tests:"
-              echo "  nix build .#libcarbonado -o result-libcarbonado"
-              echo "  export CARBONADO_LEAN_LIB=\$PWD/result-libcarbonado/lib CARBONADO_LEAN_INCLUDE=\$PWD/result-libcarbonado/include"
-              echo "  export LD_LIBRARY_PATH=\$CARBONADO_LEAN_LIB"
-              echo "  cargo test --no-default-features --features \"backend-lean,pqc,ots\" --test lean_backend_smoke"
+              echo "Lean proofs: nix build .#checks.$(nix eval --impure --raw --expr builtins.currentSystem).no-sorry"
+              echo "Lean demo:   nix build .#checks.$(nix eval --impure --raw --expr builtins.currentSystem).demo"
             fi
           '';
         };

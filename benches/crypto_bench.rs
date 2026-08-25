@@ -16,7 +16,7 @@
 use carbonado::crypto::{slh_dsa_generate_keypair, slh_dsa_sign, slh_dsa_verify};
 use carbonado::file::encode_directory;
 use carbonado::{decode, decode_outboard, encode, encode_outboard, scrub_outboard};
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
 use getrandom::getrandom;
 use std::fs;
 use std::path::PathBuf;

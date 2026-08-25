@@ -1,11 +1,8 @@
 /-
   FilepackManifest v2 for Adamantine catalogs (Program G).
 
-  **Wire note (LIMITS / dual-suite):** Dual-suite directory archives use Rust
-  **rkyv** `FilepackManifestWire` as the normative Adamantine payload body. Under
-  `backend-lean`, `file::encode_directory` / `decode_directory` keep rkyv in Rust
-  and dispatch segment/catalog *crypto* through Lean C ABI (composition). Dual-suite
-  does **not** require pure Lean rkyv.
+  **Wire note:** Production directory archives use Rust **rkyv**
+  `FilepackManifestWire` as the Adamantine payload body.
 
   **W3 pure Lean product wire:** `Carbonado/RkyvFilepack.lean` provides bit-exact
   rkyv **encode** (`encodeRkyvManifest` / `encodeCatalogBody`) and **decode**

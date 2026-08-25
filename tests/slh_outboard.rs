@@ -1,9 +1,7 @@
 //! Phase 1B: SLH-DSA sidecar E2E (requires `pqc` feature).
 //!
-//! Default features already enable `pqc`. Also in the lean freeze allowlist:
-//! `just test-lean-ci` / `cargo test --no-default-features --features "backend-lean,pqc,ots,cli" --test slh_outboard`.
-//! Never `cargo test --all-features` (enables both backends → `compile_error!`).
-//! Builds without `pqc` skip this crate (`#![cfg(feature = "pqc")]`).
+//! Default features already enable `pqc`. Builds without `pqc` skip this crate
+//! (`#![cfg(feature = "pqc")]`).
 
 #![cfg(feature = "pqc")]
 
@@ -12,9 +10,9 @@ use std::fs;
 use carbonado::{
     constants::Format,
     crypto::{
+        Algorithm, PublicKey, SLH1_MAGIC, SLH1_SIDECAR_LEN, SLH1_SIGNATURE_LEN, Signature,
         read_slh_sidecar, slh_dsa_generate_keypair, slh_dsa_sign, slh_dsa_verify,
-        write_slh_sidecar, Algorithm, PublicKey, Signature, SLH1_MAGIC, SLH1_SIDECAR_LEN,
-        SLH1_SIGNATURE_LEN,
+        write_slh_sidecar,
     },
     error::CarbonadoError,
     file::{self, Header},

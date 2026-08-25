@@ -2,12 +2,12 @@
 
 use carbonado::{
     directory::{
-        format_policy::{
-            is_likely_incompressible, resolve_catalog_format, SegmentFormatPolicy,
-            SEGMENT_FORMAT_ENCRYPTED_RAW, SEGMENT_FORMAT_PUBLIC_COMPRESSED,
-            SEGMENT_FORMAT_PUBLIC_RAW,
-        },
         SEGMENT_FORMAT_ENCRYPTED_COMPRESSED,
+        format_policy::{
+            SEGMENT_FORMAT_ENCRYPTED_RAW, SEGMENT_FORMAT_PUBLIC_COMPRESSED,
+            SEGMENT_FORMAT_PUBLIC_RAW, SegmentFormatPolicy, is_likely_incompressible,
+            resolve_catalog_format,
+        },
     },
     error::CarbonadoError,
     filepack_manifest::{

@@ -6,13 +6,10 @@
   * Public key (32 B) lives in Header.slh_public_key, not the sidecar
   * Signature is over the 32-byte Bao root of the target container
 
-  **G10 (R9):** real SLH-DSA via `@[extern]` into libbitcoinpqc objects linked
-  in `libcarbonado_native.a` (`nix/native/carbonado_slh.c`). Lean elaborator
-  bodies are fail-closed fallbacks (do **not** `native_decide` over live crypto).
-  AOT `Main` / C ABI / dual-suite composition exercise the real oracle.
-
-  Dual-suite product SLH may still use Rust `bitcoinpqc` composition; pure Lean
-  is for `libcarbonado` purity. Composition remains SSOT for dual-suite wire.
+  Real SLH-DSA via `@[extern]` into libbitcoinpqc objects linked in the Lean AOT
+  demo native archive (`nix/native/carbonado_slh.c`). Lean elaborator bodies are
+  fail-closed fallbacks (do **not** `native_decide` over live crypto). The AOT
+  demo exercises the real oracle. Product SLH on the Rust library uses `bitcoinpqc`.
 -/
 import Carbonado.Constants
 import Carbonado.Crypto.Util

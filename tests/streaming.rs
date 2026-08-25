@@ -336,9 +336,7 @@ fn file_stream_format_sweep() {
 /// W1b: public **non-Compression** outboard stream (c4 Bao, c12 Bao+FEC) multi-MiB
 /// codecode/decodec.
 ///
-/// Under `backend-lean` this is the **S4 O(chunk/stripe) composition E2** path (not pure Lean
-/// buffer; not Compression — bulk zstd under lean is O(logical)). Under `backend-rust` it is
-/// the same S4 pipeline. Wire must match buffer path; public re-encode is deterministic.
+/// S4 O(chunk/stripe) pipeline. Wire must match the buffer path; public re-encode is deterministic.
 ///
 /// **Peak RAM:** architectural O(chunk/stripe) claim (SeekableSpool / stripe FEC / leaf Bao);
 /// not RSS-instrumented here (optional W4 measurement residual).
@@ -427,7 +425,7 @@ fn stream_outboard_public_e2_codecode_decodec_c4_c12() {
         .expect("decode2");
         assert_eq!(out2, pt, "c{format} decodec plaintext");
 
-        // Match buffer path (Lean dual under backend-lean for buffer APIs)
+        // Match buffer path
         let buf = stream_encode_outboard_buffer(&MASTER, &pt, format, None).expect("buf encode");
         assert_eq!(buf.hash, hash1, "c{format} stream vs buffer hash");
         assert_eq!(buf.main, main1_bytes, "c{format} stream vs buffer main");

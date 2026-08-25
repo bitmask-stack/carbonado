@@ -22,9 +22,8 @@
   2. Write contiguous ArchivedFilepackEntry records.
   3. Write root at end.
 
-  Dual-suite directory wire remains **Rust rkyv SSOT** via composition for product
-  encode under `backend-lean`. Pure Lean directory/CLI (W3b) emits this rkyv body
-  so Rust dual-suite `decode_directory` can consume Lean-made catalogs.
+  Production directory encode remains **Rust rkyv**. Pure Lean directory/CLI emits
+  this rkyv body so Rust `decode_directory` can consume Lean-made catalogs.
   CFP2 remains available for pure-Lean demos only (`FilepackManifest.toWireBytes`);
   it is **not** byte-identical to rkyv.
 -/

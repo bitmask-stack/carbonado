@@ -8,8 +8,8 @@
  *   status 3 = decompressed output exceeds max
  *   status 4 = invalid input / size error
  *
- * Linked into the AOT product via flake staticLibDeps:
- *   libcarbonado_native.a = this FFI + static libzstd objects from ref/zstd.
+ * Linked into the Lean AOT demo via flake staticLibDeps (not a Rust `-sys` product):
+ *   carbonado-native archive = this FFI + static libzstd objects from ref/zstd.
  * No shared -lzstd. Lean elaborator uses the `@[extern]` body (identity fallback).
  */
 #include <lean/lean.h>

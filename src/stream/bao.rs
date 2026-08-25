@@ -5,13 +5,13 @@ use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 
 use bao::Hash;
 use bao_tree::{
+    BaoTree, ChunkRanges,
     io::{
         outboard::{EmptyOutboard, PostOrderMemOutboard, PostOrderOutboard},
         sync::{
-            keyed_decode_ranges, keyed_encode_ranges_validated, keyed_outboard_post_order, ReadAt,
+            ReadAt, keyed_decode_ranges, keyed_encode_ranges_validated, keyed_outboard_post_order,
         },
     },
-    BaoTree, ChunkRanges,
 };
 
 use crate::{

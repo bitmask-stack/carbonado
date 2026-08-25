@@ -3,7 +3,6 @@ use std::io::Cursor;
 use log::trace;
 
 pub use crate::stream::compress::decompress_buffer as decompress;
-#[cfg(feature = "backend-rust")]
 pub use crate::stream::decode::{stream_decode_buffer, stream_decode_outboard_buffer};
 
 use crate::{
@@ -12,17 +11,15 @@ use crate::{
     structs::EncodeInfo,
 };
 
-use reed_solomon_erasure::galois_8::Field;
 use reed_solomon_erasure::ReedSolomon;
+use reed_solomon_erasure::galois_8::Field;
 
-#[cfg(feature = "backend-rust")]
 use crate::{
     constants::{Format, SLICE_LEN},
     encoding,
     stream::{extract_slice_inboard_for_scrub, verify_slice_inboard_seekable},
     utils::decode_bao_hash,
 };
-#[cfg(feature = "backend-rust")]
 use log::{debug, info, warn};
 
 fn fec_chunks(chunked_bytes: &[(usize, &[u8])], padding: u32) -> Result<Vec<u8>, CarbonadoError> {
@@ -55,7 +52,7 @@ fn fec_chunks(chunked_bytes: &[(usize, &[u8])], padding: u32) -> Result<Vec<u8>,
 
     let mut decoded = vec![];
     for sh in shards.iter().take(data_shards) {
-        if let Some(ref s) = sh {
+        if let Some(s) = sh {
             decoded.extend_from_slice(s);
         } else {
             decoded.resize(decoded.len() + shard_size, 0);
@@ -72,7 +69,6 @@ fn fec_chunks(chunked_bytes: &[(usize, &[u8])], padding: u32) -> Result<Vec<u8>,
     Ok(decoded)
 }
 
-#[cfg_attr(feature = "backend-lean", allow(dead_code))] // used by rust scrub_outboard path
 pub fn verification_with_outboard(
     bare: &[u8],
     outboard: &[u8],
@@ -144,7 +140,7 @@ pub fn fec_with_parity(
 
     let mut decoded = vec![];
     for sh in shards.iter().take(FEC_K) {
-        if let Some(ref s) = sh {
+        if let Some(s) = sh {
             decoded.extend_from_slice(s);
         } else {
             decoded.resize(decoded.len() + shard_len, 0);
@@ -207,14 +203,7 @@ pub fn decode(
     padding: u32,
     format: u8,
 ) -> Result<Vec<u8>, CarbonadoError> {
-    #[cfg(feature = "backend-lean")]
-    {
-        crate::backend::lean::decode(master_key, hash, input, padding, format)
-    }
-    #[cfg(feature = "backend-rust")]
-    {
-        stream_decode_buffer(master_key, hash, input, padding, format)
-    }
+    stream_decode_buffer(master_key, hash, input, padding, format)
 }
 
 pub fn decode_outboard(
@@ -226,34 +215,16 @@ pub fn decode_outboard(
     padding: u32,
     format: u8,
 ) -> Result<Vec<u8>, CarbonadoError> {
-    #[cfg(feature = "backend-lean")]
-    {
-        // Low-level path: embedded-nonce when encrypted (header_path = false).
-        crate::backend::lean::decode_outboard(
-            master_key,
-            hash,
-            main,
-            verification_outboard,
-            fec_parity,
-            padding,
-            format,
-            None,
-            false,
-        )
-    }
-    #[cfg(feature = "backend-rust")]
-    {
-        stream_decode_outboard_buffer(
-            master_key,
-            hash,
-            main,
-            verification_outboard,
-            fec_parity,
-            padding,
-            format,
-            None,
-        )
-    }
+    stream_decode_outboard_buffer(
+        master_key,
+        hash,
+        main,
+        verification_outboard,
+        fec_parity,
+        padding,
+        format,
+        None,
+    )
 }
 
 pub fn extract_slice(
@@ -273,14 +244,7 @@ pub fn verify_slice(
     format: u8,
 ) -> Result<Vec<u8>, CarbonadoError> {
     trace!("verify_slice seekable index={index} count={count} format=0x{format:02x}");
-    #[cfg(feature = "backend-lean")]
-    {
-        crate::backend::lean::verify_slice(input, index, count, hash, format)
-    }
-    #[cfg(feature = "backend-rust")]
-    {
-        verify_slice_inboard_seekable(input, index, count, hash, format)
-    }
+    verify_slice_inboard_seekable(input, index, count, hash, format)
 }
 
 /// Recover a damaged inboard Bao+FEC archive via RS subset search and re-encode oracle.
@@ -289,27 +253,7 @@ pub fn verify_slice(
 /// `InvalidHeaderLength`, `BaoResponseTruncated`, `StdIoError`, etc.) route into combinatorial
 /// FEC recovery — the API does not distinguish tamper from truncation before attempting recovery.
 /// Pristine archives return [`CarbonadoError::UnnecessaryScrub`].
-///
-/// Under `backend-lean`, uses C ABI `carbonado_scrub` (geometry peel + RS search).
 pub fn scrub(
-    input: &[u8],
-    hash: &[u8],
-    encode_info: &EncodeInfo,
-    format: u8,
-) -> Result<Vec<u8>, CarbonadoError> {
-    #[cfg(feature = "backend-lean")]
-    {
-        let _ = encode_info; // padding is the normative scrub input; chunk geometry from body
-        crate::backend::lean::scrub(input, hash, encode_info.padding_len, format)
-    }
-    #[cfg(feature = "backend-rust")]
-    {
-        scrub_rust(input, hash, encode_info, format)
-    }
-}
-
-#[cfg(feature = "backend-rust")]
-fn scrub_rust(
     input: &[u8],
     hash: &[u8],
     encode_info: &EncodeInfo,
@@ -366,11 +310,11 @@ fn scrub_rust(
                     }
                     if let Ok((verif, got_h)) =
                         encoding::verification_inboard_buffer(&scrubbed, format)
+                        && got_h == hash
+                        && verif.len() == input.len()
                     {
-                        if got_h == hash && verif.len() == input.len() {
-                            recovered = Some(verif);
-                            break;
-                        }
+                        recovered = Some(verif);
+                        break;
                     }
                 }
             }
@@ -384,40 +328,6 @@ fn scrub_rust(
 }
 
 pub fn scrub_outboard(
-    bare: &[u8],
-    verification_outboard: Option<&[u8]>,
-    fec_parity: Option<&[u8]>,
-    encode_info: &EncodeInfo,
-    format: u8,
-    hash: &[u8],
-) -> Result<Vec<u8>, CarbonadoError> {
-    #[cfg(feature = "backend-lean")]
-    {
-        crate::backend::lean::scrub_outboard(
-            bare,
-            verification_outboard,
-            fec_parity,
-            hash,
-            encode_info.padding_len,
-            encode_info.chunk_len,
-            format,
-        )
-    }
-    #[cfg(feature = "backend-rust")]
-    {
-        scrub_outboard_rust(
-            bare,
-            verification_outboard,
-            fec_parity,
-            encode_info,
-            format,
-            hash,
-        )
-    }
-}
-
-#[cfg(feature = "backend-rust")]
-fn scrub_outboard_rust(
     bare: &[u8],
     verification_outboard: Option<&[u8]>,
     fec_parity: Option<&[u8]>,
@@ -501,11 +411,11 @@ fn scrub_outboard_rust(
                     sel.push((c.0, &c.1));
                 }
             }
-            if let Ok(cand_inner) = fec_chunks(&sel, padding) {
-                if verification_with_outboard(&cand_inner, ob, hash, format).is_ok() {
-                    recovered = Some(cand_inner);
-                    break;
-                }
+            if let Ok(cand_inner) = fec_chunks(&sel, padding)
+                && verification_with_outboard(&cand_inner, ob, hash, format).is_ok()
+            {
+                recovered = Some(cand_inner);
+                break;
             }
         }
 

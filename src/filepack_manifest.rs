@@ -29,7 +29,7 @@ use std::collections::BTreeMap;
 use rkyv::rancor::Error as RkyvError;
 use rkyv::{Archive, Deserialize, Serialize};
 
-use crate::constants::{Format, FEC_K, FEC_M};
+use crate::constants::{FEC_K, FEC_M, Format};
 use crate::directory::format_policy::validate_segment_format_for_catalog;
 use crate::error::CarbonadoError;
 use crate::filepack::{self, FilepackCborEntry, Packed};
@@ -279,12 +279,12 @@ impl FilepackManifest {
                     "segment count exceeds maximum {MAX_SEGMENTS_PER_ENTRY}"
                 )));
             }
-            if let Some(proof) = entry.ots_proof.as_ref() {
-                if proof.len() > MAX_OTS_PROOF_LEN {
-                    return Err(CarbonadoError::InvalidFilepackManifest(format!(
-                        "ots_proof exceeds {MAX_OTS_PROOF_LEN} bytes"
-                    )));
-                }
+            if let Some(proof) = entry.ots_proof.as_ref()
+                && proof.len() > MAX_OTS_PROOF_LEN
+            {
+                return Err(CarbonadoError::InvalidFilepackManifest(format!(
+                    "ots_proof exceeds {MAX_OTS_PROOF_LEN} bytes"
+                )));
             }
             validate_segment_format_for_catalog(entry.segment_format, catalog_encrypted).map_err(
                 |e| match e {
@@ -390,12 +390,12 @@ impl FilepackManifest {
             )));
         }
         let catalog_encrypted = self.format_level & 1 != 0;
-        if let Some(proof) = &self.catalog_ots_proof {
-            if proof.len() > MAX_OTS_PROOF_LEN {
-                return Err(CarbonadoError::InvalidFilepackManifest(format!(
-                    "catalog_ots_proof exceeds {MAX_OTS_PROOF_LEN} bytes"
-                )));
-            }
+        if let Some(proof) = &self.catalog_ots_proof
+            && proof.len() > MAX_OTS_PROOF_LEN
+        {
+            return Err(CarbonadoError::InvalidFilepackManifest(format!(
+                "catalog_ots_proof exceeds {MAX_OTS_PROOF_LEN} bytes"
+            )));
         }
         if self.entries.len() > MAX_FILEPACK_MANIFEST_ENTRIES {
             return Err(CarbonadoError::InvalidFilepackManifest(format!(
@@ -418,19 +418,19 @@ impl FilepackManifest {
             for seg in &entry.segments {
                 validate_segment_bundle_semantics(seg_fmt, seg, &entry.rel_path)?;
             }
-            if let Some(proof) = &entry.ots_proof {
-                if proof.len() > MAX_OTS_PROOF_LEN {
-                    return Err(CarbonadoError::InvalidFilepackManifest(format!(
-                        "ots_proof exceeds {MAX_OTS_PROOF_LEN} bytes"
-                    )));
-                }
+            if let Some(proof) = &entry.ots_proof
+                && proof.len() > MAX_OTS_PROOF_LEN
+            {
+                return Err(CarbonadoError::InvalidFilepackManifest(format!(
+                    "ots_proof exceeds {MAX_OTS_PROOF_LEN} bytes"
+                )));
             }
-            if let Some(p) = prev {
-                if entry.rel_path.as_str() <= p {
-                    return Err(CarbonadoError::InvalidFilepackManifest(
-                        "entries must be strictly sorted by rel_path".into(),
-                    ));
-                }
+            if let Some(p) = prev
+                && entry.rel_path.as_str() <= p
+            {
+                return Err(CarbonadoError::InvalidFilepackManifest(
+                    "entries must be strictly sorted by rel_path".into(),
+                ));
             }
             prev = Some(entry.rel_path.as_str());
         }

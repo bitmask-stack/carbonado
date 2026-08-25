@@ -9,7 +9,7 @@
 use std::io::Cursor;
 
 use carbonado::constants::FEC_M;
-use carbonado::stream::fec::{encode_inboard_buffer, FecInboardEncoder};
+use carbonado::stream::fec::{FecInboardEncoder, encode_inboard_buffer};
 
 fn patterned(len: usize) -> Vec<u8> {
     (0..len).map(|i| (i % 251) as u8).collect()

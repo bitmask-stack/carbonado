@@ -1,7 +1,7 @@
-# checks.tooling-purity — dual-backend product tree purity constraints.
-# Dual-backend SSOT (AGENTS / G1 W5a): Rust under src/, tests/, benches/, examples/
-# is permanent first-class product + dual-suite contract — NOT transitional and NOT
-# moved to ref/carbonado-rust (permanent no product pin). ref/ is third-party oracles only.
+# checks.tooling-purity — product tree purity constraints.
+# SSOT: Rust under src/, tests/, benches/, examples/ is the production engine.
+# Lean under Carbonado/ + CarbonadoTest/ is proofs + AOT demo. ref/ is third-party
+# oracles only. There is no carbonado-sys crate and no product C ABI.
 # This check:
 #   * requires product Lean roots to exist and be Lean-only
 #   * bans product shell/python glue outside nix/ and ref/
@@ -70,7 +70,7 @@ pkgs.runCommand "carbonado-tooling-purity" {
       .git|.cargo|.github|.vscode|.gitignore|.gitmodules) return 0 ;;
       Carbonado|CarbonadoTest|nix|docs|doc|ref|src|tests|benches|examples|target) return 0 ;;
       Carbonado.lean|CarbonadoTest.lean) return 0 ;;
-      flake.nix|flake.lock|lean-toolchain|justfile) return 0 ;;
+      flake.nix|flake.lock|lean-toolchain|rust-toolchain.toml|justfile|build.rs) return 0 ;;
       # Optional Lake manifest for local Lean IDE/`lake build` (Nix remains SSOT package).
       lakefile.toml|lakefile.lean|lake-manifest.json) return 0 ;;
       AGENTS.md|README.md|LICENSE|CHANGELOG.md|Cargo.toml|Cargo.lock) return 0 ;;

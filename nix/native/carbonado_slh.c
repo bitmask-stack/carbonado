@@ -2,8 +2,8 @@
  * Carbonado SLH-DSA-SHA2-128s FFI (R9 / G10).
  *
  * Links libbitcoinpqc SLH sources (sphincsplus + slh_dsa wrappers) only —
- * no secp256k1 / ML-DSA. Dual-suite product SLH may still use Rust bitcoinpqc;
- * this path makes pure Lean AOT / libcarbonado self-contained.
+ * no secp256k1 / ML-DSA. This path is for the Lean AOT demo binary only
+ * (`@[extern]`), not a Rust `-sys` / C ABI product.
  *
  * Lean @[extern] wire (status-prefixed ByteArray, like zstd):
  *   carbonado_slh_keygen_raw : @& ByteArray → ByteArray
@@ -19,9 +19,6 @@
  *   2 other bad argument (wrong sk/pk/sig sizes)
  *   3 crypto failure (keygen/sign library error)
  *
- * Public C ABI (include/carbonado.h): carbonado_slh_keygen / _sign / _verify.
- * Keygen library failure → CARBONADO_ERR_INTERNAL (not AUTHENTICATION).
- * Verify reject → CARBONADO_ERR_AUTHENTICATION.
  */
 #include <lean/lean.h>
 #include <stddef.h>
@@ -30,7 +27,6 @@
 #include <string.h>
 
 #include "libbitcoinpqc/slh_dsa.h"
-#include "carbonado.h"
 
 enum {
   SLH_ST_OK = 0,
@@ -128,72 +124,4 @@ LEAN_EXPORT uint8_t carbonado_slh_verify_raw(b_lean_obj_arg pk, b_lean_obj_arg m
   }
   const uint8_t *msg = msg_ptr(m_p, m_len);
   return slh_dsa_sha2_128s_verify(sig_p, sig_len, msg, m_len, pk_p) == 0 ? 1 : 0;
-}
-
-/* ── Public C ABI ─────────────────────────────────────────────────────────── */
-
-int carbonado_slh_keygen(
-    const uint8_t *entropy, size_t entropy_len,
-    uint8_t pk_out[32],
-    uint8_t sk_out[64]) {
-  if (entropy == NULL || entropy_len < 128 || pk_out == NULL || sk_out == NULL) {
-    return CARBONADO_ERR_INVALID_ARGUMENT;
-  }
-  if (slh_dsa_sha2_128s_keygen(pk_out, sk_out, entropy, entropy_len) != 0) {
-    memset(sk_out, 0, 64);
-    /* Keygen failure is not an auth reject — map to INTERNAL. */
-    return CARBONADO_ERR_INTERNAL;
-  }
-  return CARBONADO_OK;
-}
-
-int carbonado_slh_sign(
-    const uint8_t *secret_key, size_t secret_key_len,
-    const uint8_t *message, size_t message_len,
-    uint8_t **out, size_t *out_len) {
-  if (out == NULL || out_len == NULL) {
-    return CARBONADO_ERR_INVALID_ARGUMENT;
-  }
-  *out = NULL;
-  *out_len = 0;
-  if (secret_key == NULL || secret_key_len != SLH_DSA_SHA2_128S_SECRET_KEY_SIZE) {
-    return CARBONADO_ERR_INVALID_ARGUMENT;
-  }
-  if (message == NULL && message_len != 0) {
-    return CARBONADO_ERR_INVALID_ARGUMENT;
-  }
-  const uint8_t *msg = msg_ptr(message, message_len);
-  uint8_t *sig = (uint8_t *)malloc(SLH_DSA_SHA2_128S_SIGNATURE_SIZE);
-  if (sig == NULL) {
-    return CARBONADO_ERR_INTERNAL;
-  }
-  size_t siglen = 0;
-  if (slh_dsa_sha2_128s_sign(sig, &siglen, msg, message_len, secret_key) != 0 ||
-      siglen != SLH_DSA_SHA2_128S_SIGNATURE_SIZE) {
-    free(sig);
-    return CARBONADO_ERR_INTERNAL;
-  }
-  *out = sig;
-  *out_len = SLH_DSA_SHA2_128S_SIGNATURE_SIZE;
-  return CARBONADO_OK;
-}
-
-int carbonado_slh_verify(
-    const uint8_t *public_key, size_t public_key_len,
-    const uint8_t *message, size_t message_len,
-    const uint8_t *signature, size_t signature_len) {
-  if (public_key == NULL || public_key_len != SLH_DSA_SHA2_128S_PUBLIC_KEY_SIZE) {
-    return CARBONADO_ERR_INVALID_ARGUMENT;
-  }
-  if (signature == NULL || signature_len != SLH_DSA_SHA2_128S_SIGNATURE_SIZE) {
-    return CARBONADO_ERR_INVALID_ARGUMENT;
-  }
-  if (message == NULL && message_len != 0) {
-    return CARBONADO_ERR_INVALID_ARGUMENT;
-  }
-  const uint8_t *msg = msg_ptr(message, message_len);
-  if (slh_dsa_sha2_128s_verify(signature, signature_len, msg, message_len, public_key) != 0) {
-    return CARBONADO_ERR_AUTHENTICATION;
-  }
-  return CARBONADO_OK;
 }

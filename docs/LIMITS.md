@@ -2,16 +2,18 @@
 
 ## Current product surface
 
-### Dual-backend (normative product model)
+### Product model
 
-| Backend | Status |
+| Layer | Status |
 |---------|--------|
-| **Rust** (`src/`, default `backend-rust`) | First-class production library + CLI; full `cargo test` |
-| **Lean AOT** (`Carbonado/`, `libcarbonado`, optional `backend-lean`) | Second engine: proofs + wire/C ABI; dual-suite G8 closed at R7 |
-| **Rust `tests/`** | Normative behavioral contract for **both** engines |
+| **Rust** (`src/`, default `backend-rust`) | Production library + CLI; full `cargo test` |
+| **Lean** (`Carbonado/`, AOT demo) | Spec + proofs; tiny C `@[extern]` for zstd/SLH in the demo only |
+| **Rust `tests/`** | Normative behavioral contract for the Rust engine |
+
+There is no `carbonado-sys`, no Cargo `backend-lean`, and no product C ABI. Do not claim G8 C-ABI parity.
 
 - AOT CLI (`packages.carbonado` / `nix run`) runs **Programs A–G**: constants, EtM, FEC, keyed Bao, full pipeline (c0–c15), Header wire, scrub, stream bounds, multi-segment shards, **zstd-20 compression (linked)**, **SLH1 sidecar wire + bind-to-root model**, **Adamantine 1.0 directories**, **encode/decode/slh CLI**.
-- Rust tree (`src/`, `tests/`, …) **stays** first-class (AGENTS dual-backend). **G1/W5a closed:** permanent policy — **no** `ref/carbonado-rust` product pin; live tree is dual-suite SSOT. Not a license to delete `src/` or `tests/`.
+- Rust tree (`src/`, `tests/`, …) **stays** first-class. **G1/W5a closed:** permanent policy — **no** `ref/carbonado-rust` product pin. Not a license to delete `src/` or `tests/`.
 - Lean theorem/test tree is **`CarbonadoTest/`** (not `Tests/`) so it does not collide with Rust `tests/` on case-insensitive filesystems (Darwin APFS).
 - Dependency direction is **CarbonadoTest → Carbonado** only.
 
@@ -121,16 +123,17 @@
 - Encode rejects `requireOts` (`otsFeatureRequired`); does not mint undecodeable archives.
 - CLI encode rejects symlink source entries (`symlinkNotAllowed`); decode refuses write-through symlinks when detectible.
 
-## Dual-backend (G8 full closed at R7; P0–P5 closed for allowlist + CI freeze)
+## Engines (2026-08-24)
 
-| Backend | Status |
+| Layer | Status |
 |---------|--------|
 | `backend-rust` (default) | Full Rust engine; full `cargo test` (must never regress); CI job **`desktop`** |
-| `backend-lean` | **G8 full closed (R7)** — body/headered/outboard/scrub/verify_slice C ABI + directory composition + SLH/OTS composition; CLI dual-engine for **directory** (+ buffer APIs) + **single-file stream E1** (inboard/encrypted spool→Lean; O(logical) RAM) + **W1b public non-compress outboard S4 composition E2** (c0/c4/c8/c12; Compression under lean O(logical) bulk zstd; not pure Lean stream); freeze = **full dual suite** via `just test-lean-ci` / CI job **`dual-backend-lean`** (G11 **closed**) |
-| Cross encode/decode Rust↔Lean | **G9 closed (R8)** — no-compress body/headered/outboard both directions (`tests/g9_cross_backend.rs` + `tests/fixtures/g9/`); **W2d** codecode/decodec shipped (`tests/determinism_roundtrip.rs`); **W2a/W2b permanent:** cross-engine Compression / directory encode not bit-identical (decode interop + same-engine re-encode only); directory decode seed remains `phase3_g9_directory` |
-| Docs / inventory (Phase 0) | **Closed** — [TEST_CONTRACT.md](./TEST_CONTRACT.md), [ABI.md](./ABI.md), [GAPS.md](./GAPS.md) |
+| Lean proofs + AOT demo | `just test-lean-ci` / CI job **`lean-proofs`**: nix no-sorry + demo. No Cargo `backend-lean`. |
+| Lean AOT goldens | Rust still decodes `tests/fixtures/g9/lean/` (`just test-g9`). Live rust→lean encode via C is gone. |
 
-**R7 freeze command (measured green):** `just test-lean-ci` runs unfiltered `cargo test --no-default-features --features "backend-lean,pqc,ots,cli"` (lib units + all integration tests including `bin_*`). Never `--features backend-lean` alone — defaults already enable `backend-rust`.
+G8 C-ABI dual-backend (`carbonado-sys` / `libcarbonado` / Cargo `backend-lean`) was **removed**. Historical R7 freeze language below is archaeology, not a live gate.
+
+**Lean proof command:** `just test-lean-ci` builds nix `no-sorry`, `tooling-purity`, `carbonado`, and `demo`.
 
 **Permanent feature-gated exclusions from dual freeze** (lean features stay `"backend-lean,pqc,ots,cli"` — **never** add `async` / `async-tokio` / `parallel` to freeze):
 
@@ -155,8 +158,8 @@
 - ~~Stream dual under lean is E1-only~~ **W1b closed (MVP):** see **Stream E1/E2 API matrix** below. Pure Lean chunked stream C ABI residual remains (no streaming C symbols).
 - ~~`file::decode_stream` pure-Rust residual~~ **W1a closed** — under lean, spools header+`encoded_len` body → Lean `decode_headered` (peak O(archive+plaintext); not E2)
 - ~~Full **codecode** / **decodec** matrix~~ **W2d closed** — `tests/determinism_roundtrip.rs` (no-compress + same-engine compress/directory)
-- **W2a permanent residual — Compression cross-engine encode:** Lean AOT zstd frames are **not** bit-identical to Rust `zstd` even at level 20 / same pin rev. Measured evidence (G9 `outboard_c14`): mains both 35 B; frame descriptor byte differs (`28b5 2ffd **00**…` rust vs `28b5 2ffd **20**…` lean); Bao roots and FEC parity diverge. **Policy:** decode interop only across engines; re-encode not bit-identical; same-engine codecode/decodec still requires `A' == A` (green). Do not claim rust↔lean compress wire identity.
-- **W2b permanent residual — Directory cross-engine encode:** compare **live rust vs live lean** catalog roots under identical pins (phase3 seed tree, zero master, default options) — **not** lean-vs-stale-seed. Pinned in `tests/determinism_roundtrip.rs`: live rust `0b119f12…`, live lean `f67b6f49…` (hard `assert_ne!`). `phase3_g9_directory` catalog `16e2369f…` is **decode-only SSOT** (lags live rust catalog packaging while segment mains may still match). Same-engine directory codecode/decodec green.
+- **W2a permanent residual — Compression cross-engine encode:** Lean AOT zstd frames are **not** bit-identical to Rust `zstd` even at level 20 / same pin rev. Measured evidence (G9 `outboard_c14`): mains both 35 B; frame descriptor byte differs (`28b5 2ffd **00**…` rust vs `28b5 2ffd **20**…` lean); Bao roots and FEC parity diverge. **Specified and proved (header bits only):** level 20, magic `28b52ffd`, checksum off, no dictionary, reserved/unused 0; AOT/`ZSTD_compress` small frames use Single_Segment + 1-byte FCS (`0x20`); rust `copy_encode` unknown-size uses windowLog 25 (`0x00` `0x78`). Lean `Carbonado.Compress`; Rust `tests/zstd_frame_params.rs` parses frames. **Not proved:** compressed-block identity for arbitrary payloads (G9 26-byte c14 happens to share the raw last-block after the 6-byte header). **Policy:** decode interop only across engines; re-encode not bit-identical; same-engine codecode/decodec still requires `A' == A` (green). Do not claim rust↔lean compress wire identity.
+- **W2b permanent residual — Directory cross-engine encode:** compare **live rust vs live lean** catalog roots under identical pins (phase3 seed tree, zero master, default options). Pinned in `tests/determinism_roundtrip.rs`: live rust `16e2369f…`, live lean `d468ea7a…` (hard `assert_ne!`). The rust pin equals the `phase3_g9_directory` catalog: encode sorts by `rel_path` before appending verification outboard / FEC (not `read_dir` order). Same-engine directory codecode/decodec green. The remaining residual is catalog packaging across engines (zstd), not filesystem listing order.
 - **W4c permanent residual — streaming zstd under lean:** buffer-only bulk zstd for Lean frame parity; public Compression outboard under lean stays O(logical) — not E2 (see matrix).
 - **W4d permanent residual — FEC / async spool:** FEC verify O(FEC body) shards (segment-wide RS); async always disk-stages O(encoded); lean+async peak RAM O(encoded+logical). See [STREAMING_PARALLELISM.md](../doc/STREAMING_PARALLELISM.md).
 - ~~Live Nix product-matrix vs optional frozen `ref/carbonado-rust`~~ **W5a / G1 closed** — permanent no product pin; live `src/` + `tests/` SSOT; third-party `ref/` pins only

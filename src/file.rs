@@ -9,34 +9,35 @@ use bao::Hash;
 // nom imports removed — legacy parse_bytes / old header parsing was deleted as part of the v2 replacement.
 // (secp256k1 imports removed - clean break, legacy Header parsing deleted)
 
-#[cfg(feature = "backend-rust")]
 use crate::stream::decode::stream_decrypt_header_path;
 use crate::{
     adamantine::{
-        decode_adamantine, encode_adamantine, AdamantineHeader, ADAMANTINE_CARBONADO_FMT_ENCRYPTED,
-        ADAMANTINE_CARBONADO_FMT_PUBLIC, ADAMANTINE_FLAG_REQUIRE_OTS, ADAMANTINE_HEADER_LEN,
+        ADAMANTINE_CARBONADO_FMT_ENCRYPTED, ADAMANTINE_CARBONADO_FMT_PUBLIC,
+        ADAMANTINE_FLAG_REQUIRE_OTS, ADAMANTINE_HEADER_LEN, AdamantineHeader, decode_adamantine,
+        encode_adamantine,
     },
     adamantine_payload::{
-        build_adamantine_payload, split_adamantine_payload, verification_slice_from_bundle,
-        MAX_ADAMANTINE_PAYLOAD_LEN, MAX_BAO_BUNDLE_LEN,
+        MAX_ADAMANTINE_PAYLOAD_LEN, MAX_BAO_BUNDLE_LEN, build_adamantine_payload,
+        split_adamantine_payload, verification_slice_from_bundle,
     },
     constants::{Format, MAGICNO},
     decoding,
-    directory::{format_policy::resolve_catalog_format, SegmentFormatPolicy},
+    directory::{SegmentFormatPolicy, format_policy::resolve_catalog_format},
     encoding,
     error::CarbonadoError,
     filepack_manifest::{
-        FilepackEntry, FilepackManifest, SegmentRef, FILEPACK_MANIFEST_FORMAT_LEVEL_ENCRYPTED,
-        FILEPACK_MANIFEST_FORMAT_LEVEL_PUBLIC, FILEPACK_MANIFEST_VERSION, MAX_SEGMENT_MAIN_LEN,
+        FILEPACK_MANIFEST_FORMAT_LEVEL_ENCRYPTED, FILEPACK_MANIFEST_FORMAT_LEVEL_PUBLIC,
+        FILEPACK_MANIFEST_VERSION, FilepackEntry, FilepackManifest, MAX_SEGMENT_MAIN_LEN,
+        SegmentRef,
     },
     paths::parse_bao_root_from_filename,
-    stream::{encode::stream_encode_outboard, DEFAULT_SEGMENT_PLAINTEXT_BUDGET},
+    stream::{DEFAULT_SEGMENT_PLAINTEXT_BUDGET, encode::stream_encode_outboard},
     structs::{EncodeInfo, OutboardEncoded},
     utils::{calc_padding_len, decode_bao_hash, encode_bao_hash},
 };
 
 #[cfg(feature = "ots")]
-use crate::ots::{stamp_bao_root, verify_stamp, OtsPolicy};
+use crate::ots::{OtsPolicy, stamp_bao_root, verify_stamp};
 
 /// Default format for public directory archives (c14: public compressed + bao + fec).
 pub const DIRECTORY_ARCHIVE_FORMAT: u8 = FILEPACK_MANIFEST_FORMAT_LEVEL_PUBLIC;
@@ -311,8 +312,6 @@ impl Header {
 /// Reads the 177-byte [`Header`], verifies integrity, then reverses the body pipeline
 /// (Bao/FEC → decrypt → decompress as format bits require).
 ///
-/// # `backend-rust`
-///
 /// Bao/FEC reverse pipes into a [`crate::stream::spool::SeekableSpool`] via
 /// [`crate::stream::decode::stream_decode_inboard_bao_fec_into`], bounded by
 /// [`Header::encoded_len`]. Encrypted segments use [`crate::stream::stream_decrypt_header_path`]
@@ -325,164 +324,103 @@ impl Header {
 /// - **(C) Encrypted:** streaming EtM via spool two-pass MAC verify then CTR decrypt.
 /// - **(D) c4/c8:** bounded by `encoded_len` when known; incremental FEC/decompress otherwise.
 ///
-/// # `backend-lean` (W1a)
-///
-/// Reads the 177-byte header, verifies `header_mac` **before** body I/O (same fail-closed
-/// order as rust), then spools `encoded_len` body into an archive buffer and calls Lean
-/// [`crate::backend::lean::decode_headered`] for dual body pipeline. Peak RAM
-/// **O(header + body + plaintext)** — E1 honesty, not stream E2. (W1b public **non-compress**
-/// outboard stream uses S4 O(chunk) composition; this headered path remains Lean E1.)
 pub fn decode_stream<R: Read, W: Write>(
     master_key: &[u8],
     mut input: R,
     output: &mut W,
 ) -> Result<(Header, u64), CarbonadoError> {
-    #[cfg(feature = "backend-lean")]
-    {
-        use crate::filepack_manifest::MAX_SEGMENT_MAIN_LEN;
+    let mut header_bytes = [0u8; Header::LEN];
+    input
+        .read_exact(&mut header_bytes)
+        .map_err(CarbonadoError::StdIoError)?;
+    let header = Header::try_from(&header_bytes[..])?;
 
-        let mut header_bytes = [0u8; Header::LEN];
-        input
-            .read_exact(&mut header_bytes)
-            .map_err(CarbonadoError::StdIoError)?;
-        let header_probe = Header::try_from(&header_bytes[..])?;
-        // MAC-before-body (parity with rust path): reject unauthenticated peers before
-        // allocating/reading up to MAX_SEGMENT_MAIN_LEN body bytes. Lean re-verifies MAC
-        // inside decode_headered for dual body/pipeline honesty.
-        let auth_data = build_header_auth_data(&header_probe);
-        let expected_mac = crate::crypto::compute_header_mac(master_key, &auth_data)?;
-        if !crate::crypto::ct_eq(&expected_mac, &header_probe.header_mac) {
-            return Err(CarbonadoError::AuthenticationFailed);
-        }
-        let body_len = header_probe.encoded_len as u64;
-        if body_len > MAX_SEGMENT_MAIN_LEN {
-            return Err(CarbonadoError::InternalStateError(format!(
-                "header encoded_len {body_len} exceeds MAX_SEGMENT_MAIN_LEN {MAX_SEGMENT_MAIN_LEN}"
-            )));
-        }
-        let mut body = vec![0u8; body_len as usize];
-        if let Err(e) = input.read_exact(&mut body) {
-            // Match rust pipeline taxonomy: short body after a valid header prefix is
-            // `InvalidHeaderLength` (not bare UnexpectedEof), e.g. truncated Bao bodies.
-            return Err(if e.kind() == std::io::ErrorKind::UnexpectedEof {
-                CarbonadoError::InvalidHeaderLength
-            } else {
-                CarbonadoError::StdIoError(e)
-            });
-        }
-        let mut archive = Vec::with_capacity(Header::LEN + body.len());
-        archive.extend_from_slice(&header_bytes);
-        archive.extend_from_slice(&body);
-        drop(body); // free body copy before Lean allocates plaintext
-        let (header, plaintext) = crate::backend::lean::decode_headered(master_key, &archive)?;
-        drop(archive);
-        output
-            .write_all(&plaintext)
-            .map_err(CarbonadoError::StdIoError)?;
-        Ok((header, plaintext.len() as u64))
+    let auth_data = build_header_auth_data(&header);
+    let expected_mac = crate::crypto::compute_header_mac(master_key, &auth_data)?;
+    if !crate::crypto::ct_eq(&expected_mac, &header.header_mac) {
+        return Err(CarbonadoError::AuthenticationFailed);
     }
-    #[cfg(feature = "backend-rust")]
-    {
-        let mut header_bytes = [0u8; Header::LEN];
-        input
-            .read_exact(&mut header_bytes)
-            .map_err(CarbonadoError::StdIoError)?;
-        let header = Header::try_from(&header_bytes[..])?;
 
-        let auth_data = build_header_auth_data(&header);
-        let expected_mac = crate::crypto::compute_header_mac(master_key, &auth_data)?;
-        if !crate::crypto::ct_eq(&expected_mac, &header.header_mac) {
-            return Err(CarbonadoError::AuthenticationFailed);
-        }
-
-        let fmt = header.format;
-        let mut post_preprocess = crate::stream::spool::SeekableSpool::new()?;
-        let mut body_reader = std::io::Read::by_ref(&mut input).take(header.encoded_len as u64);
-        crate::stream::decode::stream_decode_inboard_bao_fec_into(
-            &mut body_reader,
-            header.hash.as_bytes(),
-            header.padding_len,
-            fmt,
-            Some(header.encoded_len as u64),
+    let fmt = header.format;
+    let mut post_preprocess = crate::stream::spool::SeekableSpool::new()?;
+    let mut body_reader = std::io::Read::by_ref(&mut input).take(header.encoded_len as u64);
+    crate::stream::decode::stream_decode_inboard_bao_fec_into(
+        &mut body_reader,
+        header.hash.as_bytes(),
+        header.padding_len,
+        fmt,
+        Some(header.encoded_len as u64),
+        &mut post_preprocess,
+    )?;
+    post_preprocess.rewind()?;
+    let out_len = if fmt.contains(Format::Encryption) {
+        stream_decrypt_header_path(
+            master_key,
+            header.payload_nonce,
             &mut post_preprocess,
-        )?;
-        post_preprocess.rewind()?;
-        let out_len = if fmt.contains(Format::Encryption) {
-            stream_decrypt_header_path(
-                master_key,
-                header.payload_nonce,
-                &mut post_preprocess,
-                fmt.bits(),
-                output,
-            )?
-        } else if fmt.contains(Format::Compression) {
-            crate::stream::compress::stream_decompress(post_preprocess, output)?
-        } else {
-            std::io::copy(&mut post_preprocess, output).map_err(CarbonadoError::StdIoError)?
-        };
+            fmt.bits(),
+            output,
+        )?
+    } else if fmt.contains(Format::Compression) {
+        crate::stream::compress::stream_decompress(post_preprocess, output)?
+    } else {
+        std::io::copy(&mut post_preprocess, output).map_err(CarbonadoError::StdIoError)?
+    };
 
-        Ok((header, out_len))
-    }
+    Ok((header, out_len))
 }
 
 pub fn decode(master_key: &[u8], encoded: &[u8]) -> Result<(Header, Vec<u8>), CarbonadoError> {
-    #[cfg(feature = "backend-lean")]
-    {
-        crate::backend::lean::decode_headered(master_key, encoded)
+    if encoded.len() < Header::LEN {
+        return Err(CarbonadoError::InvalidHeaderLength);
     }
-    #[cfg(feature = "backend-rust")]
-    {
-        if encoded.len() < Header::LEN {
-            return Err(CarbonadoError::InvalidHeaderLength);
-        }
-        let (header_bytes, body) = encoded.split_at(Header::LEN);
-        let header = Header::try_from(header_bytes)?;
+    let (header_bytes, body) = encoded.split_at(Header::LEN);
+    let header = Header::try_from(header_bytes)?;
 
-        // Verify header_mac
-        let auth_data = build_header_auth_data(&header);
-        let expected_mac = crate::crypto::compute_header_mac(master_key, &auth_data)?;
+    // Verify header_mac
+    let auth_data = build_header_auth_data(&header);
+    let expected_mac = crate::crypto::compute_header_mac(master_key, &auth_data)?;
 
-        // Constant-time comparison for the header MAC to avoid timing side-channels.
-        // (See AGENTS.md for the constant-time review of EtM + header auth paths.)
-        if !crate::crypto::ct_eq(&expected_mac, &header.header_mac) {
-            return Err(CarbonadoError::AuthenticationFailed);
-        }
+    // Constant-time comparison for the header MAC to avoid timing side-channels.
+    // (See AGENTS.md for the constant-time review of EtM + header auth paths.)
+    if !crate::crypto::ct_eq(&expected_mac, &header.header_mac) {
+        return Err(CarbonadoError::AuthenticationFailed);
+    }
 
-        // Same fused spool pipeline as decode_stream (streaming MAC-then-decrypt on header path).
-        // Body may include trailers (e.g. catalog COTS) after `encoded_len` bytes — limit the reader.
-        let fmt = header.format;
-        let body_len = header.encoded_len as usize;
-        if body.len() < body_len {
-            return Err(CarbonadoError::InvalidHeaderLength);
-        }
-        let mut post_preprocess = crate::stream::spool::SeekableSpool::new()?;
-        crate::stream::decode::stream_decode_inboard_bao_fec_into(
-            std::io::Cursor::new(&body[..body_len]),
-            header.hash.as_bytes(),
-            header.padding_len,
-            fmt,
-            Some(header.encoded_len as u64),
+    // Same fused spool pipeline as decode_stream (streaming MAC-then-decrypt on header path).
+    // Body may include trailers (e.g. catalog COTS) after `encoded_len` bytes — limit the reader.
+    let fmt = header.format;
+    let body_len = header.encoded_len as usize;
+    if body.len() < body_len {
+        return Err(CarbonadoError::InvalidHeaderLength);
+    }
+    let mut post_preprocess = crate::stream::spool::SeekableSpool::new()?;
+    crate::stream::decode::stream_decode_inboard_bao_fec_into(
+        std::io::Cursor::new(&body[..body_len]),
+        header.hash.as_bytes(),
+        header.padding_len,
+        fmt,
+        Some(header.encoded_len as u64),
+        &mut post_preprocess,
+    )?;
+    post_preprocess.rewind()?;
+    let mut decompressed = Vec::new();
+    if fmt.contains(Format::Encryption) {
+        crate::stream::stream_decrypt_header_path(
+            master_key,
+            header.payload_nonce,
             &mut post_preprocess,
+            fmt.bits(),
+            &mut decompressed,
         )?;
-        post_preprocess.rewind()?;
-        let mut decompressed = Vec::new();
-        if fmt.contains(Format::Encryption) {
-            crate::stream::stream_decrypt_header_path(
-                master_key,
-                header.payload_nonce,
-                &mut post_preprocess,
-                fmt.bits(),
-                &mut decompressed,
-            )?;
-        } else if fmt.contains(Format::Compression) {
-            crate::stream::compress::stream_decompress(post_preprocess, &mut decompressed)?;
-        } else {
-            std::io::copy(&mut post_preprocess, &mut decompressed)
-                .map_err(CarbonadoError::StdIoError)?;
-        }
-
-        Ok((header, decompressed))
+    } else if fmt.contains(Format::Compression) {
+        crate::stream::compress::stream_decompress(post_preprocess, &mut decompressed)?;
+    } else {
+        std::io::copy(&mut post_preprocess, &mut decompressed)
+            .map_err(CarbonadoError::StdIoError)?;
     }
+
+    Ok((header, decompressed))
 }
 
 /// High-level encode using the new v2 symmetric model (always inboard with Header prepended).
@@ -495,26 +433,6 @@ pub fn decode(master_key: &[u8], encoded: &[u8]) -> Result<(Header, Vec<u8>), Ca
 /// Sidecar naming convention: <bao-hash>.cXX.out (Bao), <bao-hash>.cXX.par (FEC parity).
 /// See AGENTS §11.2 (completed) and low-level `encoding::encode_outboard`.
 ///
-/// # `backend-lean` (Phase 2)
-///
-/// Dispatches to Lean AOT via C ABI (`carbonado_encode_headered`).
-///
-/// - **`metadata` / SLH pk:** plumbed through C ABI (nullable → zero fields).
-/// - **`EncodeInfo`:** full stage counters from Lean pack (R3) — compress/encrypt when
-///   those bits ran, FEC/Bao geometry, padding, and `output_len`/`bytes_verifiable`
-///   from body length (matches header `encoded_len`).
-/// - **Live dual under lean:** body/headered encode-decode, outboard (header-path when
-///   `file::encode_outboard` supplies `Some(payload_nonce)`), scrub, verify_slice,
-///   stream buffer + **R5 E1** stream I/O (inboard/encrypted outboard spool→Lean),
-///   **W1a** `decode_stream` → Lean `decode_headered`, **W1b** public outboard stream
-///   S4 O(chunk/stripe) composition, seekable outboard slice C (**R9**), optional **R10**
-///   `stream_decode_async` under lean+`async` (dual-aware via E1; freeze never requires `async`).
-/// - **Post-G8 residuals (honest):** pure Lean chunked stream residual (W1b public outboard
-///   E2 is rust geometric composition under lean; encrypted/inboard stream remain E1);
-///   dual-suite catalog encode remains Rust rkyv composition SSOT (**W3** pure Lean rkyv
-///   also available); ~~W4a~~ O(slice) inboard retain closed; **W4b** full-buffer C outboard
-///   slice permanent; **W4c** buffer-only zstd under lean; **W4d** FEC/async spool permanent.
-///   Dual-suite SLH may use Rust `bitcoinpqc` composition.
 pub fn encode(
     master_key: &[u8],
     input: &[u8],
@@ -526,7 +444,7 @@ pub fn encode(
 
 /// Headered inboard encode with optional fixed `payload_nonce` for encrypted formats.
 ///
-/// When `explicit_nonce` is `Some(n)` and Encryption is set, **both backends** use `n`
+/// When `explicit_nonce` is `Some(n)` and Encryption is set, this uses `n`
 /// literally (including all-zero). When `None`, encrypted formats draw a CSPRNG nonce
 /// (production default). Public formats use a zero `payload_nonce` field regardless.
 ///
@@ -543,43 +461,12 @@ pub fn encode_with_nonce(
     metadata: Option<[u8; 8]>,
     explicit_nonce: Option<[u8; 16]>,
 ) -> Result<(Vec<u8>, EncodeInfo), CarbonadoError> {
-    #[cfg(feature = "backend-lean")]
-    {
-        let format = level;
-        let nonce = if format & 1 != 0 {
-            match explicit_nonce {
-                Some(n) => Some(n),
-                None => {
-                    let mut n = [0u8; 16];
-                    getrandom::getrandom(&mut n).map_err(|_| CarbonadoError::RandomnessError)?;
-                    Some(n)
-                }
-            }
-        } else {
-            None
-        };
-        let (archive, info) = crate::backend::lean::encode_headered(
-            master_key,
-            input,
-            format,
-            nonce.as_ref(),
-            None, // slh_public_key: dual-suite sets via sidecar path / Header APIs
-            metadata.as_ref(),
-        )?;
-        if archive.len() < Header::LEN {
-            return Err(CarbonadoError::InvalidHeaderLength);
-        }
-        Ok((archive, info))
-    }
-    #[cfg(feature = "backend-rust")]
-    {
-        let mut out = Vec::new();
-        let (header, info) =
-            encode_stream_with_nonce(master_key, input, level, metadata, &mut out, explicit_nonce)?;
-        let mut body = header.try_to_vec()?;
-        body.extend_from_slice(&out);
-        Ok((body, info))
-    }
+    let mut out = Vec::new();
+    let (header, info) =
+        encode_stream_with_nonce(master_key, input, level, metadata, &mut out, explicit_nonce)?;
+    let mut body = header.try_to_vec()?;
+    body.extend_from_slice(&out);
+    Ok((body, info))
 }
 
 /// Headered inboard encode over [`Read`] / [`Write`]. Header is returned for staging; body
@@ -883,6 +770,9 @@ pub fn decode_outboard(
 /// Segment Bao outboard data is centralized in the Adamantine payload bundle (no per-segment
 /// `.out`/`.par` sidecars). The catalog is always inboard c14/c15 with a `CARBONADO20\n` header.
 ///
+/// Source files are collected first, sorted by `rel_path`, then encoded so verification outboard
+/// and FEC blobs are appended in that order. `read_dir` listing order does not change the catalog.
+///
 /// Uses public c14 by default; `master_key` must be zeroed for public catalogs.
 pub fn encode_directory(
     master_key: &[u8],
@@ -930,11 +820,15 @@ pub fn encode_directory_with_options(
         written_segment_paths: &mut rollback.segment_paths,
     };
 
-    if let Err(err) = collect_and_encode_files(dir, Path::new(""), &mut state) {
+    let mut collected = Vec::new();
+    if let Err(err) = collect_source_files(dir, Path::new(""), &mut collected) {
         rollback_directory_encode_artifacts(&rollback);
         return Err(err);
     }
-    entries.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    if let Err(err) = encode_collected_files(collected, &mut state) {
+        rollback_directory_encode_artifacts(&rollback);
+        return Err(err);
+    }
 
     match write_catalog_artifact(
         master_key,
@@ -1113,13 +1007,14 @@ pub fn decode_directory(
     Ok(())
 }
 
-/// Debug-only hook to inject catalog assembly failure (integration tests in debug builds).
+/// Debug-only hooks for directory-encode integration tests.
 #[cfg(debug_assertions)]
 pub mod directory_encode_test_hooks {
     use std::cell::Cell;
 
     thread_local! {
         static FAIL_NEXT_CATALOG_WRITE: Cell<bool> = const { Cell::new(false) };
+        static REVERSE_READDIR: Cell<bool> = const { Cell::new(false) };
     }
 
     /// Arm the next [`encode_directory_with_options`] call on this thread to fail at catalog assembly.
@@ -1134,9 +1029,31 @@ pub mod directory_encode_test_hooks {
             armed
         })
     }
+
+    /// Run `f` with each directory's `read_dir` listing reversed (nested walks included).
+    ///
+    /// Used to prove catalog bytes do not depend on filesystem listing order.
+    pub fn with_reverse_readdir<F, R>(f: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                REVERSE_READDIR.with(|flag| flag.set(false));
+            }
+        }
+        REVERSE_READDIR.with(|flag| flag.set(true));
+        let _reset = Reset;
+        f()
+    }
+
+    pub(crate) fn reverse_readdir() -> bool {
+        REVERSE_READDIR.with(|flag| flag.get())
+    }
 }
 
-/// Mutable state shared while walking a source tree during directory encode.
+/// Mutable state while encoding collected source files into segments and the catalog bundle.
 struct DirectoryEncodeState<'a> {
     master_key: &'a [u8],
     outdir: &'a Path,
@@ -1180,13 +1097,27 @@ impl BaoBundleBuilder {
     }
 }
 
-fn collect_and_encode_files(
+/// One source file discovered during the directory walk, before encode.
+struct CollectedSourceFile {
+    path: PathBuf,
+    rel_path: String,
+}
+
+/// Walk `base` and collect regular files. Does not encode or append to the bundle.
+fn collect_source_files(
     base: &Path,
     rel: &Path,
-    state: &mut DirectoryEncodeState<'_>,
+    files: &mut Vec<CollectedSourceFile>,
 ) -> Result<(), CarbonadoError> {
-    for item in fs::read_dir(base).map_err(CarbonadoError::StdIoError)? {
-        let item = item.map_err(CarbonadoError::StdIoError)?;
+    let mut children: Vec<fs::DirEntry> = fs::read_dir(base)
+        .map_err(CarbonadoError::StdIoError)?
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(CarbonadoError::StdIoError)?;
+    #[cfg(debug_assertions)]
+    if directory_encode_test_hooks::reverse_readdir() {
+        children.reverse();
+    }
+    for item in children {
         let name = item.file_name().to_string_lossy().to_string();
         if name == "." || name == ".." || name.contains('/') || name.contains('\\') {
             continue;
@@ -1206,50 +1137,65 @@ fn collect_and_encode_files(
         let rel_str = child_rel.to_string_lossy().replace('\\', "/");
         FilepackManifest::validate_rel_path(&rel_str)?;
         if file_type.is_dir() {
-            collect_and_encode_files(&path, &child_rel, state)?;
+            collect_source_files(&path, &child_rel, files)?;
         } else if file_type.is_file() {
-            let data = read_file(&path)?;
-            let content_blake3 = *blake3::hash(&data).as_bytes();
-            let segment_format = state
-                .options
-                .segment_format_policy
-                .resolve_segment_format(state.catalog_format & 1 != 0, &data)?;
-            let segments = encode_file_segments(
-                state.master_key,
-                &data,
-                segment_format,
-                state.outdir,
-                state.options,
-                state.bao_bundle,
-                state.written_segment_paths,
-            )?;
-            #[cfg(feature = "ots")]
-            let ots_proof = if state
-                .options
-                .ots_policy
-                .as_ref()
-                .is_some_and(|p| p.stamp_entries)
-            {
-                let primary_root = segments[0].segment_bao_root;
-                Some(stamp_bao_root(&primary_root)?)
-            } else {
-                None
-            };
-            state.entries.push(FilepackEntry {
+            files.push(CollectedSourceFile {
+                path,
                 rel_path: rel_str,
-                content_blake3,
-                segment_format,
-                segments,
-                #[cfg(feature = "ots")]
-                ots_proof,
-                #[cfg(not(feature = "ots"))]
-                ots_proof: None,
             });
         } else {
             return Err(CarbonadoError::UnsupportedFileType(
                 path.display().to_string(),
             ));
         }
+    }
+    Ok(())
+}
+
+/// Sort collected files by `rel_path`, then encode and append outboard/FEC in that order.
+fn encode_collected_files(
+    mut files: Vec<CollectedSourceFile>,
+    state: &mut DirectoryEncodeState<'_>,
+) -> Result<(), CarbonadoError> {
+    files.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    for file in files {
+        let data = read_file(&file.path)?;
+        let content_blake3 = *blake3::hash(&data).as_bytes();
+        let segment_format = state
+            .options
+            .segment_format_policy
+            .resolve_segment_format(state.catalog_format & 1 != 0, &data)?;
+        let segments = encode_file_segments(
+            state.master_key,
+            &data,
+            segment_format,
+            state.outdir,
+            state.options,
+            state.bao_bundle,
+            state.written_segment_paths,
+        )?;
+        #[cfg(feature = "ots")]
+        let ots_proof = if state
+            .options
+            .ots_policy
+            .as_ref()
+            .is_some_and(|p| p.stamp_entries)
+        {
+            let primary_root = segments[0].segment_bao_root;
+            Some(stamp_bao_root(&primary_root)?)
+        } else {
+            None
+        };
+        state.entries.push(FilepackEntry {
+            rel_path: file.rel_path,
+            content_blake3,
+            segment_format,
+            segments,
+            #[cfg(feature = "ots")]
+            ots_proof,
+            #[cfg(not(feature = "ots"))]
+            ots_proof: None,
+        });
     }
     Ok(())
 }
@@ -1774,12 +1720,12 @@ fn reject_symlink_components_under(base: &Path, target: &Path) -> Result<(), Car
     for component in rel.components() {
         if let std::path::Component::Normal(name) = component {
             current.push(name);
-            if let Ok(meta) = fs::symlink_metadata(&current) {
-                if meta.file_type().is_symlink() {
-                    return Err(CarbonadoError::SymlinkNotAllowed(
-                        current.display().to_string(),
-                    ));
-                }
+            if let Ok(meta) = fs::symlink_metadata(&current)
+                && meta.file_type().is_symlink()
+            {
+                return Err(CarbonadoError::SymlinkNotAllowed(
+                    current.display().to_string(),
+                ));
             }
         }
     }

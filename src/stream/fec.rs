@@ -2,8 +2,8 @@
 
 use std::io::{Read, Write};
 
-use reed_solomon_erasure::galois_8::Field;
 use reed_solomon_erasure::ReedSolomon;
+use reed_solomon_erasure::galois_8::Field;
 
 use crate::{
     constants::{FEC_K, FEC_M, SLICE_LEN},

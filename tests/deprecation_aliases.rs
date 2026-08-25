@@ -2,8 +2,9 @@
 #![allow(deprecated)]
 
 use carbonado::{
-    pack_index, PackEntry, PackIndex, PackSegmentRef, MAX_PACK_ENTRIES, PACK_INDEX_FORMAT_LEVEL,
-    PACK_INDEX_FORMAT_LEVEL_ENCRYPTED, PACK_INDEX_FORMAT_LEVEL_PUBLIC, PACK_INDEX_VERSION,
+    MAX_PACK_ENTRIES, PACK_INDEX_FORMAT_LEVEL, PACK_INDEX_FORMAT_LEVEL_ENCRYPTED,
+    PACK_INDEX_FORMAT_LEVEL_PUBLIC, PACK_INDEX_VERSION, PackEntry, PackIndex, PackSegmentRef,
+    pack_index,
 };
 
 #[test]

@@ -38,6 +38,6 @@ pub use encode::{
     stream_encode_outboard_buffer, stream_preprocess,
 };
 pub use shard::{
-    decode_shards_stream, encode_shard_stream, ShardEncodeResult, ShardSource,
-    DEFAULT_SEGMENT_PLAINTEXT_BUDGET,
+    DEFAULT_SEGMENT_PLAINTEXT_BUDGET, ShardEncodeResult, ShardSource, decode_shards_stream,
+    encode_shard_stream,
 };

@@ -1,7 +1,8 @@
 [package]
 name = "carbonado"
-edition = "2021"
-version = "2.0.0"
+edition = "2024"
+rust-version = "1.98.0"
+version = "0.7.0"
 license = "MIT"
 description = "An apocalypse-resistant data storage format for the truly paranoid. Fully symmetric AES-256-CTR + HMAC-SHA512 (EtM) container. Callers supply high-entropy master keys; passphrase KDF (e.g. Argon2id) is caller responsibility. SLH-DSA signatures are provided only as sidecars (via `bitcoinpqc`). Clean cryptographic break from ECIES — v1 encrypted archives require external migration."
 documentation = "https://docs.rs/carbonado"
@@ -14,17 +15,18 @@ include = ["src/**/*", "LICENSE", "README.md", "doc/man/*.1", "doc/man/README.md
 
 [dependencies]
 # bao kept for Hash re-export (blake3::Hash), pub re-export in lib, and legacy error type bridging.
-# All Bao logic now uses the local keyed fork for 4KB chunk groups + format-keyed roots.
+# All Bao logic uses n0-computer/bao-tree keyed 4KB groups + format-keyed roots.
 bao = "0.13"
 
-# Keyed Bao from n0-computer/bao-tree PR 78 (rklaehn `keyed-bao`, builds on #77).
+# Keyed Bao: n0-computer/bao-tree PR 78 merged to main (not on crates.io yet).
+# Pin the merge commit, not a branch and not a crates.io version.
 # Default 4KB groups (BlockSize::from_chunk_log(2)) via BAO_BLOCK_SIZE. Keyed mode
 # makes root = keyed_hash(key_from_format, data) so the Bao hash commits to the
 # exact format pipeline (multi-dimensional naming). See AGENTS.md and
 # constants::BAO_BLOCK_SIZE.
 # default-features = false: crate defaults pull in tokio/fs and break some
 # cross/wasm targets. We only need sync keyed + validate.
-bao_tree = { package = "bao-tree", git = "https://github.com/n0-computer/bao-tree.git", branch = "keyed-bao", default-features = false, features = ["validate"] }
+bao_tree = { package = "bao-tree", git = "https://github.com/n0-computer/bao-tree.git", rev = "dbc952e32cbda8ffd14c106b770e72987b01618e", default-features = false, features = ["validate"] }
 futures-lite = { version = "2", optional = true, default-features = false, features = ["std"] }
 tokio = { version = "1", features = ["rt"], optional = true }
 bitmask-enum = "2.1.0"
@@ -72,20 +74,16 @@ getrandom = { version = "0.2", features = ["js"] }
 # bitcoinpqc 0.4 (WASM-capable build.rs); SLH-DSA-SHA2-128s sidecars.
 # Local mirror lag: `.cargo/config.toml` patches 0.4 until 2026-07-18 (see lift checklist there).
 bitcoinpqc = { version = "0.4", optional = true }
-# Dual-backend: Lean AOT C library (docs/ABI.md, docs/TEST_CONTRACT.md).
-carbonado-sys = { path = "carbonado-sys", optional = true }
 
 # Note: ecies + libsecp256k1-core + nostr + secp256k1 removed (clean break from old ECIES design and Nostr bech32/npub helpers).
 # Future quantum-resistant key formats (qpub etc.) will be handled separately.
 
 [features]
-# Default: pure Rust engine + existing features. Dual-backend: see backend-rust / backend-lean.
+# Default: Rust engine + existing features. There is no Cargo Lean backend
+# (no carbonado-sys / libcarbonado). Lean lives in Carbonado/ as proofs + AOT demo.
 default = ["backend-rust", "pqc", "ots", "cli", "parallel"]
-# Pure Rust implementation (default engine).
+# Empty marker kept so `--features backend-rust` / serial-FEC recipes stay valid.
 backend-rust = []
-# Lean AOT engine via carbonado-sys / libcarbonado (G8). Requires CARBONADO_LEAN_LIB.
-# `require-lib` fail-closes the build when the AOT shared library is missing.
-backend-lean = ["dep:carbonado-sys", "carbonado-sys/require-lib"]
 pqc = ["dep:bitcoinpqc"]
 # OpenTimestamps stub stamping (offline/testable; no network calendar in default build).
 ots = []

@@ -2,26 +2,24 @@
 
 Living inventory. IDs are durable; close only when theorems and/or parity gates are green.
 
-## Dual-backend model (north star)
+## Product model (north star)
 
 | Role | Location |
 |------|----------|
-| First-class engine | **Rust** (`src/`, default `backend-rust`) — production library + CLI |
-| Normative contract | **Rust `tests/`** — both backends must pass the same suite |
-| Second engine | **Lean 4 AOT** (`Carbonado/`, `libcarbonado` via C ABI) — proofs + wire-compatible implementation |
-| Build / proofs | Nix flakes (`nix flake check`, `libcarbonado` package) |
+| Production engine | **Rust** (`src/`, default `backend-rust`) — library + CLI |
+| Normative contract | **Rust `tests/`** — Rust engine only |
+| Spec + proofs | **Lean 4** (`Carbonado/`, `CarbonadoTest/`) + AOT demo |
+| Build / proofs | Nix flakes (`nix flake check`, no-sorry, demo) |
 | Oracles | `ref/` pins + parity drivers |
 
-**Parity bar (G8):** same `tests/` on both engines (not Lean-only demos). Default features enable `backend-rust` only — do **not** pass `--features backend-lean` alone (both engines → `compile_error!`).
+There is **no** `carbonado-sys`, **no** Cargo `backend-lean`, and **no** product C ABI. Do **not** claim G8 C-ABI parity.
 
 ```bash
-cargo test                                                              # backend-rust (default)
-just test-lean-ci                                                       # G8 freeze = full dual suite
-# Equivalent unfiltered lean suite (includes bin_* via cli feature):
-# cargo test --no-default-features --features "backend-lean,pqc,ots,cli"
+cargo test            # Rust engine (default)
+just test-lean-ci     # Lean no-sorry + AOT demo (nix)
 ```
 
-See [TEST_CONTRACT.md](./TEST_CONTRACT.md), [ABI.md](./ABI.md), [PARITY.md](./PARITY.md), [LIMITS.md](./LIMITS.md), AGENTS.md dual-backend block.
+See [TEST_CONTRACT.md](./TEST_CONTRACT.md), [PARITY.md](./PARITY.md), [LIMITS.md](./LIMITS.md), AGENTS.md product model.
 
 | ID | Gap | Status |
 |----|-----|--------|
@@ -33,10 +31,10 @@ See [TEST_CONTRACT.md](./TEST_CONTRACT.md), [ABI.md](./ABI.md), [PARITY.md](./PA
 | G5 | Pipeline / stream / scrub / shard | **closed** (Program E) |
 | G6 | zstd link + SLH product | **closed** (zstd AOT closed; dual-suite SLH composition **P4**; pure Lean SLH FFI **R9/G10** — dual-suite may still use Rust `bitcoinpqc` composition by design) |
 | G7 | Adamantine + CLI | **partial** (dual directory + stream E1 + **W1a/W1b** closed; **W3** pure Lean rkyv encode/CLI closed; dual-suite rkyv encode remains Rust composition SSOT; pure Lean chunked stream residual) |
-| **G8** | **Dual-backend: C ABI + full `cargo test --no-default-features --features "backend-lean,pqc,ots[,cli]"` suite** | **closed** (2026-07 R7: full suite green under lean; freeze = full suite via `just test-lean-ci`; post-G8 purity/feature residuals below) |
-| G9 | Cross-backend encode/decode matrix (Rust↔Lean) | **closed** (2026-07 R8: no-compress body/headered/outboard both directions + fixed-nonce encrypted; `tests/g9_cross_backend.rs` + `tests/fixtures/g9/`; **W2d** codecode/decodec shipped; **W2a/W2b** permanent cross-engine compress/dir encode residuals) |
-| G10 | libbitcoinpqc real SLH sign/verify in libcarbonado | **closed** (R9: pin `b309f444…` into `libcarbonado_native.a`; `carbonado_slh_*` C ABI + Lean `@[extern]`; AOT `signRoot`/`verifyRoot` live; dual-suite may still use Rust composition) |
-| G11 | Live CI matrix both backends | **closed** (2026-07 P5: Linux job `dual-backend-lean` runs `just test-lean-ci`; `desktop` keeps `backend-rust` full suite) |
+| **G8** | Dual-backend via C ABI (`carbonado-sys` / `libcarbonado` / Cargo `backend-lean`) | **removed** (2026-08-24: trampoline deleted; do not claim C-ABI parity) |
+| G9 | Cross-backend encode/decode matrix (Rust↔Lean) | **partial** (2026-08-24: Rust still decodes committed Lean AOT goldens in `tests/fixtures/g9/lean/`; live rust→lean encode via C is gone) |
+| G10 | libbitcoinpqc real SLH sign/verify in the Lean AOT demo | **closed** (Lean `@[extern]` into pinned SLH objects; not a Rust `-sys` product) |
+| G11 | Live CI matrix both backends | **superseded** (2026-08-24: CI `desktop` is Rust; CI `lean-proofs` is nix no-sorry + demo) |
 
 ## Dual-backend phases (G8 breakdown)
 
@@ -76,7 +74,11 @@ See [TEST_CONTRACT.md](./TEST_CONTRACT.md), [ABI.md](./ABI.md), [PARITY.md](./PA
 
 **P4 honest residuals (historical; superseded in part at R9/R10/W1a):** ~~pure Lean `signRoot` / libbitcoinpqc~~ **closed R9**; ~~seekable outboard slice C~~ **closed R9**; rkyv dual-decode **closed R9** (encode residual remains); stream dual E1 is **spool-to-buffer** (not true chunked stream — O(logical) RAM); ~~`file::decode_stream` pure-Rust~~ **W1a closed**; ~~residual full files `sharding` / `fec_chaos`~~ **green at R6**; ~~async dual~~ **closed R10**.
 
-### P5 deliverables (evidence of close)
+### Removed 2026-08-24
+
+Cargo `backend-lean`, `carbonado-sys`, `include/carbonado.h`, `docs/ABI.md`, and `libcarbonado` as a Rust-link target are **gone**. Sections below that describe P1–R7 C ABI dual-suite freeze are **historical**. Live gates: `cargo test` (Rust) and `just test-lean-ci` (Lean proofs + AOT demo).
+
+### P5 deliverables (historical)
 
 | Deliverable | Location |
 |-------------|----------|
@@ -135,7 +137,7 @@ just test-lean-ci
 | Pure Lean chunked stream C ABI | No streaming C symbols; inboard/encrypted stream remain E1; public outboard E2 is **composition** | residual after W1b |
 | ~~codecode / decodec determinism suite~~ | **W2d closed** — `tests/determinism_roundtrip.rs` (no-compress body/headered/outboard; same-engine compress + directory) | **closed** |
 | Compression encode bit-match (cross-engine) | **permanent residual (W2a)** — Lean AOT zstd frames ≠ Rust `zstd`; decode interop only; same-engine codecode green | permanent |
-| Directory encode bit-match (cross-engine) | **permanent residual (W2b)** — live rust `0b119f12…` ≠ live lean `f67b6f49…` (pinned); `phase3_g9_directory` decode-only SSOT (not re-encode golden); same-engine codecode green | permanent |
+| Directory encode bit-match (cross-engine) | **permanent residual (W2b)** — live rust `16e2369f…` ≠ live lean `d468ea7a…` (pinned); rust pin equals `phase3_g9_directory` seed (catalog bundle follows sorted `rel_path`, not `read_dir`); same-engine codecode green | permanent |
 
 ### W1 — Dual-suite honesty (closed 2026-07)
 
@@ -182,8 +184,8 @@ just test-lean-ci
 | Item | Status | Detail |
 |------|--------|--------|
 | **W2d** codecode / decodec | **closed** | `tests/determinism_roundtrip.rs` — EDE + DED under G9 MASTER/NONCE/`g9_matrix_v1`. Matrix: body c0/c1/c4/c5/c8/c9/c12/c13; headered c4/c5/c12/c13; outboard c4/c5/c12/c13. Both engines (default rust + lean freeze). Asserts `pt' == pt` and `A' == A` / `B == A`. |
-| **W2a** Compression cross-engine | **permanent residual** | Same-engine body/headered/outboard compress codecode/decodec green. Cross-engine: G9 `outboard_c14` mains differ (frame descriptor `00` vs `20`; roots `0abe5781…` vs `129b4518…`); hard-asserted fail-closed. Decode interop only. See [LIMITS.md](./LIMITS.md). |
-| **W2b** Directory cross-engine | **permanent residual** | Same-engine public directory codecode/decodec green. Cross-engine residual is **live rust `0b119f12…` ≠ live lean `f67b6f49…`** (pinned hard asserts). `phase3_g9_directory` (`16e2369f…`) is **decode-only SSOT**, not a live re-encode golden. |
+| **W2a** Compression cross-engine | **permanent residual** | Same-engine body/headered/outboard compress codecode/decodec green. Cross-engine: G9 `outboard_c14` mains differ (frame descriptor `00` vs `20`; roots `0abe5781…` vs `129b4518…`); hard-asserted fail-closed. **Header parameters specified** (level 20, magic, checksum off, no dict, rust windowLog 25 vs lean Single_Segment+FCS) in `Carbonado.Compress` + `tests/zstd_frame_params.rs`. Full compressed-block identity still unproved. Decode interop only. See [LIMITS.md](./LIMITS.md). |
+| **W2b** Directory cross-engine | **permanent residual** | Same-engine public directory codecode/decodec green. Cross-engine residual is **live rust `16e2369f…` ≠ live lean `d468ea7a…`** (pinned hard asserts). `phase3_g9_directory` (`16e2369f…`) matches live rust encode after catalog bundle append follows sorted `rel_path`. |
 | **W2c** Full c0–c15 G9 matrix | **skipped** (optional) | Not required after W2a permanent residual. |
 
 ### W3 — Pure Lean product wire (closed 2026-07)
@@ -225,7 +227,7 @@ just test-lean-ci
 | Residual | Notes |
 |----------|--------|
 | Compression encode bit-match | **permanent (W2a)** — Lean AOT zstd ≠ Rust `zstd`; c14 outboard **decode** interop only; same-engine codecode green in `determinism_roundtrip` |
-| Directory encode bit-match | **permanent (W2b)** — live rust≠lean catalog roots (pinned); `phase3_g9_directory` is **decode-only SSOT** (not live re-encode golden); same-engine directory codecode green |
+| Directory encode bit-match | **permanent (W2b)** — live rust≠lean catalog roots (pinned `16e2369f…` vs `d468ea7a…`); rust pin equals `phase3_g9_directory` seed (sorted `rel_path` bundle); same-engine directory codecode green |
 | Full c0–c15 with Compression | deferred / not required (W2c optional skipped) |
 | ~~codecode/decodec suite~~ | **W2d closed** — `tests/determinism_roundtrip.rs` |
 

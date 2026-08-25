@@ -1,18 +1,18 @@
 # carbonado — parity and `ref/` pins
 
-## Method (dual-backend)
+## Method
 
-1. **Primary parity bar (G8):** the same Rust tests under `tests/` pass on **`backend-rust`** and **`backend-lean`** (Lean AOT `libcarbonado` via C ABI). See [TEST_CONTRACT.md](./TEST_CONTRACT.md), [ABI.md](./ABI.md), [GAPS.md](./GAPS.md). **G8 full closed at R7** — `just test-lean-ci` / CI `dual-backend-lean` runs the **full** dual suite under lean features; permanent feature-gated / purity residuals only (`streaming_async` / `parallel_determinism` feature-gated off freeze — **R10** closed async dual policy; ~~pure Lean rkyv encode~~ **W3 closed** — dual-suite encode remains Rust rkyv composition SSOT; ~~W1a+W1b~~ dual honesty closed — public outboard stream E2 is S4 composition under lean; pure Lean chunked C residual).
+1. **Rust contract:** `tests/` on the Rust engine (`cargo test`). There is no Cargo Lean backend and no product C ABI. Do not claim G8 C-ABI parity. See [TEST_CONTRACT.md](./TEST_CONTRACT.md), [GAPS.md](./GAPS.md).
 2. **Component oracles:** pin reference trees under `ref/`; keep offline drivers (`etm-vectors`, `rs-vectors`, `bao-vectors`) for fast regression against Lean goldens / AOT demos.
-3. **Cross-backend tests (G9):** **closed at R8** — Rust encode → Lean decode and reverse for no-compress body/headered/outboard (public + fixed-nonce encrypted); fixtures under `tests/fixtures/g9/`; contract `tests/g9_cross_backend.rs`. **W2d** same-engine codecode/decodec in `tests/determinism_roundtrip.rs`. **Permanent residuals (W2a/W2b):** cross-engine Compression / directory encode bit-match (decode interop only).
+3. **Lean goldens (G9 remainder):** Rust still decodes committed Lean AOT bytes under `tests/fixtures/g9/lean/` (`just test-g9`). Live rust→lean encode via C is gone. **W2d** same-engine codecode/decodec in `tests/determinism_roundtrip.rs`. Compression / directory encode vs Lean AOT frames remains a measured residual.
 
 **SSOT roles (do not invert):**
 
 | Layer | Role |
 |-------|------|
-| Rust `src/` + default `backend-rust` | First-class production engine |
-| Rust `tests/` | Normative behavioral contract for **both** backends |
-| Lean `Carbonado/` + AOT `libcarbonado` | Second engine: proofs + wire/C-ABI compatible implementation |
+| Rust `src/` + default `backend-rust` | Production engine |
+| Rust `tests/` | Normative behavioral contract for the Rust engine |
+| Lean `Carbonado/` + AOT demo | Spec, proofs, demo binary (tiny C `@[extern]` for zstd/SLH only) |
 | `ref/` | Pinned third-party oracles and vector drivers |
 
 Pin the exact **third-party** trees the Rust product used (Bao, RS, crypto crates, zstd, bitcoinpqc, …); Lean AOT must remain wire-compatible with that contract. Rust product under `src/` + `tests/` is **first-class SSOT** — not demoted to “oracle only.” **G1 closed (W5a):** no `ref/carbonado-rust` product pin (permanent policy; see freeze strategy below).
@@ -21,7 +21,7 @@ Pin the exact **third-party** trees the Rust product used (Bao, RS, crypto crate
 
 | ref path | Source | Pin (commit / tag) |
 |----------|--------|--------------------|
-| `ref/bao-tree` | `https://github.com/SurmountSystems/bao-tree.git` | **`02916e784bb0afe0fd5a73c291c8c5335865e166`** (Cargo.lock; branch `76-keyed-bao`) |
+| `ref/bao-tree` | `https://github.com/SurmountSystems/bao-tree.git` | Oracle snapshot **`02916e784bb0afe0fd5a73c291c8c5335865e166`** (keyed work before upstream squash). **Product** cargo dep is n0-computer/bao-tree **`dbc952e32cbda8ffd14c106b770e72987b01618e`** (PR 78 merge; git rev, not crates.io). |
 | `ref/reed-solomon-erasure` | `https://github.com/darrenldl/reed-solomon-erasure.git` | tag **`v5.0.3`** → **`9f974918f8c598eee351406c36fa0295f4bb4d69`** |
 | `ref/rustcrypto-block-ciphers` | `https://github.com/RustCrypto/block-ciphers.git` | tag **`aes-v0.8.4`** → **`f2dbee516b4d0cf4cb4f3045d09e35b5fd80087b`** |
 | `ref/rustcrypto-macs` | `https://github.com/RustCrypto/MACs.git` | tag **`hmac-v0.12.1`** → **`46797e3b44973a30edb9d7f3a3ebb41810061d90`** |
@@ -104,7 +104,7 @@ cd ref/parity-harness/drivers/bao-vectors && cargo run --quiet
 ## Program F zstd + SLH parity
 
 1. **zstd pin / product SSOT:** commit **`f8745da6…`** (tag v1.5.7). Checked out as `ref/zstd` submodule for oracle/review; flake **fetches the same rev+hash** into `nix/native` (`zstdPinned` in `flake.nix`) and **statically** compiles `lib/common|compress|decompress` + FFI into `libcarbonado_native.a` (level 20, single-threaded, no shared `-lzstd`). nixpkgs is only for the host toolchain / Lean headers — **not** the zstd source pin. Updating zstd requires: submodule checkout, `flake.nix` rev/hash, and PARITY table together.
-2. **Goldens (AOT `demo`):** API frames for empty (`28b52ffd2000010000`) and `hello` (`28b52ffd200529000068656c6c6f`); corrupt frame → `decompressionFailed`; tight `maxOut` → `outputTooLarge`; zeros shrink; pipeline c2/c6 + **headered c3/c7**; full format matrix incl. compression at runtime.
+2. **Goldens (AOT `demo`):** API frames for empty (`28b52ffd2000010000`) and `hello` (`28b52ffd200529000068656c6c6f`); frame-header parse (Single_Segment + 1-byte FCS, checksum off, no dict); G9 c14 prefixes (`20 1a` lean vs `00 78` rust); corrupt frame → `decompressionFailed`; tight `maxOut` → `outputTooLarge`; zeros shrink; pipeline c2/c6 + **headered c3/c7**; full format matrix incl. compression at runtime. Rust `tests/zstd_frame_params.rs` parses the same bits (not a full bitstream proof; W2a).
 3. **Interpreter residual:** Lean `@[extern]` bodies are identity for elaborator; real frames only in AOT (LIMITS). CarbonadoTest `native_decide` covers non-compression formats + status maps.
 4. **SLH1 wire:** magic `SLH1`, signature 7856 B, sidecar 7860 B — matches `src/crypto.rs` `SLH1_*` and AGENTS §2.3. Pure suite: length errors + `parseMagicAtExactLen` / `badSlhMagic` gate theorems; full-length build/parse + all-zero magic in `demo`.
 5. **Bind-to-root + live SLH (R9 / G10):** Lean model requires signature message = Bao root (`verifyBoundToExpected`); wrong root → `verificationFailed`. Real SLH-DSA-SHA2-128s sign/verify is **linked** via flake pin `b309f444…` (same SSOT as `ref/bitcoinpqc` submodule target) into `libcarbonado_native.a` — C `carbonado_slh_*` + Lean `@[extern]`. Nested worktree emptiness is not a product residual when the flake fetch pin is present. Dual-suite product SLH may still use Rust `bitcoinpqc` composition.
@@ -120,7 +120,7 @@ cd ref/parity-harness/drivers/bao-vectors && cargo run --quiet
 
 ```bash
 git submodule update --init --recursive
-# bao-tree must be at the lock commit:
+# Oracle bao-tree (Lean goldens / bao-vectors). Product cargo uses n0-computer PR 78 merge.
 git -C ref/bao-tree checkout 02916e784bb0afe0fd5a73c291c8c5335865e166
 ```
 

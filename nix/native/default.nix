@@ -1,5 +1,6 @@
-# Static FFI glue for Carbonado AOT (zstd + SLH-DSA + C ABI).
+# Static FFI glue for the Lean AOT demo (zstd + SLH-DSA @[extern]).
 # Output: $out/libcarbonado_native.a (linked via buildLeanPackage.staticLibDeps).
+# This is not a Rust -sys / C ABI product.
 #
 # Embeds:
 #   * single-threaded libzstd from the **pinned** `ref/zstd` tree (v1.5.7)
@@ -10,8 +11,7 @@
   pkgs,
   leanAll, # pkgs.lean.lean-all — provides lean/lean.h
   zstdSrc, # flake: pinned zstd fetch
-  bitcoinpqcSrc, # flake: pinned libbitcoinpqc fetch (R9 / G10)
-  carbonadoInclude ? ../.. + "/include", # repo include/carbonado.h (ABI)
+  bitcoinpqcSrc, # flake: pinned libbitcoinpqc fetch
 }:
 pkgs.stdenv.mkDerivation {
   pname = "carbonado-native";
@@ -30,11 +30,6 @@ pkgs.stdenv.mkDerivation {
 
     ZSTD_LIB="${zstdSrc}/lib"
     PQC="${bitcoinpqcSrc}"
-    ABI_INC="${carbonadoInclude}"
-    if [ ! -f "$ABI_INC/carbonado.h" ]; then
-      echo "carbonado-native: missing $ABI_INC/carbonado.h" >&2
-      exit 1
-    fi
     if [ ! -d "$ZSTD_LIB" ]; then
       echo "carbonado-native: missing zstd lib dir at $ZSTD_LIB (init ref/zstd submodule)" >&2
       exit 1
@@ -103,20 +98,12 @@ pkgs.stdenv.mkDerivation {
     compile_pqc "$PQC/src/slh_dsa/sign.c"                   slh_sign
     compile_pqc "$PQC/src/slh_dsa/verify.c"                 slh_verify
 
-    echo "carbonado-native: compiling carbonado_slh.c (Lean extern + C ABI)"
+    echo "carbonado-native: compiling carbonado_slh.c (Lean @[extern] only)"
     $CC -c -O2 -fPIC \
       -I${leanAll}/include \
-      -I"$ABI_INC" \
       -I"$PQC/include" \
       carbonado_slh.c \
       -o carbonado_slh.o
-
-    echo "carbonado-native: compiling carbonado_abi.c (C ABI v1 + Lean glue)"
-    $CC -c -O2 -fPIC \
-      -I${leanAll}/include \
-      -I"$ABI_INC" \
-      carbonado_abi.c \
-      -o carbonado_abi.o
 
     # Fail-closed: must have more than just the FFI object.
     ocount=$(ls -1 ./*.o 2>/dev/null | wc -l)
@@ -134,15 +121,13 @@ pkgs.stdenv.mkDerivation {
   installPhase = ''
     runHook preInstall
     # lean4-nix staticLibDeps expects $out/libcarbonado_native.a (archive root).
-    mkdir -p $out/lib $out/include
+    mkdir -p $out/lib
     cp libcarbonado_native.a $out/
     cp libcarbonado_native.a $out/lib/
-    ln -sf libcarbonado_native.a $out/lib/libcarbonado.a
-    cp "${carbonadoInclude}/carbonado.h" $out/include/
     runHook postInstall
   '';
 
   meta = {
-    description = "Carbonado Lean AOT native glue (static zstd + SLH-DSA + C ABI Lean bridge)";
+    description = "Carbonado Lean AOT demo native glue (static zstd + SLH-DSA @[extern])";
   };
 }
