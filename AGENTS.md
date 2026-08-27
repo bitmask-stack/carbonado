@@ -169,7 +169,7 @@ The overarching principle is a **clean cryptographic break** (see §1). v1 ECIES
 | Passphrase KDF       | Argon2id wrapper inside library        | Removed; caller responsibility (Argon2id recommended outside) | Keeps container security contract simple. Master key is 32/64B high-entropy material. |
 | Magic number         | CARBONADO01 or similar (ECIES)         | CARBONADO20\n (stable v2); 02 was dev transitional | Signals official stabilized 2.0 format. Old magic → clear external migration error. |
 | Version              | Pre-0.7 (ECIES)                        | 2.0.0 (post-FEC + docs stabilization)              | Marks end of fluid dev period. API now stable for semver. |
-| Dependencies         | ecies + secp + ...                      | aes+ctr+hmac+sha2 + reed-solomon-erasure + n0-computer/bao-tree (keyed git pin) + bitcoinpqc (optional pqc) | Clean break removal of ECIES-only crates. Hardware-accel friendly. |
+| Dependencies         | ecies + secp + ...                      | aes+ctr+hmac+sha2 + reed-solomon-erasure + n0-computer/bao-tree 0.16.1 (keyed) + bitcoinpqc (optional pqc) | Clean break removal of ECIES-only crates. Hardware-accel friendly. |
 | Optional hybrid layer | (the only encryption was the ECIES hybrid) | Pure symmetric is default. Added *optional* inner secp256k1-ECDH + ChaCha20-Poly1305 AEAD wrapped by outer AES-CTR + HMAC-EtM (via new hybrid_* and ecc_aead_* APIs) | "Maximal paranoia" defense-in-depth: different cipher families, different key-gen (ECDH+derive vs pure HMAC labels), HMAC + AEAD. See dedicated rationale below. Pure sym path and Encrypted bit semantics unchanged for normal use. secp here is *not* for the main container (no pubkeys in headers etc.). |
 
 #### Detailed Decision Rationales
@@ -673,7 +673,7 @@ Current registered labels (must be kept in sync with code — full table in **Su
    - Suggestion: Use a keyed variant of the Bao tree (keyed on the format bitmask byte, or a small header prefix) so that the root hash cryptographically commits to which processing pipeline was used.
    - This would be extremely useful for data markets (see §9), because different format combinations (especially encrypted vs public) would produce distinguishable roots even for related data.
    - **Endianness for key material**: All integer fields in Carbonado (and in the Bao format itself) are little-endian. If a keyed Bao implementation derives a 32-byte key from header fields, those fields should be serialized in LE order for consistency. A minimal implementation that only keys on the single-byte `format` bitmask has no endianness issues at all.
-   - (Implemented) Original `bao` 0.13 lacked BlockSize and public keyed. Now using n0-computer/bao-tree (PR 78 merge, git rev pin) with BlockSize(2) for 4KB + keyed_hash on format byte (root commits to pipeline). See constants::BAO_BLOCK_SIZE and stream::bao. Not published on crates.io yet.
+   - (Implemented) Original `bao` 0.13 lacked BlockSize and public keyed. Now using n0-computer/bao-tree 0.16.1 (crates.io; PR 78 keyed) with BlockSize(2) for 4KB + keyed_hash on format byte (root commits to pipeline). See constants::BAO_BLOCK_SIZE and stream::bao.
 
    Because there are 16 possible format combinations, the same logical input can produce up to 16 different Bao hashes. In this sense the naming is **multi-dimensional**:
    - When the `Encrypted` bit is set (symmetric encryption), the hash primarily names an *encrypted+protected container*.
@@ -954,7 +954,7 @@ This tension is acknowledged but not resolved in the current design. Carbonado i
 Remaining open (documented; active work called out):
 - **Pipeline memory residual (hard-break track):** fused encode/decode is O(chunk) spool + O(stripe) FEC encode; non-FEC verification decode is O(chunk) via `SeekWriteAt`; FEC verification decode retains O(FEC body) shard buffers (`FecInboardWriteAt`); outboard verify uses `PostOrderOutboard` + `ReadAt` (O(hash pair) per node); `stream_decode_async` fully spools encoded body to disk. Distinct from Bao **slice** verification (already O(slice) memory). See [doc/STREAMING_PARALLELISM.md](doc/STREAMING_PARALLELISM.md).
 - **WASM:** `cargo clippy --target wasm32-unknown-unknown --no-default-features --features "backend-rust"` is green (CI `lint-wasm`). **wasm32 + `pqc` probe (2026-07-08):** pointing global `CC_wasm32-unknown-unknown` at `libbitcoinpqc-bindings/wasm/clang-wasm32.sh` breaks **`zstd-sys`** (it tries to assemble `huf_decompress_amd64.S` with the wasm clang). Residual is build-env / dep CC scoping — not Carbonado crypto logic. Keep CI wasm lint **no-pqc** until bitcoinpqc (or zstd) wasm build is isolated.
-- Bao crate: n0-computer/bao-tree git pin (PR 78 merge `dbc952e32cbda8ffd14c106b770e72987b01618e`), 4 KiB groups, `default-features = false` (no tokio/fs on wasm). Not a crates.io version yet.
+- Bao crate: n0-computer/bao-tree **0.16.1** (crates.io; PR 78 keyed APIs), 4 KiB groups, `default-features = false` (no tokio/fs on wasm).
 - reed-solomon-erasure: upstream "looking for maintainers"; periodic re-eval (no runtime issues).
 - (Perf: inboard `verify_slice` is O(slice) memory but O(N) encoded-byte I/O; outboard slice verify is O(slice) time+memory; scrub pre-check uses `verify_inboard_keyed` with O(1) retained decode memory (S5).)
 

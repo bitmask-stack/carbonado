@@ -17,8 +17,8 @@ system := env_var_or_default("CI_SYSTEM", `case "$(uname -s)-$(uname -m)" in Lin
 default:
     @just --list
 
-# Clone n0-computer/bao-tree at the PR 78 merge SHA (optional sibling path patch).
-bao_tree_rev := "dbc952e32cbda8ffd14c106b770e72987b01618e"
+# Clone n0-computer/bao-tree 0.16.1 (optional sibling path patch).
+bao_tree_rev := "0.16.1"
 
 setup-bao-tree:
     #!/usr/bin/env bash
@@ -30,7 +30,7 @@ setup-bao-tree:
       git clone https://github.com/n0-computer/bao-tree.git ../bao-tree
     fi
     git -C ../bao-tree fetch --all --tags
-    git -C ../bao-tree checkout "$PIN"
+    git -C ../bao-tree checkout "v${PIN}" 2>/dev/null || git -C ../bao-tree checkout "$PIN"
     rg -q 'create_keyed|keyed_outboard_post_order' ../bao-tree/src
     echo "bao-tree OK (n0-computer $PIN)"
 
@@ -44,7 +44,7 @@ require-bao-tree:
       exit 1
     fi
     if ! rg -q 'create_keyed|keyed_outboard_post_order' ../bao-tree/src 2>/dev/null; then
-      echo "Wrong bao-tree at ../bao-tree — need n0-computer PR 78 merge ($PIN)"
+      echo "Wrong bao-tree at ../bao-tree — need n0-computer bao-tree $PIN (keyed APIs)"
       exit 1
     fi
 

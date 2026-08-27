@@ -345,10 +345,10 @@ Code, dependencies, and programs can be vendored and preserved wherever they are
 
 ## Development
 
-Requires [just](https://github.com/casey/just), [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`), and **Rust 1.98** (edition 2024; see `rust-toolchain.toml`). Cargo fetches keyed `bao-tree` from n0-computer at the PR 78 merge SHA. An optional sibling checkout at `../bao-tree` speeds clean builds (`just setup-bao-tree`):
+Requires [just](https://github.com/casey/just), [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`), and **Rust 1.98** (edition 2024; see `rust-toolchain.toml`). Cargo uses `bao-tree` 0.16.1 from crates.io. An optional sibling checkout at `../bao-tree` speeds clean builds (`just setup-bao-tree`):
 
 ```bash
-just setup-bao-tree   # optional; pins n0-computer/bao-tree at the merge SHA
+just setup-bao-tree   # optional; sibling checkout of bao-tree 0.16.1
 just                  # list recipes
 just all              # everything (fmt, lint, tests, release build, source grep)
 ```

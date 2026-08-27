@@ -21,7 +21,7 @@ Pin the exact **third-party** trees the Rust product used (Bao, RS, crypto crate
 
 | ref path | Source | Pin (commit / tag) |
 |----------|--------|--------------------|
-| `ref/bao-tree` | `https://github.com/SurmountSystems/bao-tree.git` | Oracle snapshot **`02916e784bb0afe0fd5a73c291c8c5335865e166`** (keyed work before upstream squash). **Product** cargo dep is n0-computer/bao-tree **`dbc952e32cbda8ffd14c106b770e72987b01618e`** (PR 78 merge; git rev, not crates.io). |
+| `ref/bao-tree` | `https://github.com/SurmountSystems/bao-tree.git` | Oracle snapshot **`02916e784bb0afe0fd5a73c291c8c5335865e166`** (keyed work before upstream squash). **Product** cargo dep is crates.io **bao-tree 0.16.1**. |
 | `ref/reed-solomon-erasure` | `https://github.com/darrenldl/reed-solomon-erasure.git` | tag **`v5.0.3`** → **`9f974918f8c598eee351406c36fa0295f4bb4d69`** |
 | `ref/rustcrypto-block-ciphers` | `https://github.com/RustCrypto/block-ciphers.git` | tag **`aes-v0.8.4`** → **`f2dbee516b4d0cf4cb4f3045d09e35b5fd80087b`** |
 | `ref/rustcrypto-macs` | `https://github.com/RustCrypto/MACs.git` | tag **`hmac-v0.12.1`** → **`46797e3b44973a30edb9d7f3a3ebb41810061d90`** |

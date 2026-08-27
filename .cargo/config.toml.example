@@ -1,12 +1,12 @@
 # Optional local development overrides (copy to `.cargo/config.toml`).
 #
-# Faster iteration: use a sibling checkout of n0-computer/bao-tree (PR 78 merge
-# SHA, see just setup-bao-tree) instead of fetching from git on every clean build.
+# Faster iteration: use a sibling checkout of n0-computer/bao-tree 0.16.1
+# (see just setup-bao-tree) instead of crates.io on every clean build.
 #
 #   just setup-bao-tree
 #   cp .cargo/config.toml.example .cargo/config.toml
 
-[patch."https://github.com/n0-computer/bao-tree.git"]
+[patch.crates-io]
 bao-tree = { path = "../bao-tree" }
 
 # `bitcoinpqc` 0.4 mirror lag: the repo ships `.cargo/config.toml` with a temporary
