@@ -1,7 +1,9 @@
 //! W3 golden lock: fixture `.bin` files must match Rust `rkyv::to_bytes` **and**
 //! the Lean-embedded `golden*Hex` constants in `Carbonado/RkyvFilepack.lean`.
 //!
-//! Regen (updates bins + prints hex to sync into Lean):
+//! Regen (updates bins + prints hex for this file). Lean `golden*Hex` still
+//! encodes FilepackManifest v2 SegmentRef (no dict fields); do not copy these
+//! v3 strings into Lean until `Carbonado/Filepack.lean` grows dict offsets.
 //! ```bash
 //! cargo run --example dump_rkyv_r9 --features backend-rust
 //! ```
@@ -39,83 +41,95 @@ fn seg(root_fill: u8, main_len: u64, chunk: u32, vo: u32) -> SegmentRef {
         verification_outboard_len: 64,
         fec_parity_offset: vo + 64,
         fec_parity_len: 128,
+        dict_offset: 0,
+        dict_len: 0,
     }
 }
 
 /// Must stay bit-identical to `Carbonado/RkyvFilepack.lean` golden*Hex (Issue 3 lock).
 mod lean_hex {
-    pub const EMPTY: &str = "020000000efbffffff00000000";
+    pub const EMPTY: &str = "030000000efbffffff00000000";
     pub const SINGLE: &str = concat!(
         "1111111111111111111111111111111111111111111111111111111111111111",
         "00000000640000000000000000000000400000004000000080000000",
+        "0000000000000000",
         "612e747874ffffff",
         "2222222222222222222222222222222222222222222222222222222222222222",
-        "0e9bffffff01000000000000000000000000",
-        "020000000ec1ffffff01000000",
+        "0e93ffffff01000000000000000000000000",
+        "030000000ec1ffffff01000000",
     );
     pub const MULTI_OTS: &str = concat!(
         "1111111111111111111111111111111111111111111111111111111111111111",
         "00000000640000000000000000000000400000004000000080000000",
+        "0000000000000000",
         "622f6c6f6e6765722d706174682d6e616d652e747874",
         "4444444444444444444444444444444444444444444444444444444444444444",
         "00000000c80000000000000000000000400000004000000080000000",
+        "0000000000000000",
         "abcdef01",
         "612e747874ffffff",
         "2222222222222222222222222222222222222222222222222222222222222222",
-        "0e45ffffff01000000000000000000000000",
-        "9600000070ffffff",
+        "0e35ffffff01000000000000000000000000",
+        "9600000068ffffff",
         "3333333333333333333333333333333333333333333333333333333333333333",
-        "0e5dffffff010000000190ffffff04000000",
-        "020000000e87ffffff02000000",
+        "0e55ffffff010000000190ffffff04000000",
+        "030000000e87ffffff02000000",
     );
     pub const PATH_INLINE_8: &str = concat!(
         "1111111111111111111111111111111111111111111111111111111111111111",
         "00000000640000000000000000000000400000004000000080000000",
+        "0000000000000000",
         "3132333435363738",
         "2222222222222222222222222222222222222222222222222222222222222222",
-        "0e9bffffff01000000000000000000000000",
-        "020000000ec1ffffff01000000",
+        "0e93ffffff01000000000000000000000000",
+        "030000000ec1ffffff01000000",
     );
     pub const PATH_OOL_9: &str = concat!(
         "313233343536373839",
         "1111111111111111111111111111111111111111111111111111111111111111",
         "00000000640000000000000000000000400000004000000080000000",
-        "89000000bbffffff",
+        "0000000000000000",
+        "89000000b3ffffff",
         "2222222222222222222222222222222222222222222222222222222222222222",
-        "0e9bffffff01000000000000000000000000",
-        "020000000ec1ffffff01000000",
+        "0e93ffffff01000000000000000000000000",
+        "030000000ec1ffffff01000000",
     );
     pub const TWO_SEGMENTS: &str = concat!(
         "1111111111111111111111111111111111111111111111111111111111111111",
         "00000000640000000000000000000000400000004000000080000000",
+        "0000000000000000",
         "1212121212121212121212121212121212121212121212121212121212121212",
         "010000003200000000000000c0000000400000000001000080000000",
+        "0000000000000000",
         "612e747874ffffff",
         "2222222222222222222222222222222222222222222222222222222222222222",
-        "0e5fffffff02000000000000000000000000",
-        "020000000ec1ffffff01000000",
+        "0e4fffffff02000000000000000000000000",
+        "030000000ec1ffffff01000000",
     );
     pub const OTS_FIRST_ONLY: &str = concat!(
         "1111111111111111111111111111111111111111111111111111111111111111",
         "00000000640000000000000000000000400000004000000080000000",
+        "0000000000000000",
         "dead",
         "4444444444444444444444444444444444444444444444444444444444444444",
         "00000000c80000000000000000000000400000004000000080000000",
+        "0000000000000000",
         "612e747874ffffff",
         "2222222222222222222222222222222222222222222222222222222222222222",
-        "0e5dffffff010000000190ffffff02000000",
+        "0e4dffffff010000000188ffffff02000000",
         "622e747874ffffff",
         "3333333333333333333333333333333333333333333333333333333333333333",
-        "0e61ffffff01000000000000000000000000",
-        "020000000e87ffffff02000000",
+        "0e59ffffff01000000000000000000000000",
+        "030000000e87ffffff02000000",
     );
     pub const RKYV_CFP2_PREFIX: &str = concat!(
         "4346503211111111111111111111111111111111111111111111111111111111",
         "00000000640000000000000000000000400000004000000080000000",
+        "0000000000000000",
         "612e747874ffffff",
         "2222222222222222222222222222222222222222222222222222222222222222",
-        "0e9bffffff01000000000000000000000000",
-        "020000000ec1ffffff01000000",
+        "0e93ffffff01000000000000000000000000",
+        "030000000ec1ffffff01000000",
     );
 }
 
@@ -198,6 +212,8 @@ fn rust_rkyv_to_bytes_matches_fixtures() {
             verification_outboard_len: 64,
             fec_parity_offset: 64,
             fec_parity_len: 128,
+            dict_offset: 0,
+            dict_len: 0,
         }],
         ots_proof: None,
     };
@@ -211,6 +227,87 @@ fn rust_rkyv_to_bytes_matches_fixtures() {
     let b = m_cfp2.to_bytes().unwrap();
     assert_eq!(&b[0..4], b"CFP2");
     assert_eq!(b, fs::read(fixture("rkyv_cfp2_prefix.bin")).unwrap());
+
+    let path8 = FilepackManifest {
+        version: FILEPACK_MANIFEST_VERSION,
+        format_level: FILEPACK_MANIFEST_FORMAT_LEVEL_PUBLIC,
+        catalog_bao_root: [0u8; 32],
+        catalog_ots_proof: None,
+        entries: vec![FilepackEntry {
+            rel_path: "12345678".into(),
+            content_blake3: [0x22; 32],
+            segment_format: 0x0E,
+            segments: vec![seg(0x11, 100, 0, 0)],
+            ots_proof: None,
+        }],
+    };
+    assert_eq!(
+        path8.to_bytes().unwrap(),
+        fs::read(fixture("path_inline_8.bin")).unwrap()
+    );
+
+    let path9 = FilepackManifest {
+        version: FILEPACK_MANIFEST_VERSION,
+        format_level: FILEPACK_MANIFEST_FORMAT_LEVEL_PUBLIC,
+        catalog_bao_root: [0u8; 32],
+        catalog_ots_proof: None,
+        entries: vec![FilepackEntry {
+            rel_path: "123456789".into(),
+            content_blake3: [0x22; 32],
+            segment_format: 0x0E,
+            segments: vec![seg(0x11, 100, 0, 0)],
+            ots_proof: None,
+        }],
+    };
+    assert_eq!(
+        path9.to_bytes().unwrap(),
+        fs::read(fixture("path_ool_9.bin")).unwrap()
+    );
+
+    let two = FilepackManifest {
+        version: FILEPACK_MANIFEST_VERSION,
+        format_level: FILEPACK_MANIFEST_FORMAT_LEVEL_PUBLIC,
+        catalog_bao_root: [0u8; 32],
+        catalog_ots_proof: None,
+        entries: vec![FilepackEntry {
+            rel_path: "a.txt".into(),
+            content_blake3: [0x22; 32],
+            segment_format: 0x0E,
+            segments: vec![seg(0x11, 100, 0, 0), seg(0x12, 50, 1, 192)],
+            ots_proof: None,
+        }],
+    };
+    assert_eq!(
+        two.to_bytes().unwrap(),
+        fs::read(fixture("two_segments.bin")).unwrap()
+    );
+
+    let ots_first = FilepackManifest {
+        version: FILEPACK_MANIFEST_VERSION,
+        format_level: FILEPACK_MANIFEST_FORMAT_LEVEL_PUBLIC,
+        catalog_bao_root: [0u8; 32],
+        catalog_ots_proof: None,
+        entries: vec![
+            FilepackEntry {
+                rel_path: "a.txt".into(),
+                content_blake3: [0x22; 32],
+                segment_format: 0x0E,
+                segments: vec![seg(0x11, 100, 0, 0)],
+                ots_proof: Some(vec![0xDE, 0xAD]),
+            },
+            FilepackEntry {
+                rel_path: "b.txt".into(),
+                content_blake3: [0x33; 32],
+                segment_format: 0x0E,
+                segments: vec![seg(0x44, 200, 0, 0)],
+                ots_proof: None,
+            },
+        ],
+    };
+    assert_eq!(
+        ots_first.to_bytes().unwrap(),
+        fs::read(fixture("ots_first_only.bin")).unwrap()
+    );
 }
 
 #[test]

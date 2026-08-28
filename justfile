@@ -353,24 +353,12 @@ nix_retry +cmd:
       n=$((n + 1))
     done
 
-# Sequential host-Nix flake checks (fmt, clippy, nextest, then Lean proofs).
-# Does not force the remote builder; this laptop may rustc.
+# This laptop: fmt, clippy, nextest. No Nix (no store copy, no builder).
+# Lean flake checks: `just test-lean-ci` or `just check-remote`.
 check-local:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    sys="{{ system }}"
-    echo "==> just check-local: fmt"
-    nix build --impure -L --print-out-paths "path:.#checks.${sys}.fmt"
-    echo "==> just check-local: clippy (backend-rust + async,async-tokio,man-gen)"
-    nix build --impure -L --print-out-paths "path:.#checks.${sys}.clippy-rust"
-    echo "==> just check-local: nextest (backend-rust)"
-    nix build --impure -L --print-out-paths "path:.#checks.${sys}.nextest-rust"
-    echo "==> just check-local: Lean gates"
-    nix build --impure -L --print-out-paths "path:.#checks.${sys}.no-sorry"
-    nix build --impure -L --print-out-paths "path:.#checks.${sys}.tooling-purity"
-    nix build --impure -L --print-out-paths "path:.#checks.${sys}.carbonado"
-    nix build --impure -L --print-out-paths "path:.#checks.${sys}.demo"
-    nix build --impure -L --print-out-paths "path:.#checks.${sys}.rustc-1_98"
+    cargo fmt --all -- --check
+    cargo clippy --all-targets --features "async,async-tokio,man-gen" -- -D warnings
+    cargo nextest run --features async,async-tokio,man-gen
 
 # Sequential force-remote gate. rustc requires surmount-remote. Quote
 # .#attr; unquoted # is a bash comment.

@@ -9,9 +9,9 @@ use carbonado::{
     error::CarbonadoError,
     stream::{
         DEFAULT_SEGMENT_PLAINTEXT_BUDGET, ShardEncodeResult, ShardSource, decode_shards_stream,
-        encode_shard_stream,
     },
 };
+use common::encode_shard_stream;
 use rand::RngCore;
 
 use common::{

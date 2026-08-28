@@ -4,7 +4,7 @@
 //!
 //! It combines a fully symmetric, hardware-accelerated cryptographic stack
 //! (AES-256-CTR + full HMAC-SHA512 EtM) with Bao streaming verifiability,
-//! FEC (reed-solomon-erasure 4/8) forward error correction, optional Zstd (level 20) compression, and
+//! FEC (reed-solomon-erasure 4/8) forward error correction, optional Zstd compression (level is encoder input), and
 //! SLH-DSA post-quantum signatures delivered exclusively as **sidecars**.
 //!
 //! ## Security Model & Production Guidance
@@ -30,14 +30,20 @@
 //! Using the low-level API (recommended for documentation examples):
 //!
 //! ```rust
-//! use carbonado::{encode, decode};
+//! use carbonado::{decode, encode_with_zstd};
 //! use getrandom::getrandom;
 //!
 //! let mut master_key = [0u8; 32];
 //! getrandom(&mut master_key).unwrap();
 //!
 //! let data = b"important archival payload";
-//! let encoded = encode(&master_key, data, 15).unwrap();
+//! let encoded = encode_with_zstd(
+//!     &master_key,
+//!     data,
+//!     15,
+//!     None,
+//!     &carbonado::ZstdEncode::level(20),
+//! ).unwrap();
 //!
 //! let recovered = decode(
 //!     &master_key,
@@ -112,9 +118,10 @@ pub mod paths;
 pub mod stream;
 
 pub use encoding::encode;
-pub use encoding::encode_with_nonce;
-
 pub use encoding::encode_outboard;
+pub use encoding::encode_outboard_with_zstd;
+pub use encoding::encode_with_nonce;
+pub use encoding::encode_with_zstd;
 
 pub use decoding::decode;
 
@@ -135,9 +142,10 @@ pub use paths::{ArchiveLayout, detect_archive_layout};
 #[cfg(feature = "async")]
 pub use stream::stream_decode_async;
 pub use stream::{
-    DEFAULT_SEGMENT_PLAINTEXT_BUDGET, ShardEncodeResult, ShardSource, decode_shards_stream,
-    encode_shard_stream, stream_decode, stream_decode_buffer, stream_decode_outboard,
-    stream_decode_outboard_buffer, stream_encode_buffer, stream_encode_buffer_with_nonce,
+    DEFAULT_SEGMENT_PLAINTEXT_BUDGET, ShardEncodeResult, ShardSource, ZstdEncode,
+    decode_shards_stream, encode_shard_stream, encode_shard_stream_with_zstd, stream_decode,
+    stream_decode_buffer, stream_decode_outboard, stream_decode_outboard_buffer,
+    stream_decode_outboard_buffer_with_dict, stream_encode_buffer, stream_encode_buffer_with_nonce,
     stream_encode_outboard_buffer, verify_slice_inboard_seekable, verify_slice_outboard,
 };
 
@@ -157,7 +165,8 @@ pub use adamantine::{
 };
 pub use adamantine_payload::{
     MAX_ADAMANTINE_PAYLOAD_LEN, MAX_BAO_BUNDLE_LEN, build_adamantine_payload,
-    fec_slice_from_bundle, split_adamantine_payload, verification_slice_from_bundle,
+    dict_slice_from_bundle, fec_slice_from_bundle, split_adamantine_payload,
+    verification_slice_from_bundle,
 };
 pub use directory::SegmentFormatPolicy;
 

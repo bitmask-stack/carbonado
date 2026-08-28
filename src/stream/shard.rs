@@ -6,6 +6,7 @@ use crate::{
     constants::Format,
     error::CarbonadoError,
     file::{Header, decode_stream},
+    stream::ZstdEncode,
     structs::EncodeInfo,
 };
 
@@ -42,12 +43,36 @@ fn has_more_buffered_input<R: BufRead>(reader: &mut R) -> Result<bool, Carbonado
 /// so `has_more` detection can peek without losing bytes.
 pub fn encode_shard_stream<R: BufRead, W: Write>(
     master_key: &[u8],
+    input: R,
+    format: u8,
+    chunk_index: u32,
+    segment_plaintext_budget: u64,
+    metadata: Option<[u8; 8]>,
+    output: W,
+) -> Result<ShardEncodeResult, CarbonadoError> {
+    encode_shard_stream_with_zstd(
+        master_key,
+        input,
+        format,
+        chunk_index,
+        segment_plaintext_budget,
+        metadata,
+        output,
+        &ZstdEncode::default(),
+    )
+}
+
+/// Like [`encode_shard_stream`], with explicit zstd parameters (required when Compression is set).
+#[allow(clippy::too_many_arguments)]
+pub fn encode_shard_stream_with_zstd<R: BufRead, W: Write>(
+    master_key: &[u8],
     mut input: R,
     format: u8,
     chunk_index: u32,
     segment_plaintext_budget: u64,
     metadata: Option<[u8; 8]>,
     mut output: W,
+    zstd: &ZstdEncode,
 ) -> Result<ShardEncodeResult, CarbonadoError> {
     let fmt = Format::from(format);
     let mut payload_nonce = [0u8; 16];
@@ -59,6 +84,7 @@ pub fn encode_shard_stream<R: BufRead, W: Write>(
         &mut output,
         &mut payload_nonce,
         true,
+        zstd,
     )?;
 
     let has_more = if stats.input_len == segment_plaintext_budget {

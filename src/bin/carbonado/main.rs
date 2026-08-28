@@ -19,19 +19,18 @@ use carbonado::cli_app::{Cli, Commands, KeyCommands};
 use carbonado::constants::Format;
 
 use carbonado::file::{
-    DIRECTORY_ARCHIVE_FORMAT_ENCRYPTED, DirectoryEncodeOptions, decode_directory, decode_stream,
-    encode_directory_with_options, encode_stream,
+    DIRECTORY_ARCHIVE_FORMAT_ENCRYPTED, DirectoryEncodeOptions, EncodeToDirOptions,
+    decode_directory, decode_stream, encode_directory_with_options, encode_to_dir,
 };
 use carbonado::paths::{
-    ArchiveLayout, detect_archive_layout, guess_format_from_filename, parse_bao_root_from_filename,
-    sidecar_sibling_path,
+    ArchiveLayout, adamantine_sidecar_for_main, companion_main_for_adam_sidecar,
+    detect_archive_layout, guess_format_from_filename, parse_bao_root_from_filename,
 };
-use carbonado::stream::decode::stream_decode_outboard;
-use carbonado::stream::encode::stream_encode_outboard;
-use carbonado::structs::OutboardEncoded;
+use carbonado::stream::ZstdEncode;
+use carbonado::stream::decode::stream_decode_outboard_with_dict;
 use clap::Parser;
 use std::fs::{self, File};
-use std::io::{Cursor, Read, Seek, Write};
+use std::io::{Cursor, Read, Seek};
 use std::path::{Path, PathBuf};
 
 fn validate_format(format: u8) -> Result<(), Box<dyn std::error::Error>> {
@@ -70,8 +69,6 @@ fn reject_bare_outboard_flags_on_headered(
     format: &Option<u8>,
     hash: &Option<String>,
     padding: u32,
-    verification_outboard: &Option<PathBuf>,
-    fec_parity: &Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if format.is_some() {
         return Err(
@@ -85,13 +82,29 @@ fn reject_bare_outboard_flags_on_headered(
     if padding != 0 {
         return Err("--padding is for bare outboard decode only".into());
     }
-    if verification_outboard.is_some() {
-        return Err("--verification-outboard is for bare outboard decode only".into());
-    }
-    if fec_parity.is_some() {
-        return Err("--fec-parity is for bare outboard decode only".into());
-    }
     Ok(())
+}
+
+fn zstd_from_cli(
+    format: u8,
+    zstd_level: Option<i32>,
+    zstd_dict: Option<PathBuf>,
+) -> Result<ZstdEncode, Box<dyn std::error::Error>> {
+    let fmt = Format::from(format);
+    let dict = match zstd_dict {
+        Some(p) => Some(fs::read(p)?),
+        None => None,
+    };
+    if fmt.contains(Format::Compression) && zstd_level.is_none() {
+        return Err(
+            "this format uses compression; pass --zstd-level (level is encoder input, not a default)"
+                .into(),
+        );
+    }
+    Ok(ZstdEncode {
+        level: zstd_level,
+        dict,
+    })
 }
 
 fn parse_master_hex(hexs: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {
@@ -217,6 +230,8 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
             format,
             outboard,
             encrypted,
+            zstd_level,
+            zstd_dict,
             master,
             output,
         } => {
@@ -227,7 +242,19 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 let policy = master_policy_for_format(format, true);
                 let master_key = resolve_master_key(master, policy)?;
                 reject_zero_encrypted_master(format, &master_key)?;
-                do_encode_file_streaming(&input, format, outboard, &master_key, &outdir)?;
+                let plaintext = fs::read(&input)?;
+                let zstd = zstd_from_cli(format, zstd_level, zstd_dict)?;
+                let written = encode_to_dir(
+                    &master_key,
+                    &plaintext,
+                    format,
+                    &outdir,
+                    EncodeToDirOptions { outboard, zstd },
+                )?;
+                println!("encoded: {}", written.main_path.display());
+                if written.adam_path != written.main_path {
+                    println!("  + adamantine: {}", written.adam_path.display());
+                }
             } else if input.is_dir() {
                 if outboard {
                     return Err("--outboard is for single-file encode only".into());
@@ -242,8 +269,10 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 let policy = master_policy_for_format(dir_fmt, true);
                 let master_key = resolve_master_key(master, policy)?;
                 reject_zero_encrypted_master(dir_fmt, &master_key)?;
+                let zstd = zstd_from_cli(dir_fmt, zstd_level, zstd_dict)?;
                 let options = DirectoryEncodeOptions {
                     encrypted,
+                    zstd,
                     ..DirectoryEncodeOptions::default()
                 };
                 let archive = encode_directory_with_options(&master_key, &input, &outdir, options)?;
@@ -268,8 +297,6 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
             hash,
             format,
             padding,
-            verification_outboard,
-            fec_parity,
         } => {
             let layout = detect_archive_layout(&input)?;
 
@@ -287,13 +314,7 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                     println!("decoded directory to {}", out_base.display());
                 }
                 ArchiveLayout::InboardHeadered { path } => {
-                    reject_bare_outboard_flags_on_headered(
-                        &format,
-                        &hash,
-                        padding,
-                        &verification_outboard,
-                        &fec_parity,
-                    )?;
+                    reject_bare_outboard_flags_on_headered(&format, &hash, padding)?;
                     let out_base = output.unwrap_or_else(|| PathBuf::from("recovered.bin"));
                     let mut header_bytes = [0u8; carbonado::file::Header::LEN];
                     let mut input_f = File::open(&path)?;
@@ -322,8 +343,6 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                         hash,
                         format,
                         padding,
-                        verification_outboard,
-                        fec_parity,
                     )?;
                     println!("decoded to {}", out_base.display());
                 }
@@ -333,99 +352,6 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-fn do_encode_file_streaming(
-    input: &Path,
-    format: u8,
-    outboard: bool,
-    master: &[u8; 32],
-    outdir: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut in_f = File::open(input)?;
-    if outboard {
-        let oenc = stream_encode_outboard_cli(master, &mut in_f, format, outdir)?;
-        write_outboard_artifacts_from_oenc(&oenc, format, outdir)?;
-    } else {
-        let mut body_bytes = Vec::new();
-        let (header, _info) = encode_stream(master, &mut in_f, format, None, &mut body_bytes)?;
-        let mut archive = header.try_to_vec()?;
-        archive.extend_from_slice(&body_bytes);
-        let hhex = hex_encode_slice(header.hash.as_bytes());
-        let name = format!("{}.c{:02x}", hhex, format);
-        let p = outdir.join(&name);
-        File::create(&p)?.write_all(&archive)?;
-        println!("encoded: {}", p.display());
-    }
-    Ok(())
-}
-
-fn stream_encode_outboard_cli(
-    master: &[u8; 32],
-    input: &mut File,
-    format: u8,
-    _outdir: &Path,
-) -> Result<OutboardEncoded, Box<dyn std::error::Error>> {
-    let fmt = Format::from(format);
-    let mut main_buf = Cursor::new(Vec::new());
-    let mut bao_buf = Vec::new();
-    let mut par_buf = Vec::new();
-
-    let bao_out = fmt.contains(Format::Verification).then_some(&mut bao_buf);
-    let par_out = fmt.contains(Format::Fec).then_some(&mut par_buf);
-
-    let mut payload_nonce = [0u8; 16];
-    let (hash, info) = stream_encode_outboard(
-        master,
-        input,
-        format,
-        &mut main_buf,
-        bao_out,
-        par_out,
-        &mut payload_nonce,
-        false,
-    )?;
-
-    Ok(OutboardEncoded {
-        main: main_buf.into_inner(),
-        verification_outboard: if fmt.contains(Format::Verification) {
-            Some(bao_buf)
-        } else {
-            None
-        },
-        fec_parity: if fmt.contains(Format::Fec) {
-            Some(par_buf)
-        } else {
-            None
-        },
-        hash,
-        info,
-    })
-}
-
-fn write_outboard_artifacts_from_oenc(
-    res: &OutboardEncoded,
-    format: u8,
-    outdir: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let h = res.hash;
-    let hhex = hex_encode_slice(h.as_bytes());
-    let main_name = format!("{}.c{:02x}", hhex, format);
-    let main_p = outdir.join(&main_name);
-    File::create(&main_p)?.write_all(&res.main)?;
-    println!("outboard bare: {}", main_p.display());
-    if let Some(ob) = &res.verification_outboard {
-        let op = outdir.join(format!("{}.c{:02x}.out", hhex, format));
-        File::create(&op)?.write_all(ob)?;
-        println!("  + bao outboard: {}", op.display());
-    }
-    if let Some(par) = &res.fec_parity {
-        let pp = outdir.join(format!("{}.c{:02x}.par", hhex, format));
-        File::create(&pp)?.write_all(par)?;
-        println!("  + fec parity: {}", pp.display());
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
 fn do_decode_outboard_streaming(
     input: &Path,
     master: &[u8; 32],
@@ -433,22 +359,70 @@ fn do_decode_outboard_streaming(
     hash: Option<String>,
     format: Option<u8>,
     padding: u32,
-    verification_outboard: Option<PathBuf>,
-    fec_parity: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut main_f = File::open(input)?;
-    let ob_path = verification_outboard.unwrap_or_else(|| sidecar_sibling_path(input, "out"));
-    let par_path = fec_parity.unwrap_or_else(|| sidecar_sibling_path(input, "par"));
-
-    let bao_ob = if ob_path.exists() {
-        Some(fs::read(&ob_path)?)
+    let main_path = if companion_main_for_adam_sidecar(input).is_some_and(|p| p.is_file())
+        && input
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.contains(".adam."))
+    {
+        companion_main_for_adam_sidecar(input).expect("companion main")
     } else {
-        None
+        input.to_path_buf()
     };
-    let fec_p = if par_path.exists() {
-        Some(fs::read(&par_path)?)
+    let mut main_f = File::open(&main_path)?;
+    let adam_path = adamantine_sidecar_for_main(&main_path)
+        .filter(|p| p.is_file())
+        .or_else(|| {
+            if input
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.contains(".adam."))
+            {
+                Some(input.to_path_buf())
+            } else {
+                None
+            }
+        });
+
+    let (bao_ob, fec_p, dict) = if let Some(adam) = adam_path {
+        let bytes = fs::read(&adam)?;
+        let (payload, _hdr, _n) = carbonado::adamantine::decode_adamantine_prefix(&bytes)?;
+        let (rkyv, bundle) = carbonado::split_adamantine_payload(&payload)?;
+        let manifest = carbonado::FilepackManifest::from_bytes(&rkyv)?;
+        let seg = manifest
+            .entries
+            .first()
+            .and_then(|e| e.segments.first())
+            .ok_or("Adamantine sidecar has no segment")?;
+        let bao = carbonado::verification_slice_from_bundle(
+            &bundle,
+            seg.verification_outboard_offset,
+            seg.verification_outboard_len,
+        )?
+        .to_vec();
+        let fec = if seg.fec_parity_len > 0 {
+            Some(
+                carbonado::fec_slice_from_bundle(
+                    &bundle,
+                    seg.fec_parity_offset,
+                    seg.fec_parity_len,
+                )?
+                .to_vec(),
+            )
+        } else {
+            None
+        };
+        let dict = if seg.dict_len > 0 {
+            Some(
+                carbonado::dict_slice_from_bundle(&bundle, seg.dict_offset, seg.dict_len)?.to_vec(),
+            )
+        } else {
+            None
+        };
+        (Some(bao), fec, dict)
     } else {
-        None
+        (None, None, None)
     };
 
     let fmt = match format {
@@ -456,7 +430,7 @@ fn do_decode_outboard_streaming(
             validate_format(f)?;
             f
         }
-        None => guess_format_from_filename(input).ok_or(
+        None => guess_format_from_filename(&main_path).ok_or(
             "could not guess Carbonado format level from filename; provide --format (0-15)",
         )?,
     };
@@ -464,7 +438,7 @@ fn do_decode_outboard_streaming(
     let bao_hash = if let Some(hs) = &hash {
         parse_hash_hex(hs)?
     } else {
-        parse_bao_root_from_filename(input)
+        parse_bao_root_from_filename(&main_path)
             .ok_or("could not parse valid 64-hex bao root from bare filename; provide --hash")?
     };
 
@@ -478,7 +452,7 @@ fn do_decode_outboard_streaming(
     };
 
     let mut out_f = File::create(out_base)?;
-    stream_decode_outboard(
+    stream_decode_outboard_with_dict(
         master,
         &bao_hash,
         &mut main_f,
@@ -488,6 +462,7 @@ fn do_decode_outboard_streaming(
         fmt,
         None,
         &mut out_f,
+        dict.as_deref(),
     )?;
     Ok(())
 }

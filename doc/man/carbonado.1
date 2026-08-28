@@ -12,8 +12,9 @@ KEY MATERIAL:
   First encrypted encode auto\-generates a BIP39 mnemonic (24 words), saved in plaintext at the path from `carbonado key path` (override: CARBONADO_MNEMONIC_PATH). Later encode/decode reuse it unless `\-\-master` is given. Decode never auto\-generates.
 .PP
 ARTIFACTS:
-  Single\-file default: inboard headered `{hash}.c{fmt:02x}` (format 14 → `.c0e`).
-  `\-\-outboard`: bare main + optional `.out`/`.par` sidecars (single\-file only).
+  Single\-file inboard: one `{hash}.adam.c{fmt:02x}` (format 14 → `.adam.c0e`).
+  `\-\-outboard`: `{hash}.c{fmt:02x}` + `{hash}.adam.c{fmt:02x}` (ADAMANTINE10 sidecar).
+  `\-\-zstd-level` is required when Compression is set.
   Directory: inboard Adamantine 1.0 catalog `.adam.c14` (or `.adam.c15` with `\-\-encrypted`) and heterogeneous bare segment mains (c12/c14 or c13/c15). Output defaults to `{input}\-archive/`.
 .PP
 See `carbonado <command> \-\-help` for per\-command options.

@@ -372,8 +372,14 @@ mod tests {
         for &format in &[6u8, 12, 14, 15] {
             for logical_len in [0usize, 1, 4095, 4096, 65_536] {
                 let input: Vec<u8> = (0..logical_len).map(|i| (i % 251) as u8).collect();
-                let (encoded, hash, _) =
-                    stream_encode_buffer(&master, &input, format).expect("encode");
+                let (encoded, hash, _) = crate::stream::encode::stream_encode_buffer_with_zstd(
+                    &master,
+                    &input,
+                    format,
+                    None,
+                    &crate::stream::ZstdEncode::level(20),
+                )
+                .expect("encode");
                 assert_oracle_parity(&encoded, hash.as_bytes(), format);
             }
         }

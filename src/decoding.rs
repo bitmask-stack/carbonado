@@ -6,68 +6,15 @@ pub use crate::stream::compress::decompress_buffer as decompress;
 pub use crate::stream::decode::{stream_decode_buffer, stream_decode_outboard_buffer};
 
 use crate::{
-    constants::{FEC_K, FEC_M},
-    error::CarbonadoError,
-    structs::EncodeInfo,
-};
-
-use reed_solomon_erasure::ReedSolomon;
-use reed_solomon_erasure::galois_8::Field;
-
-use crate::{
-    constants::{Format, SLICE_LEN},
+    constants::{FEC_K, FEC_M, FEC_STRIPE_INBOARD_LEN, Format, SLICE_LEN},
     encoding,
-    stream::{extract_slice_inboard_for_scrub, verify_slice_inboard_seekable},
+    error::CarbonadoError,
+    stream::fec::{concat_data_leaves, encode_stripes, reconstruct_stripe},
+    stream::{classify_inboard_leaves, verify_slice_inboard_seekable, verify_slice_outboard},
+    structs::EncodeInfo,
     utils::decode_bao_hash,
 };
-use log::{debug, info, warn};
-
-fn fec_chunks(chunked_bytes: &[(usize, &[u8])], padding: u32) -> Result<Vec<u8>, CarbonadoError> {
-    let data_shards = FEC_K;
-    let parity_shards = FEC_M - FEC_K;
-    let total_shards = FEC_M;
-
-    let shard_size = if let Some((_, first)) = chunked_bytes.iter().find(|(_, c)| !c.is_empty()) {
-        first.len()
-    } else if !chunked_bytes.is_empty() {
-        chunked_bytes[0].1.len()
-    } else {
-        return Err(CarbonadoError::UnevenFecChunks);
-    };
-
-    let mut shards: Vec<Option<Vec<u8>>> = vec![None; total_shards];
-    for &(idx, data) in chunked_bytes {
-        if idx < total_shards && !data.is_empty() {
-            shards[idx] = Some(data.to_vec());
-        }
-    }
-    for d in shards.iter().flatten() {
-        if d.len() != shard_size {
-            return Err(CarbonadoError::UnevenFecChunks);
-        }
-    }
-
-    let rs = ReedSolomon::<Field>::new(data_shards, parity_shards)?;
-    rs.reconstruct(&mut shards)?;
-
-    let mut decoded = vec![];
-    for sh in shards.iter().take(data_shards) {
-        if let Some(s) = sh {
-            decoded.extend_from_slice(s);
-        } else {
-            decoded.resize(decoded.len() + shard_size, 0);
-        }
-    }
-
-    if padding as usize > decoded.len() {
-        return Err(CarbonadoError::ScrubbedLengthMismatch(
-            decoded.len(),
-            padding as usize,
-        ));
-    }
-    decoded.truncate(decoded.len() - padding as usize);
-    Ok(decoded)
-}
+use log::warn;
 
 pub fn verification_with_outboard(
     bare: &[u8],
@@ -97,64 +44,7 @@ pub fn fec_with_parity(
     padding: u32,
 ) -> Result<Vec<u8>, CarbonadoError> {
     trace!("forward error correcting from bare + parity sidecar (reed-solomon outboard)");
-    if input.is_empty() && parity.is_empty() {
-        return Ok(vec![]);
-    }
-    let parity_shards = FEC_M - FEC_K;
-    if !parity.len().is_multiple_of(parity_shards) {
-        return Err(CarbonadoError::UnevenFecChunks);
-    }
-    let shard_len = parity.len() / parity_shards;
-    let padded_total = shard_len * FEC_K;
-    let pad = padding as usize;
-    if pad > padded_total {
-        return Err(CarbonadoError::ScrubbedLengthMismatch(padded_total, pad));
-    }
-    // Logical length from parity stripe geometry + encode-time padding (not truncated main len).
-    let logical_len = padded_total - pad;
-
-    // Stripe geometry comes from the parity sidecar (encode-time chunk_len), not truncated main len.
-    let mut padded = vec![0u8; padded_total];
-    let copy = input.len().min(logical_len);
-    padded[..copy].copy_from_slice(&input[..copy]);
-
-    let mut shards: Vec<Option<Vec<u8>>> = vec![None; FEC_M];
-    for (i, sh) in shards.iter_mut().enumerate().take(FEC_K) {
-        let start = i * shard_len;
-        let end = start + shard_len;
-        if end <= copy {
-            *sh = Some(padded[start..end].to_vec());
-        } else {
-            // Truncated or missing data column — erasure; RS reconstructs from parity.
-            *sh = None;
-        }
-    }
-    for j in 0..parity_shards {
-        let start = j * shard_len;
-        let end = start + shard_len;
-        shards[FEC_K + j] = Some(parity[start..end].to_vec());
-    }
-
-    let rs = ReedSolomon::<Field>::new(FEC_K, FEC_M - FEC_K)?;
-    rs.reconstruct(&mut shards)?;
-
-    let mut decoded = vec![];
-    for sh in shards.iter().take(FEC_K) {
-        if let Some(s) = sh {
-            decoded.extend_from_slice(s);
-        } else {
-            decoded.resize(decoded.len() + shard_len, 0);
-        }
-    }
-
-    if decoded.len() < logical_len {
-        return Err(CarbonadoError::ScrubbedLengthMismatch(
-            decoded.len(),
-            logical_len,
-        ));
-    }
-    decoded.truncate(logical_len);
-    Ok(decoded)
+    crate::stream::fec::decode_outboard_stripes(input, parity, padding)
 }
 
 pub fn fec(input: &[u8], padding: u32) -> Result<Vec<u8>, CarbonadoError> {
@@ -162,14 +52,30 @@ pub fn fec(input: &[u8], padding: u32) -> Result<Vec<u8>, CarbonadoError> {
     if input.is_empty() {
         return Ok(vec![]);
     }
-    let input_len = input.len();
-    #[allow(clippy::manual_is_multiple_of)]
-    if input_len % FEC_M != 0 {
+    const STRIPE: usize = FEC_STRIPE_INBOARD_LEN as usize;
+    const LEAF: usize = SLICE_LEN as usize;
+    let (stripes, remainder) = input.as_chunks::<STRIPE>();
+    if !remainder.is_empty() {
         return Err(CarbonadoError::UnevenFecChunks);
     }
-    let chunk_len = input_len / FEC_M;
-    let chunks: Vec<(usize, &[u8])> = input.chunks_exact(chunk_len).enumerate().collect();
-    fec_chunks(&chunks, padding)
+    let mut logical = Vec::new();
+    for stripe in stripes {
+        let (leaves, leaf_rem) = stripe.as_chunks::<LEAF>();
+        debug_assert!(leaf_rem.is_empty());
+        let mut shards: Vec<Option<Vec<u8>>> = leaves.iter().map(|c| Some(c.to_vec())).collect();
+        let rebuilt = reconstruct_stripe(&mut shards)?;
+        for s in rebuilt.iter().take(FEC_K) {
+            logical.extend_from_slice(s);
+        }
+    }
+    if padding as usize > logical.len() {
+        return Err(CarbonadoError::ScrubbedLengthMismatch(
+            logical.len(),
+            padding as usize,
+        ));
+    }
+    logical.truncate(logical.len() - padding as usize);
+    Ok(logical)
 }
 
 pub fn verification(input: &[u8], hash: &[u8], format: u8) -> Result<Vec<u8>, CarbonadoError> {
@@ -227,6 +133,34 @@ pub fn decode_outboard(
     )
 }
 
+/// Outboard decode with an optional RFC 8878 dictionary from the Adamantine bundle.
+///
+/// When the compressed frame names a Dictionary_ID, `dict` must be the matching trained
+/// dictionary bytes. Missing dict is [`CarbonadoError::MissingZstdDictionary`].
+#[allow(clippy::too_many_arguments)]
+pub fn decode_outboard_with_dict(
+    master_key: &[u8],
+    hash: &[u8],
+    main: &[u8],
+    verification_outboard: Option<&[u8]>,
+    fec_parity: Option<&[u8]>,
+    padding: u32,
+    format: u8,
+    dict: Option<&[u8]>,
+) -> Result<Vec<u8>, CarbonadoError> {
+    crate::stream::decode::stream_decode_outboard_buffer_with_dict(
+        master_key,
+        hash,
+        main,
+        verification_outboard,
+        fec_parity,
+        padding,
+        format,
+        None,
+        dict,
+    )
+}
+
 pub fn extract_slice(
     encoded: &[u8],
     index: u32,
@@ -247,11 +181,13 @@ pub fn verify_slice(
     verify_slice_inboard_seekable(input, index, count, hash, format)
 }
 
-/// Recover a damaged inboard Bao+FEC archive via RS subset search and re-encode oracle.
+/// Recover a damaged inboard Bao+FEC archive per 16 KiB stripe.
 ///
-/// **Scrub entry:** all [`verify_inboard_keyed`] failures (`AuthenticationFailed`,
-/// `InvalidHeaderLength`, `BaoResponseTruncated`, `StdIoError`, etc.) route into combinatorial
-/// FEC recovery — the API does not distinguish tamper from truncation before attempting recovery.
+/// Bao-verify each 4 KiB leaf. Failed leaves are erasures in that stripe.
+/// Reconstruct when the stripe has at least 4 good leaves; five bad leaves in
+/// one stripe yields [`CarbonadoError::InvalidScrubbedHash`]. Re-Bao of the
+/// reconstructed body must match `hash`.
+///
 /// Pristine archives return [`CarbonadoError::UnnecessaryScrub`].
 pub fn scrub(
     input: &[u8],
@@ -264,64 +200,49 @@ pub fn scrub(
         return Err(CarbonadoError::ScrubRequiresVerification);
     }
     let hash = decode_bao_hash(hash)?;
-    let chunk_size = encode_info.chunk_len;
     let padding = encode_info.padding_len;
-    let slices_per_chunk = chunk_size / SLICE_LEN;
 
-    // S5: slice-bounded keyed Bao verify oracle — no O(decoded) body staging on scrub entry.
     match crate::stream::bao::verify_inboard_keyed(input, hash.as_bytes(), format) {
         Ok(()) => Err(CarbonadoError::UnnecessaryScrub),
         Err(e) => {
             warn!("Data failed to verify with error: {e}. Scrubbing...");
-            let mut chunks: Vec<(usize, Vec<u8>)> = vec![];
-
-            for i in 0..FEC_M {
-                let slice_index = (i as u32) * slices_per_chunk;
-                match extract_slice_inboard_for_scrub(input, slice_index, slices_per_chunk) {
-                    Ok(chunk) if chunk.len() == chunk_size as usize => chunks.push((i, chunk)),
-                    Ok(_) => debug!("Chunk {i} wrong length after seekable slice extract"),
-                    Err(e) => {
-                        debug!("At least one chunk was bad, at chunk index {i}. Error was: {e}.")
-                    }
+            if !fmt.contains(Format::Fec) {
+                return Err(CarbonadoError::InvalidScrubbedHash);
+            }
+            let leaves = classify_inboard_leaves(input, hash.as_bytes(), format)
+                .map_err(|_| CarbonadoError::InvalidScrubbedHash)?;
+            if leaves.is_empty() || !leaves.len().is_multiple_of(FEC_M) {
+                return Err(CarbonadoError::InvalidScrubbedHash);
+            }
+            let mut logical = Vec::new();
+            for stripe in leaves.chunks(FEC_M) {
+                let good = stripe.iter().filter(|l| l.is_some()).count();
+                if good < FEC_K {
+                    return Err(CarbonadoError::InvalidScrubbedHash);
+                }
+                let mut shards: Vec<Option<Vec<u8>>> = stripe.to_vec();
+                let rebuilt = reconstruct_stripe(&mut shards)
+                    .map_err(|_| CarbonadoError::InvalidScrubbedHash)?;
+                for s in rebuilt.iter().take(FEC_K) {
+                    logical.extend_from_slice(s);
                 }
             }
-
-            info!(
-                "{} candidate chunks extracted, of {FEC_K} needed.",
-                chunks.len()
-            );
-
-            let mut recovered: Option<Vec<u8>> = None;
-            let n = chunks.len();
-            for mask in 0..(1usize << n) {
-                if mask.count_ones() < FEC_K as u32 {
-                    continue;
-                }
-                let mut sel: Vec<(usize, &[u8])> = vec![];
-                for (j, c) in chunks.iter().enumerate().take(n) {
-                    if (mask & (1 << j)) != 0 {
-                        sel.push((c.0, &c.1));
-                    }
-                }
-                if let Ok(cand_inner) = fec_chunks(&sel, padding) {
-                    let (scrubbed, sp, _) = encoding::encode_inboard_buffer(&cand_inner)?;
-                    if sp != padding {
-                        continue;
-                    }
-                    if let Ok((verif, got_h)) =
-                        encoding::verification_inboard_buffer(&scrubbed, format)
-                        && got_h == hash
-                        && verif.len() == input.len()
-                    {
-                        recovered = Some(verif);
-                        break;
-                    }
-                }
+            if padding as usize > logical.len() {
+                return Err(CarbonadoError::ScrubbedLengthMismatch(
+                    logical.len(),
+                    padding as usize,
+                ));
             }
-
-            match recovered {
-                Some(v) => Ok(v),
-                None => Err(CarbonadoError::InvalidScrubbedHash),
+            logical.truncate(logical.len() - padding as usize);
+            let (scrubbed, sp, _) = encoding::encode_inboard_buffer(&logical)?;
+            if sp != padding {
+                return Err(CarbonadoError::ScrubbedPaddingMismatch);
+            }
+            let (verif, got_h) = encoding::verification_inboard_buffer(&scrubbed, format)?;
+            if got_h == hash && verif.len() == input.len() {
+                Ok(verif)
+            } else {
+                Err(CarbonadoError::InvalidScrubbedHash)
             }
         }
     }
@@ -340,92 +261,91 @@ pub fn scrub_outboard(
         return Err(CarbonadoError::ScrubRequiresVerification);
     }
 
-    let good = if let Some(ob) = verification_outboard {
-        crate::stream::bao::stream_verification_outboard_verify(
-            bare,
-            bare.len() as u64,
-            ob,
-            hash,
-            format,
-        )
-        .is_ok()
-    } else {
+    let Some(ob) = verification_outboard else {
         return Err(CarbonadoError::MissingVerificationOutboard);
     };
+
+    let good = crate::stream::bao::stream_verification_outboard_verify(
+        bare,
+        bare.len() as u64,
+        ob,
+        hash,
+        format,
+    )
+    .is_ok();
 
     if good {
         return Err(CarbonadoError::UnnecessaryScrub);
     }
 
-    let padding = encode_info.padding_len;
-    let recovered_bare = if fmt.contains(Format::Fec) {
-        let Some(ob) = verification_outboard else {
-            return Err(CarbonadoError::MissingVerificationOutboard);
-        };
-        let Some(par) = fec_parity else {
-            return Err(CarbonadoError::MissingFecParity);
-        };
-
-        // Encode-time geometry (parity sidecar + EncodeInfo), not calc_padding_len(bare.len()).
-        let shard_len = encode_info.chunk_len as usize;
-        if shard_len == 0 {
-            return Err(CarbonadoError::UnevenFecChunks);
-        }
-        let parity_shards = FEC_M - FEC_K;
-        if !par.len().is_multiple_of(shard_len) || par.len() / shard_len != parity_shards {
-            return Err(CarbonadoError::UnevenFecChunks);
-        }
-        let padded_total = shard_len * FEC_K;
-        let pad = padding as usize;
-        if pad > padded_total {
-            return Err(CarbonadoError::ScrubbedLengthMismatch(padded_total, pad));
-        }
-        let logical_len = padded_total - pad;
-        let copy = bare.len().min(logical_len);
-
-        let mut padded = vec![0u8; padded_total];
-        padded[..copy].copy_from_slice(&bare[..copy]);
-
-        let mut chunks: Vec<(usize, Vec<u8>)> = vec![];
-        for i in 0..FEC_K {
-            let start = i * shard_len;
-            let end = start + shard_len;
-            if end <= copy {
-                chunks.push((i, padded[start..end].to_vec()));
-            }
-        }
-        for j in 0..parity_shards {
-            let start = j * shard_len;
-            chunks.push((FEC_K + j, par[start..start + shard_len].to_vec()));
-        }
-
-        let n = chunks.len();
-        let mut recovered: Option<Vec<u8>> = None;
-        for mask in 0..(1usize << n) {
-            if mask.count_ones() < FEC_K as u32 {
-                continue;
-            }
-            let mut sel: Vec<(usize, &[u8])> = vec![];
-            for (j, c) in chunks.iter().enumerate().take(n) {
-                if (mask & (1 << j)) != 0 {
-                    sel.push((c.0, &c.1));
-                }
-            }
-            if let Ok(cand_inner) = fec_chunks(&sel, padding)
-                && verification_with_outboard(&cand_inner, ob, hash, format).is_ok()
-            {
-                recovered = Some(cand_inner);
-                break;
-            }
-        }
-
-        match recovered {
-            Some(v) => v,
-            None => return Err(CarbonadoError::InvalidScrubbedHash),
-        }
-    } else {
+    if !fmt.contains(Format::Fec) {
         return Err(CarbonadoError::InvalidScrubbedHash);
+    }
+    let Some(par) = fec_parity else {
+        return Err(CarbonadoError::MissingFecParity);
     };
 
-    Ok(recovered_bare)
+    let padding = encode_info.padding_len;
+    const LEAF: usize = SLICE_LEN as usize;
+    const PARITY_STRIPE: usize = (FEC_M - FEC_K) * LEAF;
+    let (parity_stripes, remainder) = par.as_chunks::<PARITY_STRIPE>();
+    if !remainder.is_empty() {
+        return Err(CarbonadoError::UnevenFecChunks);
+    }
+    let n_stripes = parity_stripes.len();
+    let padded_total = n_stripes * FEC_K * LEAF;
+    let pad = padding as usize;
+    if pad > padded_total {
+        return Err(CarbonadoError::ScrubbedLengthMismatch(padded_total, pad));
+    }
+    let logical_len = padded_total - pad;
+    let data_len = bare.len() as u64;
+
+    let mut logical = Vec::with_capacity(padded_total);
+    for (stripe_idx, parity_stripe) in parity_stripes.iter().enumerate() {
+        let mut shards: Vec<Option<Vec<u8>>> = vec![None; FEC_M];
+        for (symbol, shard) in shards.iter_mut().take(FEC_K).enumerate() {
+            let leaf_index = (stripe_idx * FEC_K + symbol) as u32;
+            match verify_slice_outboard(bare, ob, data_len, leaf_index, 1, hash, format) {
+                Ok(bytes) if bytes.len() == LEAF => *shard = Some(bytes),
+                _ => {}
+            }
+        }
+        let (parity_leaves, leaf_rem) = parity_stripe.as_chunks::<LEAF>();
+        debug_assert!(leaf_rem.is_empty());
+        for (shard, chunk) in shards[FEC_K..].iter_mut().zip(parity_leaves) {
+            *shard = Some(chunk.to_vec());
+        }
+        let good = shards.iter().filter(|s| s.is_some()).count();
+        if good < FEC_K {
+            return Err(CarbonadoError::InvalidScrubbedHash);
+        }
+        let rebuilt = reconstruct_stripe(&mut shards)?;
+        for s in rebuilt.iter().take(FEC_K) {
+            logical.extend_from_slice(s);
+        }
+    }
+    logical.truncate(logical_len);
+
+    if verification_with_outboard(&logical, ob, hash, format).is_ok() {
+        Ok(logical)
+    } else {
+        // Reconstruct may have included padding zeros; re-encode data leaves and
+        // compare against the Bao root of the original (unpadded) main.
+        let (stripes, sp, _) = encode_stripes(&logical)?;
+        if sp != padding {
+            return Err(CarbonadoError::InvalidScrubbedHash);
+        }
+        let data = concat_data_leaves(&stripes);
+        let recovered = if data.len() >= logical_len {
+            data[..logical_len].to_vec()
+        } else {
+            data
+        };
+        if verification_with_outboard(&recovered, ob, hash, format).is_ok() {
+            Ok(recovered)
+        } else {
+            Err(CarbonadoError::InvalidScrubbedHash)
+        }
+    }
 }

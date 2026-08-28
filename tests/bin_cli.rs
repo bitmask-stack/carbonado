@@ -53,6 +53,8 @@ fn bin_inboard_encode_decode() {
         input.to_str().unwrap(),
         "--format",
         "14",
+        "--zstd-level",
+        "20",
         "--output",
         outdir.to_str().unwrap(),
     ]);
@@ -96,6 +98,8 @@ fn bin_encrypted_encode_decode() {
         input.to_str().unwrap(),
         "--format",
         "15",
+        "--zstd-level",
+        "20",
         "--master",
         &master,
         "--output",
@@ -154,7 +158,7 @@ fn bin_encode_dir_default_output_not_dot() {
     let expected_out = samples.with_file_name("samples-archive");
     let _ = fs::remove_dir_all(&expected_out);
 
-    let out = run_carbonado(&["encode", samples.to_str().unwrap()]);
+    let out = run_carbonado(&["encode", samples.to_str().unwrap(), "--zstd-level", "20"]);
     assert!(
         out.status.success(),
         "directory encode with default -o failed: {}",
@@ -195,6 +199,8 @@ fn bin_encode_dir_rejects_outboard_flag() {
         "encode",
         samples.to_str().unwrap(),
         "--outboard",
+        "--zstd-level",
+        "20",
         "--output",
         outdir.to_str().unwrap(),
     ]);
@@ -224,6 +230,8 @@ fn bin_encode_dir_ignores_format_flag_uses_c14() {
         samples.to_str().unwrap(),
         "--format",
         "6",
+        "--zstd-level",
+        "20",
         "--output",
         outdir.to_str().unwrap(),
     ]);
@@ -270,6 +278,8 @@ fn bin_encode_dir_emits_bare_segment_mains() {
     let out = run_carbonado(&[
         "encode",
         samples.to_str().unwrap(),
+        "--zstd-level",
+        "20",
         "--output",
         outdir.to_str().unwrap(),
     ]);
@@ -319,6 +329,8 @@ fn bin_encode_dir_format_c15_encrypted_roundtrip() {
             "encode",
             samples.to_str().unwrap(),
             "--encrypted",
+            "--zstd-level",
+            "20",
             "--output",
             outdir.to_str().unwrap(),
         ],
@@ -373,6 +385,8 @@ fn bin_encode_dir_encrypted_auto_generates_mnemonic() {
             "encode",
             samples.to_str().unwrap(),
             "--encrypted",
+            "--zstd-level",
+            "20",
             "--output",
             outdir.to_str().unwrap(),
         ],
@@ -408,6 +422,8 @@ fn bin_encode_dir_encrypted_roundtrip() {
         "--encrypted",
         "--master",
         &master,
+        "--zstd-level",
+        "20",
         "--output",
         outdir.to_str().unwrap(),
     ]);
@@ -460,6 +476,8 @@ fn bin_encode_dir_smoke() {
     let enc = run_carbonado(&[
         "encode",
         samples.to_str().unwrap(),
+        "--zstd-level",
+        "20",
         "--output",
         outdir.to_str().unwrap(),
     ]);
@@ -516,6 +534,8 @@ fn bin_encode_dir_encrypted_roundtrip_cli() {
         "--encrypted",
         "--master",
         &test_master_hex(),
+        "--zstd-level",
+        "20",
         "--output",
         outdir.to_str().unwrap(),
     ]);
@@ -567,10 +587,16 @@ fn bin_decode_directory_path() {
     let enc = run_carbonado(&[
         "encode",
         src.to_str().unwrap(),
+        "--zstd-level",
+        "20",
         "--output",
         outdir.to_str().unwrap(),
     ]);
-    assert!(enc.status.success(), "encode failed: {:?}", enc.status);
+    assert!(
+        enc.status.success(),
+        "encode failed: {:?}",
+        String::from_utf8_lossy(&enc.stderr)
+    );
 
     let dec = run_carbonado(&[
         "decode",
@@ -603,6 +629,8 @@ fn bin_decode_rejects_bad_master() {
         input.to_str().unwrap(),
         "--format",
         "14",
+        "--zstd-level",
+        "20",
         "--outboard",
         "--output",
         outdir.to_str().unwrap(),
@@ -732,6 +760,8 @@ fn bin_encode_encrypted_auto_generates_mnemonic() {
             input.to_str().unwrap(),
             "--format",
             "15",
+            "--zstd-level",
+            "20",
             "--output",
             outdir.to_str().unwrap(),
         ],
@@ -799,6 +829,8 @@ fn bin_decode_rejects_format_out_of_range() {
         input.to_str().unwrap(),
         "--format",
         "14",
+        "--zstd-level",
+        "20",
         "--outboard",
         "--output",
         outdir.to_str().unwrap(),
@@ -834,6 +866,8 @@ fn bin_encode_rejects_zero_master_on_encrypted() {
         input.to_str().unwrap(),
         "--format",
         "15",
+        "--zstd-level",
+        "20",
         "--master",
         &zero_master,
     ]);
@@ -863,6 +897,8 @@ fn bin_decode_rejects_encrypted_without_master() {
         input.to_str().unwrap(),
         "--format",
         "15",
+        "--zstd-level",
+        "20",
         "--master",
         &master,
         "--output",
@@ -904,6 +940,8 @@ fn bin_decode_rejects_format_on_headered_inboard() {
         input.to_str().unwrap(),
         "--format",
         "14",
+        "--zstd-level",
+        "20",
         "--output",
         outdir.to_str().unwrap(),
     ]);
@@ -944,6 +982,8 @@ fn bin_outboard_encode_decode() {
         input.to_str().unwrap(),
         "--format",
         "14",
+        "--zstd-level",
+        "20",
         "--outboard",
         "--output",
         outdir.to_str().unwrap(),
@@ -982,6 +1022,8 @@ fn bin_orphaned_segments_missing_catalog() {
         input.to_str().unwrap(),
         "--format",
         "14",
+        "--zstd-level",
+        "20",
         "--outboard",
         "--output",
         outdir.to_str().unwrap(),
@@ -1103,6 +1145,8 @@ fn bin_key_import_and_encrypted_roundtrip_without_master_flag() {
             input.to_str().unwrap(),
             "--format",
             "15",
+            "--zstd-level",
+            "20",
             "--output",
             outdir.to_str().unwrap(),
         ],
@@ -1188,6 +1232,8 @@ fn bin_master_hex_overrides_stored_bip39_seed() {
             input.to_str().unwrap(),
             "--format",
             "15",
+            "--zstd-level",
+            "20",
             "--master",
             &other_master,
             "--output",

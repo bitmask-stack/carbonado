@@ -18,8 +18,14 @@ pub const FEC_K: usize = 4;
 /// FEC total shards (m)
 pub const FEC_M: usize = 8;
 
-/// Normative zstd compression level (AGENTS / Lean `Carbonado.Compress.zstdLevel`).
-pub const ZSTD_LEVEL: i32 = 20;
+/// Logical bytes in one RS stripe: four 4 KiB data leaves (`FEC_K * SLICE_LEN`).
+pub const FEC_STRIPE_LOGICAL_LEN: u32 = SLICE_LEN * FEC_K as u32;
+/// Inboard bytes in one RS stripe: eight 4 KiB leaves (4 data + 4 parity).
+pub const FEC_STRIPE_INBOARD_LEN: u32 = SLICE_LEN * FEC_M as u32;
+
+/// Level-20 `windowLog` reference only. Encoder level is caller input, not a silent default.
+/// Tests and the Lean AOT demo may pass `20` explicitly.
+pub const ZSTD_LEVEL20: i32 = 20;
 
 /// Zstandard frame magic, little-endian `0xFD2FB528`
 /// (Lean `zstdMagic`; `ref/zstd/doc/zstd_compression_format.md`).
@@ -28,7 +34,10 @@ pub const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
 /// Product frames do not set `Content_Checksum_flag` (Lean `zstdContentChecksum`).
 pub const ZSTD_CONTENT_CHECKSUM: bool = false;
 
-/// Product frames do not emit a dictionary ID (Lean `zstdDictionaryIdFlag`).
+/// RFC 8878 zstd dictionary magic (`MAGIC_DICTIONARY` / `0xEC30A437` little-endian).
+pub const ZSTD_DICTIONARY_MAGIC: [u8; 4] = [0x37, 0xa4, 0x30, 0xec];
+
+/// No-dictionary `Dictionary_ID_flag` (Lean `zstdDictionaryIdFlag` when no dict is supplied).
 pub const ZSTD_DICTIONARY_ID_FLAG: u8 = 0;
 
 /// Level-20 `windowLog` from `ref/zstd` `ZSTD_defaultCParameters[0][20]`
@@ -62,7 +71,7 @@ pub const ZSTD_LEVEL20_WINDOW_LOG_LARGE: u32 = 25;
 /// | Bit name in enum | Meaning when set |
 /// |-------|-------|
 /// | Encryption | Apply symmetric encryption (AES-256-CTR + HMAC-SHA512 EtM) |
-/// | Compression | Apply Zstd compression at level 20 |
+/// | Compression | Apply Zstd compression (level is encoder input) |
 /// | Verification | Add streaming verifiability (keyed Bao, 4 KiB leaves) |
 /// | Fec | Add forward error correction (reed-solomon-erasure 4/8) |
 ///

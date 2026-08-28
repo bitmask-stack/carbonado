@@ -92,7 +92,7 @@ theorem decompress_bit_clear :
      | .error _ => false) = true := by
   native_decide
 
-/-- Level constant is 20. -/
+/-- AOT demo / G9 still name level 20; it is not a silent product default. -/
 theorem level_20 : zstdLevel = 20 := zstdLevel_eq_20
 
 theorem magic_literal : zstdMagic = [0x28, 0xb5, 0x2f, 0xfd] := zstdMagic_eq_literal

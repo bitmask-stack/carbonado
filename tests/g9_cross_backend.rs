@@ -14,7 +14,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use carbonado::{
-    OutboardEncoded, constants::Format, decode, decode_outboard, encode_with_nonce, file,
+    OutboardEncoded, ZstdEncode, constants::Format, decode, decode_outboard,
+    encode_outboard_with_zstd, encode_with_nonce, encode_with_zstd, file,
     stream_encode_outboard_buffer, structs::Encoded,
 };
 use serde::{Deserialize, Serialize};
@@ -139,7 +140,7 @@ fn encode_body(format: u8) -> (Vec<u8>, [u8; 32], u32) {
         None
     };
     let carbonado::structs::Encoded(body, hash, info) =
-        encode_with_nonce(&MASTER, PLAINTEXT, format, nonce)
+        encode_with_zstd(&MASTER, PLAINTEXT, format, nonce, &ZstdEncode::level(20))
             .unwrap_or_else(|e| panic!("encode body c{format}: {e}"));
     (body, *hash.as_bytes(), info.padding_len)
 }
@@ -151,8 +152,15 @@ fn encode_headered(format: u8) -> (Vec<u8>, [u8; 32], u32, Option<[u8; 16]>) {
     } else {
         None
     };
-    let (archive, info) = file::encode_with_nonce(&MASTER, PLAINTEXT, format, None, nonce)
-        .unwrap_or_else(|e| panic!("encode headered c{format}: {e}"));
+    let (archive, info) = file::encode_with_nonce_and_zstd(
+        &MASTER,
+        PLAINTEXT,
+        format,
+        None,
+        nonce,
+        &ZstdEncode::level(20),
+    )
+    .unwrap_or_else(|e| panic!("encode headered c{format}: {e}"));
     let (hdr, _) = file::decode(&MASTER, &archive).expect("self-decode headered for hash");
     let hash = *hdr.hash.as_bytes();
     let nonce_out = if is_encrypted(format) {
@@ -168,8 +176,14 @@ fn encode_outboard_fixture(format: u8) -> (OutboardEncoded, Option<Vec<u8>>, boo
     let encrypted = is_encrypted(format);
     if encrypted {
         // Header-path: stream_encode_outboard_buffer Some(nonce) + Header for file::decode_outboard.
-        let oenc = stream_encode_outboard_buffer(&MASTER, PLAINTEXT, format, Some(NONCE))
-            .unwrap_or_else(|e| panic!("outboard header_path c{format}: {e}"));
+        let oenc = stream_encode_outboard_buffer(
+            &MASTER,
+            PLAINTEXT,
+            format,
+            Some(NONCE),
+            &carbonado::ZstdEncode::level(20),
+        )
+        .unwrap_or_else(|e| panic!("outboard header_path c{format}: {e}"));
         let hdr = file::Header::new(
             &MASTER,
             NONCE,
@@ -185,8 +199,9 @@ fn encode_outboard_fixture(format: u8) -> (OutboardEncoded, Option<Vec<u8>>, boo
         let hdr_bytes = hdr.try_to_vec().expect("hdr vec");
         (oenc, Some(hdr_bytes), true)
     } else {
-        let oenc = carbonado::encode_outboard(&MASTER, PLAINTEXT, format)
-            .unwrap_or_else(|e| panic!("outboard public c{format}: {e}"));
+        let oenc =
+            encode_outboard_with_zstd(&MASTER, PLAINTEXT, format, None, &ZstdEncode::level(20))
+                .unwrap_or_else(|e| panic!("outboard public c{format}: {e}"));
         (oenc, None, false)
     }
 }

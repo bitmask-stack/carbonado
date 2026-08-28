@@ -36,8 +36,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use carbonado::{
-    OutboardEncoded, constants::Format, decode, decode_outboard, encode_with_nonce, file,
-    stream_encode_outboard_buffer, structs::Encoded,
+    OutboardEncoded, ZstdEncode, constants::Format, decode, decode_outboard,
+    encode_outboard_with_zstd, encode_with_zstd, file, stream_encode_outboard_buffer,
+    structs::Encoded,
 };
 
 /// Same master as G9 / Phase 2.
@@ -73,7 +74,7 @@ const OUTBOARD_COMPRESS: &[u8] = &[6, 7, 14, 15];
 /// Matches [`PHASE3_SEED_DIR_CATALOG_ROOT`]: encode sorts by `rel_path` before appending
 /// verification outboard / FEC (`a.txt` then `sub/b.bin`).
 const LIVE_RUST_DIR_CATALOG_ROOT: &str =
-    "16e2369f4f4465014e5e92740e3f76403f681cd60c01f7605ee11acd5423024f";
+    "f14bfeb50f1d3072e5510d7eab42fea176868f091eec0d614a129c506125c114";
 
 /// Historical Lean AOT catalog Bao root for the same tree/options as [`LIVE_RUST_DIR_CATALOG_ROOT`].
 const LIVE_LEAN_DIR_CATALOG_ROOT: &str =
@@ -82,7 +83,7 @@ const LIVE_LEAN_DIR_CATALOG_ROOT: &str =
 /// Committed phase3 G9 directory catalog root. Live rust encode of [`dir_files`] matches this
 /// seed once the catalog bundle is appended in sorted `rel_path` order.
 const PHASE3_SEED_DIR_CATALOG_ROOT: &str =
-    "16e2369f4f4465014e5e92740e3f76403f681cd60c01f7605ee11acd5423024f";
+    "f14bfeb50f1d3072e5510d7eab42fea176868f091eec0d614a129c506125c114";
 
 fn is_encrypted(format: u8) -> bool {
     Format::from(format).contains(Format::Encryption)
@@ -105,8 +106,14 @@ fn active_engine() -> &'static str {
 // ---------------------------------------------------------------------------
 
 fn encode_body(format: u8, pt: &[u8]) -> (Vec<u8>, [u8; 32], u32) {
-    let Encoded(body, hash, info) = encode_with_nonce(&MASTER, pt, format, nonce_for(format))
-        .unwrap_or_else(|e| panic!("[{}] encode body c{format}: {e}", active_engine()));
+    let Encoded(body, hash, info) = encode_with_zstd(
+        &MASTER,
+        pt,
+        format,
+        nonce_for(format),
+        &ZstdEncode::level(20),
+    )
+    .unwrap_or_else(|e| panic!("[{}] encode body c{format}: {e}", active_engine()));
     (body, *hash.as_bytes(), info.padding_len)
 }
 
@@ -172,8 +179,15 @@ fn decodec_body(format: u8, pt: &[u8]) {
 // ---------------------------------------------------------------------------
 
 fn encode_headered(format: u8, pt: &[u8]) -> Vec<u8> {
-    let (archive, _) = file::encode_with_nonce(&MASTER, pt, format, None, nonce_for(format))
-        .unwrap_or_else(|e| panic!("[{}] encode headered c{format}: {e}", active_engine()));
+    let (archive, _) = file::encode_with_nonce_and_zstd(
+        &MASTER,
+        pt,
+        format,
+        None,
+        nonce_for(format),
+        &ZstdEncode::level(20),
+    )
+    .unwrap_or_else(|e| panic!("[{}] encode headered c{format}: {e}", active_engine()));
     archive
 }
 
@@ -227,8 +241,14 @@ struct OutboardWire {
 
 fn encode_outboard_wire(format: u8, pt: &[u8]) -> OutboardWire {
     if is_encrypted(format) {
-        let oenc = stream_encode_outboard_buffer(&MASTER, pt, format, Some(NONCE))
-            .unwrap_or_else(|e| panic!("[{}] outboard enc c{format}: {e}", active_engine()));
+        let oenc = stream_encode_outboard_buffer(
+            &MASTER,
+            pt,
+            format,
+            Some(NONCE),
+            &carbonado::ZstdEncode::level(20),
+        )
+        .unwrap_or_else(|e| panic!("[{}] outboard enc c{format}: {e}", active_engine()));
         let hdr = file::Header::new(
             &MASTER,
             NONCE,
@@ -247,7 +267,7 @@ fn encode_outboard_wire(format: u8, pt: &[u8]) -> OutboardWire {
             header: Some(hdr_bytes),
         }
     } else {
-        let oenc = carbonado::encode_outboard(&MASTER, pt, format)
+        let oenc = encode_outboard_with_zstd(&MASTER, pt, format, None, &ZstdEncode::level(20))
             .unwrap_or_else(|e| panic!("[{}] outboard pub c{format}: {e}", active_engine()));
         OutboardWire { oenc, header: None }
     }
@@ -490,7 +510,6 @@ fn compress_cross_engine_encode_not_bit_identical_documented() {
 /// bit-matches the golden wire under the same pins.
 #[test]
 fn decodec_body_from_g9_fixture_no_compress() {
-
     let engine = active_engine();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/g9")
@@ -603,13 +622,13 @@ fn dir_files() -> [(&'static str, &'static [u8]); 2] {
 
 #[test]
 fn codecode_directory_public_same_engine() {
-
     let src = tempdir("dir_src");
     write_tree(&src, &dir_files());
 
     let enc1 = tempdir("dir_enc1");
-    let arch1 = file::encode_directory(&ZERO_MASTER, &src, &enc1)
-        .unwrap_or_else(|e| panic!("[{}] dir encode1: {e}", active_engine()));
+    let arch1 =
+        file::encode_directory(&ZERO_MASTER, &src, &enc1, &carbonado::ZstdEncode::level(20))
+            .unwrap_or_else(|e| panic!("[{}] dir encode1: {e}", active_engine()));
     let artifacts1 = list_archive_artifacts(&enc1);
 
     let dec = tempdir("dir_dec");
@@ -625,8 +644,9 @@ fn codecode_directory_public_same_engine() {
 
     // codecode: re-encode from extracted tree → same roots + wire bytes
     let enc2 = tempdir("dir_enc2");
-    let arch2 = file::encode_directory(&ZERO_MASTER, &dec, &enc2)
-        .unwrap_or_else(|e| panic!("[{}] dir encode2: {e}", active_engine()));
+    let arch2 =
+        file::encode_directory(&ZERO_MASTER, &dec, &enc2, &carbonado::ZstdEncode::level(20))
+            .unwrap_or_else(|e| panic!("[{}] dir encode2: {e}", active_engine()));
     assert_eq!(
         arch2.catalog_bao_root,
         arch1.catalog_bao_root,
@@ -650,13 +670,17 @@ fn codecode_directory_public_same_engine() {
 
 #[test]
 fn decodec_directory_public_same_engine() {
-
     let src = tempdir("dir_src_ded");
     write_tree(&src, &dir_files());
 
     let enc_a = tempdir("dir_enc_a");
-    let arch_a = file::encode_directory(&ZERO_MASTER, &src, &enc_a)
-        .unwrap_or_else(|e| panic!("[{}] dir encode A: {e}", active_engine()));
+    let arch_a = file::encode_directory(
+        &ZERO_MASTER,
+        &src,
+        &enc_a,
+        &carbonado::ZstdEncode::level(20),
+    )
+    .unwrap_or_else(|e| panic!("[{}] dir encode A: {e}", active_engine()));
     let artifacts_a = list_archive_artifacts(&enc_a);
 
     let dec = tempdir("dir_dec_ded");
@@ -670,8 +694,13 @@ fn decodec_directory_public_same_engine() {
 
     // decodec: D → E → D; B == A wire
     let enc_b = tempdir("dir_enc_b");
-    let arch_b = file::encode_directory(&ZERO_MASTER, &dec, &enc_b)
-        .unwrap_or_else(|e| panic!("[{}] dir encode B: {e}", active_engine()));
+    let arch_b = file::encode_directory(
+        &ZERO_MASTER,
+        &dec,
+        &enc_b,
+        &carbonado::ZstdEncode::level(20),
+    )
+    .unwrap_or_else(|e| panic!("[{}] dir encode B: {e}", active_engine()));
     assert_eq!(arch_b.catalog_bao_root, arch_a.catalog_bao_root);
     let artifacts_b = list_archive_artifacts(&enc_b);
     assert_eq!(
@@ -713,7 +742,6 @@ fn decodec_directory_public_same_engine() {
 /// - seed catalog file still present (decode SSOT)
 #[test]
 fn directory_cross_engine_live_roots_residual() {
-
     // Pin table integrity: residual is live rust vs live lean, not readdir drift.
     assert_ne!(
         LIVE_RUST_DIR_CATALOG_ROOT, LIVE_LEAN_DIR_CATALOG_ROOT,
@@ -736,7 +764,7 @@ fn directory_cross_engine_live_roots_residual() {
     let src = tempdir("dir_xeng_src");
     write_tree(&src, &dir_files());
     let enc = tempdir("dir_xeng_enc");
-    let arch = file::encode_directory(&ZERO_MASTER, &src, &enc)
+    let arch = file::encode_directory(&ZERO_MASTER, &src, &enc, &carbonado::ZstdEncode::level(20))
         .unwrap_or_else(|e| panic!("[{}] dir encode for residual: {e}", active_engine()));
     let live = hex32(&arch.catalog_bao_root);
 

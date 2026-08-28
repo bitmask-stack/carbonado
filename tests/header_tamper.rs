@@ -4,12 +4,12 @@ mod common;
 
 use carbonado::{
     constants::Format,
-    encode,
     error::CarbonadoError,
     file::{self, Header},
     structs::Encoded,
 };
 use common::header_layout::{self, offsets};
+use common::{encode, file_encode, file_encode_outboard};
 use rand::RngCore;
 
 fn random_master() -> [u8; 32] {
@@ -21,7 +21,7 @@ fn random_master() -> [u8; 32] {
 fn valid_headered_archive(level: u8) -> ([u8; 32], Vec<u8>) {
     let key = random_master();
     let input = b"header tamper matrix payload";
-    let (encoded, _) = file::encode(&key, input, level, None).expect("encode");
+    let (encoded, _) = file_encode(&key, input, level, None).expect("encode");
     (key, encoded)
 }
 
@@ -62,7 +62,7 @@ fn test_header_tamper_matrix() {
 
     // Non-zero metadata path: tamper must still fail MAC verify.
     let (encoded_meta, _) =
-        file::encode(&key, b"metadata tamper matrix", 14, Some(*b"metameta")).unwrap();
+        file_encode(&key, b"metadata tamper matrix", 14, Some(*b"metameta")).unwrap();
     let mut meta_tampered = encoded_meta.clone();
     header_layout::flip_byte(&mut meta_tampered, offsets::METADATA);
     let err_meta = file::decode(&key, &meta_tampered).unwrap_err();
@@ -110,7 +110,7 @@ fn test_header_tamper_matrix() {
 fn test_decode_outboard_header_tamper_matrix() {
     let key = random_master();
     let input = b"decode_outboard header tamper matrix";
-    let (hdr_opt, oenc) = file::encode_outboard(&key, input, 14, Some(*b"metameta")).unwrap();
+    let (hdr_opt, oenc) = file_encode_outboard(&key, input, 14, Some(*b"metameta")).unwrap();
     let hdr = hdr_opt.unwrap();
     let hdr_bytes = hdr.try_to_vec().unwrap();
 
@@ -219,7 +219,7 @@ fn test_chunk_index_nonzero_roundtrip_and_tamper() {
 #[test]
 fn decode_outboard_short_header_returns_invalid_header_length_not_panic() {
     let key = random_master();
-    let (hdr_opt, oenc) = file::encode_outboard(&key, b"short header guard", 14, None).unwrap();
+    let (hdr_opt, oenc) = file_encode_outboard(&key, b"short header guard", 14, None).unwrap();
     let hdr = hdr_opt.unwrap();
     let short = [0u8; 10];
 
@@ -262,7 +262,7 @@ fn decode_outboard_short_header_returns_invalid_header_length_not_panic() {
 fn decode_outboard_caller_header_mismatch_after_valid_mac() {
     let key = random_master();
     let input = b"caller vs header mismatch";
-    let (hdr_opt, oenc) = file::encode_outboard(&key, input, 14, None).unwrap();
+    let (hdr_opt, oenc) = file_encode_outboard(&key, input, 14, None).unwrap();
     let hdr = hdr_opt.unwrap();
     let hbytes = hdr.try_to_vec().unwrap();
 

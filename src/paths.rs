@@ -2,7 +2,7 @@
 //!
 //! Used by the `carbonado` CLI and [`crate::file::decode_directory`]. Directory archives
 //! use inboard `.adam.c14`/`.adam.c15` catalogs and decimal segment suffixes `c12`–`c15`;
-//! single-file outboard uses hex `c{fmt:02x}` plus optional `.out`/`.par` sidecars.
+//! single-file outboard uses `{hash}.c{fmt:02x}` plus `{hash}.adam.c{fmt:02x}` (Adamantine sidecar).
 //!
 //! Decimal suffix parsing tries longest match first (`15` down to `0`) so e.g. `.c14` resolves
 //! to format 14, not format 1 via a `.c1` prefix.
@@ -11,6 +11,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use crate::adamantine::ADAMANTINE_MAGIC;
 use crate::{constants::MAGICNO, error::CarbonadoError};
 
 /// Detected on-disk archive layout.
@@ -24,22 +25,14 @@ pub enum ArchiveLayout {
     OutboardBare { main: PathBuf },
 }
 
-/// Detect archive layout per plan §2.6:
-/// 1. Outboard adam first when `.out`/`.par` siblings exist
-/// 2. Inboard fallback when input starts with `CARBONADO20\n`
-/// 3. `MissingCatalog` when segment mains/sidecars exist but `{catalog}.adam.cXX` missing
+/// Detect archive layout:
+/// 1. Same-stem `{hash}.cXX` + `{hash}.adam.cXX` (sidecar starts with `ADAMANTINE10\n`) is
+///    single-file outboard, not a directory catalog.
+/// 2. Headered `{hash}.adam.cXX` starting with `CARBONADO20\n` is inboard (directory catalog
+///    when decimal `.adam.c14`/`.adam.c15` without a same-stem bare `.cXX`).
+/// 3. `MissingCatalog` when segment mains exist but no inboard catalog.
 pub fn detect_archive_layout(input: &Path) -> Result<ArchiveLayout, CarbonadoError> {
     if input.is_file() {
-        if is_adam_catalog(input) {
-            if !starts_with_magic(input)? {
-                return Err(CarbonadoError::DirectoryLayoutMismatch(
-                    "directory catalog must be inboard headered .adam.c14 or .adam.c15".into(),
-                ));
-            }
-            return Ok(ArchiveLayout::InboardAdam {
-                catalog: input.to_path_buf(),
-            });
-        }
         return detect_single_file(input);
     }
 
@@ -54,20 +47,39 @@ pub fn detect_archive_layout(input: &Path) -> Result<ArchiveLayout, CarbonadoErr
 }
 
 fn detect_single_file(path: &Path) -> Result<ArchiveLayout, CarbonadoError> {
-    if starts_with_magic(path)? {
-        return Ok(ArchiveLayout::InboardHeadered {
-            path: path.to_path_buf(),
-        });
+    if let Some(main) = companion_main_for_adam_sidecar(path)
+        && main.is_file()
+        && starts_with_adamantine(path)?
+    {
+        return Ok(ArchiveLayout::OutboardBare { main });
     }
-    let out = sidecar_sibling_path(path, "out");
-    let par = sidecar_sibling_path(path, "par");
-    if out.exists() || par.exists() {
+
+    if let Some(adam) = adamantine_sidecar_for_main(path)
+        && adam.is_file()
+        && starts_with_adamantine(&adam)?
+    {
         return Ok(ArchiveLayout::OutboardBare {
             main: path.to_path_buf(),
         });
     }
-    // Bare main without sidecar siblings: still outboard-capable when CLI supplies
-    // explicit `--bao-outboard` / `--fec-parity` / `--hash` overrides.
+
+    if starts_with_magic(path)? {
+        if is_adam_catalog(path) {
+            if let Some(main) = companion_main_for_adam_sidecar(path)
+                && main.is_file()
+                && !starts_with_magic(&main)?
+            {
+                return Ok(ArchiveLayout::OutboardBare { main });
+            }
+            return Ok(ArchiveLayout::InboardAdam {
+                catalog: path.to_path_buf(),
+            });
+        }
+        return Ok(ArchiveLayout::InboardHeadered {
+            path: path.to_path_buf(),
+        });
+    }
+
     if guess_format_from_filename(path).is_some() {
         return Ok(ArchiveLayout::OutboardBare {
             main: path.to_path_buf(),
@@ -83,6 +95,10 @@ fn detect_directory_layout(
     dir: &Path,
     hint: Option<&Path>,
 ) -> Result<ArchiveLayout, CarbonadoError> {
+    if let Some(main) = find_single_file_outboard_pair(dir)? {
+        return Ok(ArchiveLayout::OutboardBare { main });
+    }
+
     let mut adam_catalogs: Vec<PathBuf> = Vec::new();
     let mut segment_mains: Vec<PathBuf> = Vec::new();
     let mut has_orphan_sidecars = false;
@@ -243,6 +259,94 @@ fn starts_with_magic(path: &Path) -> Result<bool, CarbonadoError> {
     Ok(n >= MAGICNO.len() && &buf[..MAGICNO.len()] == MAGICNO)
 }
 
+fn starts_with_adamantine(path: &Path) -> Result<bool, CarbonadoError> {
+    let mut f = fs::File::open(path).map_err(CarbonadoError::StdIoError)?;
+    let mut buf = [0u8; ADAMANTINE_MAGIC.len()];
+    let n = f.read(&mut buf).map_err(CarbonadoError::StdIoError)?;
+    Ok(n >= ADAMANTINE_MAGIC.len() && &buf[..ADAMANTINE_MAGIC.len()] == ADAMANTINE_MAGIC)
+}
+
+fn strip_hex_c_suffix(name: &str) -> Option<(&str, u8)> {
+    let (stem, ext) = name.rsplit_once('.')?;
+    if ext.len() == 3
+        && ext.starts_with('c')
+        && ext[1..].chars().all(|c| c.is_ascii_hexdigit())
+        && !stem.ends_with(".adam")
+    {
+        let fmt = u8::from_str_radix(&ext[1..], 16).ok()?;
+        return Some((stem, fmt));
+    }
+    None
+}
+
+fn strip_hex_adam_suffix(name: &str) -> Option<(&str, u8)> {
+    let (rest, ext) = name.rsplit_once('.')?;
+    if ext.len() == 3 && ext.starts_with('c') && ext[1..].chars().all(|c| c.is_ascii_hexdigit()) {
+        let stem = rest.strip_suffix(".adam")?;
+        let fmt = u8::from_str_radix(&ext[1..], 16).ok()?;
+        return Some((stem, fmt));
+    }
+    None
+}
+
+/// `{hash}.cXX` → `{hash}.adam.cXX` (hex `c{fmt:02x}` or decimal `c{n}`).
+pub fn adamantine_sidecar_for_main(main: &Path) -> Option<PathBuf> {
+    let name = main.file_name()?.to_str()?;
+    let parent = main.parent().unwrap_or_else(|| Path::new(""));
+    if let Some((stem, fmt)) = strip_hex_c_suffix(name) {
+        return Some(parent.join(format!("{stem}.adam.c{fmt:02x}")));
+    }
+    if let Some((stem, fmt)) = strip_decimal_suffix(name) {
+        if name.contains(".adam.") {
+            return None;
+        }
+        return Some(parent.join(format!("{stem}.adam.c{fmt}")));
+    }
+    None
+}
+
+/// `{hash}.adam.cXX` → `{hash}.cXX`.
+pub fn companion_main_for_adam_sidecar(adam: &Path) -> Option<PathBuf> {
+    let name = adam.file_name()?.to_str()?;
+    let parent = adam.parent().unwrap_or_else(|| Path::new(""));
+    if let Some((stem, fmt)) = strip_hex_adam_suffix(name) {
+        return Some(parent.join(format!("{stem}.c{fmt:02x}")));
+    }
+    if let Some((stem, fmt)) = strip_decimal_adam_suffix(name) {
+        return Some(parent.join(format!("{stem}.c{fmt}")));
+    }
+    None
+}
+
+fn find_single_file_outboard_pair(dir: &Path) -> Result<Option<PathBuf>, CarbonadoError> {
+    let mut pair: Option<PathBuf> = None;
+    for entry in fs::read_dir(dir).map_err(CarbonadoError::StdIoError)? {
+        let path = entry.map_err(CarbonadoError::StdIoError)?.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if strip_hex_c_suffix(name).is_none() && strip_decimal_suffix(name).is_none() {
+            continue;
+        }
+        if name.contains(".adam.") {
+            continue;
+        }
+        if let Some(adam) = adamantine_sidecar_for_main(&path)
+            && adam.is_file()
+            && starts_with_adamantine(&adam)?
+        {
+            if pair.is_some() {
+                return Ok(None);
+            }
+            pair = Some(path);
+        }
+    }
+    Ok(pair)
+}
+
 /// Whether `path` names an Adamantine directory catalog (`.adam.c14` or `.adam.c15`).
 pub fn is_adam_catalog(path: &Path) -> bool {
     path.file_name()
@@ -391,6 +495,22 @@ mod tests {
             layout,
             ArchiveLayout::InboardHeadered { path: path.clone() }
         );
+    }
+
+    #[test]
+    fn detect_single_file_outboard_pair_not_directory_catalog() {
+        let dir = tempdir("outboard_pair");
+        let hash = "aa".repeat(32);
+        let main = dir.join(format!("{hash}.c0e"));
+        let adam = dir.join(format!("{hash}.adam.c0e"));
+        fs::write(&main, b"bare-main").expect("main");
+        let mut sidecar = crate::adamantine::ADAMANTINE_MAGIC.to_vec();
+        sidecar.extend_from_slice(&[0u8; 16]);
+        fs::write(&adam, &sidecar).expect("adam");
+        let layout = detect_archive_layout(&main).expect("detect main");
+        assert_eq!(layout, ArchiveLayout::OutboardBare { main: main.clone() });
+        let from_dir = detect_archive_layout(&dir).expect("detect dir");
+        assert_eq!(from_dir, ArchiveLayout::OutboardBare { main });
     }
 
     #[test]

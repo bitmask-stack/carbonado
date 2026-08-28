@@ -28,7 +28,8 @@ inductive ZstdError where
   | invalidInput
   deriving DecidableEq, Repr
 
-/-- Normative compression level (AGENTS: zstd-20). -/
+/-- Encoder compression level is an input, not a hidden library default.
+    The AOT demo and G9 goldens use 20; tests may pass 20 explicitly. -/
 def zstdLevel : UInt32 := 20
 
 /-- DoS cap on decompressed output (Rust `MAX_SEGMENT_MAIN_LEN` = 256 MiB). -/
@@ -300,7 +301,7 @@ def decodeStatusPayload (raw : ByteArray) : Except ZstdError ByteArray :=
     else
       .error (ofStatus code)
 
-/-- Compress at normative level 20 (AOT: real zstd). -/
+/-- Compress at explicit level 20 (AOT demo / G9 goldens). Level is encoder input. -/
 def compressLevel20 (input : ByteArray) : Except ZstdError ByteArray :=
   decodeStatusPayload (compressRaw input zstdLevel)
 

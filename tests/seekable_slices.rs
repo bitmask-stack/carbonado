@@ -1,12 +1,15 @@
 //! Seekable 4 KiB slice verification without full-stream materialization.
 
+mod common;
+
 use std::process::id;
 
 use anyhow::Result;
 use carbonado::{
-    constants::SLICE_LEN, encode, encode_outboard, error::CarbonadoError, verify_slice,
-    verify_slice_inboard_seekable, verify_slice_outboard,
+    constants::SLICE_LEN, error::CarbonadoError, verify_slice, verify_slice_inboard_seekable,
+    verify_slice_outboard,
 };
+use common::{encode, encode_outboard};
 use rand::RngCore;
 
 const C14: u8 = 0x0E;

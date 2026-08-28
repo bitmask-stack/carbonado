@@ -94,6 +94,21 @@
     CARGO_BUILD_JOBS = "32";
     CARGO_PROFILE = "dev";
     hardeningDisable = ["all"];
+    # Host `.cargo/config.toml` points crates-io at index.crates.io so this
+    # laptop is not stuck on menhera-cooldown. Crane already vendors crates.io;
+    # that replace-with would override the vendor directory in the sandbox.
+    postPatch = ''
+      if [ -f .cargo/config.toml ]; then
+        awk '
+          /^\[source\.crates-io\]/ { skip=1; next }
+          /^\[registries\.crates-io-official\]/ { skip=1; next }
+          /^\[/ { skip=0 }
+          skip { next }
+          { print }
+        ' .cargo/config.toml > .cargo/config.toml.vendor
+        mv .cargo/config.toml.vendor .cargo/config.toml
+      fi
+    '';
     # Presence of ZSTD_SYS_USE_PKG_CONFIG (even =0) makes zstd-sys probe
     # nixpkgs libzstd. Unset on the deps layer and the test layer.
     preConfigure = ''

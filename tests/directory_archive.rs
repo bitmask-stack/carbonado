@@ -5,6 +5,7 @@ mod common;
 #[cfg(feature = "ots")]
 use carbonado::ots::{OtsPolicy, verify_stamp};
 use carbonado::{
+    ZstdEncode,
     adamantine::{
         ADAMANTINE_CARBONADO_FMT_ENCRYPTED, ADAMANTINE_CARBONADO_FMT_PUBLIC,
         ADAMANTINE_FLAG_REQUIRE_OTS, ADAMANTINE_MAGIC, decode_adamantine, encode_adamantine,
@@ -17,12 +18,11 @@ use carbonado::{
     directory::format_policy::{
         SEGMENT_FORMAT_PUBLIC_COMPRESSED, SEGMENT_FORMAT_PUBLIC_RAW, SegmentFormatPolicy,
     },
-    encode_outboard,
     error::CarbonadoError,
     file::{
         DIRECTORY_ARCHIVE_FORMAT, DIRECTORY_ARCHIVE_FORMAT_ENCRYPTED,
         DIRECTORY_TEST_SEGMENT_BUDGET, DirectoryEncodeOptions, decode, decode_directory,
-        encode_directory, encode_directory_with_options,
+        encode_directory as encode_directory_zstd, encode_directory_with_options,
     },
     filepack_manifest::{
         FILEPACK_MANIFEST_FORMAT_LEVEL_PUBLIC, FILEPACK_MANIFEST_VERSION, FilepackEntry,
@@ -30,12 +30,24 @@ use carbonado::{
     },
     scrub_outboard,
 };
-use common::assert_trees_equal;
+use common::{assert_trees_equal, file_encode};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 const ZERO_KEY: [u8; 32] = [0u8; 32];
 const TEST_MASTER: [u8; 32] = [0xAB; 32];
+
+fn zstd20() -> ZstdEncode {
+    ZstdEncode::level(20)
+}
+
+fn encode_directory(
+    master: &[u8; 32],
+    src: &Path,
+    enc: &Path,
+) -> Result<carbonado::file::DirectoryArchive, CarbonadoError> {
+    encode_directory_zstd(master, src, enc, &zstd20())
+}
 
 fn samples_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/samples")
@@ -84,7 +96,7 @@ fn write_tampered_catalog(
     let payload = build_adamantine_payload(&rkyv, &parts.bundle).expect("payload");
     let adam = encode_adamantine(&payload, ADAMANTINE_CARBONADO_FMT_PUBLIC, parts.adam_flags);
     let (encoded, _) =
-        carbonado::file::encode(&ZERO_KEY, &adam, DIRECTORY_ARCHIVE_FORMAT, None).expect("encode");
+        file_encode(&ZERO_KEY, &adam, DIRECTORY_ARCHIVE_FORMAT, None).expect("encode");
     let header =
         carbonado::file::Header::try_from(&encoded[..carbonado::file::Header::LEN]).expect("hdr");
     let root = *header.hash.as_bytes();
@@ -167,6 +179,7 @@ fn directory_encrypted_roundtrip() {
 
     let options = DirectoryEncodeOptions {
         encrypted: true,
+        zstd: zstd20(),
         ..DirectoryEncodeOptions::default()
     };
     let archive =
@@ -230,6 +243,7 @@ fn force_compressed_segment_policy() {
     let enc_dir = tempdir("force_enc");
     let options = DirectoryEncodeOptions {
         segment_format_policy: SegmentFormatPolicy::ForceCompressed,
+        zstd: zstd20(),
         ..DirectoryEncodeOptions::default()
     };
     let archive =
@@ -260,6 +274,7 @@ fn multi_segment_sharding_roundtrip() {
     let dec_dir = tempdir("shard_dec");
     let options = DirectoryEncodeOptions {
         segment_plaintext_budget: DIRECTORY_TEST_SEGMENT_BUDGET,
+        zstd: zstd20(),
         ..DirectoryEncodeOptions::default()
     };
     let archive =
@@ -496,6 +511,7 @@ fn encode_rejects_segment_main_over_max_len() {
     let enc_dir = tempdir("oversized_enc");
     let options = DirectoryEncodeOptions {
         segment_format_policy: SegmentFormatPolicy::ForceC12,
+        zstd: zstd20(),
         ..DirectoryEncodeOptions::default()
     };
     let err = encode_directory_with_options(&ZERO_KEY, &src, &enc_dir, options).unwrap_err();
@@ -599,6 +615,7 @@ fn directory_decode_rejects_bundle_range_overlap() {
     let enc_dir = tempdir("overlap_enc");
     let options = DirectoryEncodeOptions {
         segment_plaintext_budget: DIRECTORY_TEST_SEGMENT_BUDGET,
+        zstd: zstd20(),
         ..DirectoryEncodeOptions::default()
     };
     let archive =
@@ -806,6 +823,7 @@ fn encode_rejects_zero_master_on_encrypted() {
     let enc_dir = tempdir("zero_key_enc");
     let options = DirectoryEncodeOptions {
         encrypted: true,
+        zstd: zstd20(),
         ..DirectoryEncodeOptions::default()
     };
     let err = encode_directory_with_options(&ZERO_KEY, &src, &enc_dir, options).unwrap_err();
@@ -866,9 +884,8 @@ fn decode_rejects_path_traversal_writes_no_files() {
     let mal_rkyv = malicious.to_bytes().expect("malicious rkyv");
     let mal_payload = build_adamantine_payload(&mal_rkyv, &bundle).expect("build payload");
     let mal_adam = encode_adamantine(&mal_payload, ADAMANTINE_CARBONADO_FMT_PUBLIC, hdr.flags);
-    let (mal_encoded, _) =
-        carbonado::file::encode(&ZERO_KEY, &mal_adam, DIRECTORY_ARCHIVE_FORMAT, None)
-            .expect("encode malicious catalog");
+    let (mal_encoded, _) = file_encode(&ZERO_KEY, &mal_adam, DIRECTORY_ARCHIVE_FORMAT, None)
+        .expect("encode malicious catalog");
     let mal_header =
         carbonado::file::Header::try_from(&mal_encoded[..carbonado::file::Header::LEN])
             .expect("header");
@@ -966,8 +983,7 @@ fn decode_rejects_content_blake3_mismatch() {
     let bad_payload = build_adamantine_payload(&bad_rkyv, &bundle).expect("payload");
     let bad_adam = encode_adamantine(&bad_payload, ADAMANTINE_CARBONADO_FMT_PUBLIC, hdr.flags);
     let (bad_encoded, _) =
-        carbonado::file::encode(&ZERO_KEY, &bad_adam, DIRECTORY_ARCHIVE_FORMAT, None)
-            .expect("re-encode");
+        file_encode(&ZERO_KEY, &bad_adam, DIRECTORY_ARCHIVE_FORMAT, None).expect("re-encode");
     let bad_header =
         carbonado::file::Header::try_from(&bad_encoded[..carbonado::file::Header::LEN])
             .expect("header");
@@ -1005,11 +1021,11 @@ fn adamantine_rejects_dev_v2_magic() {
 #[test]
 fn adamantine_rejects_invalid_catalog_fmt() {
     let mut bytes = encode_adamantine(b"x", ADAMANTINE_CARBONADO_FMT_PUBLIC, 0);
-    bytes[13] = 6;
+    bytes[13] = 16;
     let err = decode_adamantine(&bytes).unwrap_err();
     assert!(matches!(
         err,
-        CarbonadoError::InvalidAdamantineCarbonadoFormat(6)
+        CarbonadoError::InvalidAdamantineCarbonadoFormat(16)
     ));
 }
 
@@ -1019,7 +1035,14 @@ fn single_file_encode_decode_regression() {
     let data = fs::read(&sample).expect("read sample");
     let outdir = tempdir("single");
 
-    let oenc = encode_outboard(&ZERO_KEY, &data, DIRECTORY_ARCHIVE_FORMAT).expect("encode");
+    let oenc = carbonado::encode_outboard_with_zstd(
+        &ZERO_KEY,
+        &data,
+        DIRECTORY_ARCHIVE_FORMAT,
+        None,
+        &zstd20(),
+    )
+    .expect("encode");
     let root = *oenc.hash.as_bytes();
     let hhex = hex32(&root);
     let main_path = outdir.join(format!("{}.c{:02x}", hhex, DIRECTORY_ARCHIVE_FORMAT));
@@ -1058,6 +1081,7 @@ fn ots_entry_and_catalog_wire_roundtrip() {
             stamp_entries: true,
             stamp_catalog: true,
         }),
+        zstd: zstd20(),
         ..DirectoryEncodeOptions::default()
     };
     let archive =
@@ -1113,6 +1137,7 @@ fn decode_rejects_tampered_entry_ots_proof() {
             stamp_entries: true,
             stamp_catalog: false,
         }),
+        zstd: zstd20(),
         ..DirectoryEncodeOptions::default()
     };
     let archive =
@@ -1140,8 +1165,7 @@ fn decode_rejects_tampered_entry_ots_proof() {
         hdr.flags,
     );
     let (tampered_encoded, _) =
-        carbonado::file::encode(&ZERO_KEY, &tampered_adam, DIRECTORY_ARCHIVE_FORMAT, None)
-            .expect("re-encode");
+        file_encode(&ZERO_KEY, &tampered_adam, DIRECTORY_ARCHIVE_FORMAT, None).expect("re-encode");
     let tampered_header =
         carbonado::file::Header::try_from(&tampered_encoded[..carbonado::file::Header::LEN])
             .expect("header");
@@ -1193,7 +1217,7 @@ fn decode_rejects_invalid_adamantine_flags() {
     let (payload, _) = decode_adamantine(&body).expect("adam");
     let wrapped = encode_adamantine(&payload, ADAMANTINE_CARBONADO_FMT_PUBLIC, 0x02);
     let (encoded, _) =
-        carbonado::file::encode(&ZERO_KEY, &wrapped, DIRECTORY_ARCHIVE_FORMAT, None).expect("enc");
+        file_encode(&ZERO_KEY, &wrapped, DIRECTORY_ARCHIVE_FORMAT, None).expect("enc");
     let header =
         carbonado::file::Header::try_from(&encoded[..carbonado::file::Header::LEN]).expect("hdr");
     let root = *header.hash.as_bytes();
@@ -1237,7 +1261,7 @@ fn decode_rejects_adamantine_format_filename_mismatch() {
     let (payload, _) = decode_adamantine(&body).expect("adam");
     let wrapped = encode_adamantine(&payload, ADAMANTINE_CARBONADO_FMT_ENCRYPTED, 0);
     let (encoded, _) =
-        carbonado::file::encode(&ZERO_KEY, &wrapped, DIRECTORY_ARCHIVE_FORMAT, None).expect("enc");
+        file_encode(&ZERO_KEY, &wrapped, DIRECTORY_ARCHIVE_FORMAT, None).expect("enc");
     let header =
         carbonado::file::Header::try_from(&encoded[..carbonado::file::Header::LEN]).expect("hdr");
     let root = *header.hash.as_bytes();
@@ -1357,8 +1381,7 @@ fn decode_rejects_oversized_adamantine_bundle_len() {
     evil.extend_from_slice(&((MAX_BAO_BUNDLE_LEN as u32).wrapping_add(1)).to_le_bytes());
     let evil_adam = encode_adamantine(&evil, ADAMANTINE_CARBONADO_FMT_PUBLIC, hdr.flags);
     let (encoded, _) =
-        carbonado::file::encode(&ZERO_KEY, &evil_adam, DIRECTORY_ARCHIVE_FORMAT, None)
-            .expect("enc");
+        file_encode(&ZERO_KEY, &evil_adam, DIRECTORY_ARCHIVE_FORMAT, None).expect("enc");
     let header =
         carbonado::file::Header::try_from(&encoded[..carbonado::file::Header::LEN]).expect("hdr");
     let root = *header.hash.as_bytes();
@@ -1395,8 +1418,7 @@ fn decode_rejects_missing_entry_ots_when_required() {
         ADAMANTINE_CARBONADO_FMT_PUBLIC,
         ADAMANTINE_FLAG_REQUIRE_OTS,
     );
-    let (encoded, _) =
-        carbonado::file::encode(&ZERO_KEY, &adam, DIRECTORY_ARCHIVE_FORMAT, None).expect("enc");
+    let (encoded, _) = file_encode(&ZERO_KEY, &adam, DIRECTORY_ARCHIVE_FORMAT, None).expect("enc");
     let header =
         carbonado::file::Header::try_from(&encoded[..carbonado::file::Header::LEN]).expect("hdr");
     let root = *header.hash.as_bytes();
@@ -1433,8 +1455,7 @@ fn decode_rejects_headered_segment_main_layout() {
         entry.segment_format
     ));
     let (inboard, _) =
-        carbonado::file::encode(&ZERO_KEY, b"not valid segment", entry.segment_format, None)
-            .expect("inboard");
+        file_encode(&ZERO_KEY, b"not valid segment", entry.segment_format, None).expect("inboard");
     fs::write(&seg_path, &inboard).expect("overwrite segment with headered blob");
     let err = decode_directory(&ZERO_KEY, &catalog_path, &tempdir("seg_layout_dec")).unwrap_err();
     assert!(
@@ -1511,8 +1532,14 @@ fn directory_segment_corruption_bao_bundle_extract_scrub_roundtrip() {
     );
 
     let plaintext = fs::read(src.join("content.png")).expect("read source");
-    let oenc =
-        encode_outboard(&ZERO_KEY, &plaintext, entry.segment_format).expect("encode_outboard");
+    let oenc = carbonado::encode_outboard_with_zstd(
+        &ZERO_KEY,
+        &plaintext,
+        entry.segment_format,
+        None,
+        &zstd20(),
+    )
+    .expect("encode_outboard");
     assert_eq!(
         oenc.verification_outboard.as_deref(),
         Some(bao_ob),
@@ -1635,6 +1662,7 @@ fn directory_fec_scrub_matrix_c12_c13_c14_c15() {
         let options = DirectoryEncodeOptions {
             segment_format_policy: policy,
             encrypted,
+            zstd: zstd20(),
             ..DirectoryEncodeOptions::default()
         };
         let archive = encode_directory_with_options(&key, &src, &enc_dir, options).expect("encode");
@@ -1674,7 +1702,14 @@ fn directory_fec_scrub_matrix_c12_c13_c14_c15() {
             hex32(&seg.segment_bao_root),
             entry.segment_format
         ));
-        let oenc = encode_outboard(&key, &payload, entry.segment_format).expect("encode_outboard");
+        let oenc = carbonado::encode_outboard_with_zstd(
+            &key,
+            &payload,
+            entry.segment_format,
+            None,
+            &zstd20(),
+        )
+        .expect("encode_outboard");
         let pristine = fs::read(&seg_path).expect("read segment main");
         let mut seg_main = pristine.clone();
 
@@ -1787,6 +1822,7 @@ fn directory_multi_segment_fec_bundle_indices() {
     let enc_dir = tempdir("multi_seg_enc");
     let options = DirectoryEncodeOptions {
         segment_plaintext_budget: DIRECTORY_TEST_SEGMENT_BUDGET,
+        zstd: zstd20(),
         ..DirectoryEncodeOptions::default()
     };
     let archive =
@@ -1846,8 +1882,14 @@ fn directory_multi_segment_fec_bundle_indices() {
         .expect("ver");
         let fec_slice =
             fec_slice_from_bundle(&bundle, seg.fec_parity_offset, seg.fec_parity_len).expect("fec");
-        let oenc =
-            encode_outboard(&ZERO_KEY, chunk, entry.segment_format).expect("encode_outboard");
+        let oenc = carbonado::encode_outboard_with_zstd(
+            &ZERO_KEY,
+            chunk,
+            entry.segment_format,
+            None,
+            &zstd20(),
+        )
+        .expect("encode_outboard");
         assert_eq!(oenc.verification_outboard.as_deref(), Some(ver_slice));
         if seg.main_len > 0 {
             assert_eq!(oenc.fec_parity.as_deref(), Some(fec_slice));

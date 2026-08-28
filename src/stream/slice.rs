@@ -13,7 +13,7 @@ use bao_tree::{
 };
 
 use crate::{
-    constants::{BAO_BLOCK_SIZE, SLICE_LEN},
+    constants::{BAO_BLOCK_SIZE, FEC_M, SLICE_LEN},
     crypto::carbonado_verification_key,
     error::CarbonadoError,
     utils::decode_bao_hash,
@@ -21,6 +21,20 @@ use crate::{
 
 /// Blake3 chunks (1 KiB each) covered by one 4 KiB Carbonado slice / Bao leaf.
 const CHUNKS_PER_SLICE: u64 = 1 << BAO_BLOCK_SIZE.chunk_log();
+
+/// Map a 4 KiB inboard FEC leaf index to `(stripe_index, symbol_index)`.
+///
+/// Symbols `0..4` are data leaves; `4..8` are parity leaves. Inboard body order is
+/// stripe 0's eight leaves, then stripe 1, and so on.
+pub fn leaf_index_to_stripe_symbol(leaf_index: u32) -> (u32, u8) {
+    (leaf_index / FEC_M as u32, (leaf_index % FEC_M as u32) as u8)
+}
+
+/// Inverse of [`leaf_index_to_stripe_symbol`].
+pub fn stripe_symbol_to_leaf_index(stripe_index: u32, symbol: u8) -> u32 {
+    debug_assert!((symbol as usize) < FEC_M);
+    stripe_index * FEC_M as u32 + u32::from(symbol)
+}
 
 /// Map a contiguous run of 4 KiB slice indices to keyed-bao [`ChunkRanges`].
 pub fn slice_to_chunk_ranges(index: u32, count: u32) -> ChunkRanges {
@@ -174,7 +188,8 @@ pub fn verify_slice_inboard_seekable(
     Ok(writer.buf)
 }
 
-/// Unvalidated inboard slice extraction for scrub candidate shards.
+/// Unvalidated inboard slice extraction (kept for Bao-response walks).
+#[allow(dead_code)]
 ///
 /// P1-SCRUB: pre-order walk over full inboard response layout is allowed here; must not
 /// allocate an O(N) logical buffer (only the requested shard bytes are retained).
@@ -303,11 +318,161 @@ pub fn verify_slice_outboard<D: ReadAt>(
         return Err(CarbonadoError::AuthenticationFailed);
     }
 
-    let (slice_byte_start, _slice_byte_end, actual_len) =
-        slice_byte_range(index, count, data_len)?;
+    let (slice_byte_start, _slice_byte_end, actual_len) = slice_byte_range(index, count, data_len)?;
 
     let mut out = vec![0u8; actual_len as usize];
     data.read_exact_at(slice_byte_start, &mut out)
         .map_err(map_valid_ranges_read_error)?;
     Ok(out)
+}
+
+/// Byte range of each 4 KiB Bao leaf's payload inside an inboard blob
+/// (`[u64le content_len | response]`). Parent hash pairs are not included.
+///
+/// Used by scrub tests to nick a single leaf without touching Bao parent nodes.
+pub fn inboard_leaf_data_ranges(
+    input: &[u8],
+) -> Result<Vec<std::ops::Range<usize>>, CarbonadoError> {
+    let content_len = crate::stream::bao::inboard_bao_content_len_prefix(input)?;
+    if content_len == 0 {
+        return Ok(vec![]);
+    }
+    let response = &input[8..];
+    let tree = BaoTree::new(content_len, BAO_BLOCK_SIZE);
+    let ranges = ChunkRanges::all();
+    let mut cursor = 0usize;
+    let mut out = Vec::new();
+    let mut logical_offset = 0u64;
+
+    for item in tree.ranges_pre_order_chunks_iter_ref(&ranges, 0) {
+        match item {
+            BaoChunk::Parent { .. } => {
+                cursor = cursor.saturating_add(64);
+                if cursor > response.len() {
+                    return Err(CarbonadoError::BaoResponseTruncated(
+                        "inboard leaf-range walk: parent pair past end of response".to_string(),
+                    ));
+                }
+            }
+            BaoChunk::Leaf { size, .. } => {
+                let mut sz = size as u64;
+                let remain = content_len.saturating_sub(logical_offset);
+                if sz > remain {
+                    sz = remain;
+                }
+                let start = 8 + cursor;
+                let end = start.saturating_add(sz as usize);
+                if end > input.len() {
+                    return Err(CarbonadoError::BaoResponseTruncated(format!(
+                        "inboard leaf-range walk: leaf bytes {start}..{end} past encoded len {}",
+                        input.len()
+                    )));
+                }
+                out.push(start..end);
+                cursor += sz as usize;
+                logical_offset = logical_offset.saturating_add(sz);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Bao-verify each 4 KiB leaf of an inboard blob in one pre-order walk.
+///
+/// `Some(bytes)` is a leaf that matches its expected keyed hash. `None` is an
+/// erasure (leaf hash mismatch, truncated leaf, or unauthenticated parent).
+/// Scrub treats `None` as an RS erasure in that stripe.
+pub fn classify_inboard_leaves(
+    input: &[u8],
+    hash: &[u8],
+    format: u8,
+) -> Result<Vec<Option<Vec<u8>>>, CarbonadoError> {
+    let content_len = crate::stream::bao::inboard_bao_content_len_prefix(input)?;
+    if content_len == 0 {
+        return Ok(vec![]);
+    }
+    let n_leaves = content_len.div_ceil(u64::from(SLICE_LEN)) as usize;
+    let mut leaves = vec![None; n_leaves];
+    let root = decode_bao_hash(hash)?;
+    let key = carbonado_verification_key(format);
+    let tree = BaoTree::new(content_len, BAO_BLOCK_SIZE);
+    let response = &input[8..];
+    let mut cursor = Cursor::new(response);
+    let mut stack = vec![blake3::Hash::from(*root.as_bytes())];
+    let ranges = ChunkRanges::all();
+
+    for item in tree.ranges_pre_order_chunks_iter_ref(&ranges, 0) {
+        match item {
+            BaoChunk::Parent { left, right, .. } => {
+                let mut pair = [0u8; 64];
+                if cursor.read_exact(&mut pair).is_err() {
+                    break;
+                }
+                let l_hash =
+                    blake3::Hash::from(<[u8; 32]>::try_from(&pair[..32]).map_err(|_| {
+                        CarbonadoError::BaoResponseTruncated(
+                            "inboard parent pair: left hash".to_string(),
+                        )
+                    })?);
+                let r_hash =
+                    blake3::Hash::from(<[u8; 32]>::try_from(&pair[32..]).map_err(|_| {
+                        CarbonadoError::BaoResponseTruncated(
+                            "inboard parent pair: right hash".to_string(),
+                        )
+                    })?);
+                let _expected = stack.pop();
+                // Continue with the on-disk pair so later leaves still classify.
+                if right {
+                    stack.push(r_hash);
+                }
+                if left {
+                    stack.push(l_hash);
+                }
+            }
+            BaoChunk::Leaf {
+                size,
+                is_root,
+                start_chunk,
+                ..
+            } => {
+                let mut buf = vec![0u8; size];
+                if cursor.read_exact(&mut buf).is_err() {
+                    break;
+                }
+                let remain = content_len.saturating_sub(start_chunk.to_bytes());
+                if (buf.len() as u64) > remain {
+                    buf.truncate(remain as usize);
+                }
+                let actual = bao_tree::keyed_hash_subtree(start_chunk.0, &buf, is_root, &key);
+                let expected = stack.pop();
+                let leaf_index = (start_chunk.0 / CHUNKS_PER_SLICE) as usize;
+                if leaf_index < leaves.len() && expected == Some(actual) {
+                    leaves[leaf_index] = Some(buf);
+                }
+            }
+        }
+    }
+    Ok(leaves)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::constants::FEC_M;
+
+    #[test]
+    fn leaf_index_maps_to_stripe_and_symbol() {
+        assert_eq!(leaf_index_to_stripe_symbol(0), (0, 0));
+        assert_eq!(leaf_index_to_stripe_symbol(3), (0, 3));
+        assert_eq!(leaf_index_to_stripe_symbol(4), (0, 4));
+        assert_eq!(leaf_index_to_stripe_symbol(7), (0, 7));
+        assert_eq!(leaf_index_to_stripe_symbol(8), (1, 0));
+        assert_eq!(leaf_index_to_stripe_symbol(15), (1, 7));
+        for stripe in 0u32..5 {
+            for symbol in 0u8..FEC_M as u8 {
+                let leaf = stripe_symbol_to_leaf_index(stripe, symbol);
+                assert_eq!(leaf_index_to_stripe_symbol(leaf), (stripe, symbol));
+            }
+        }
+    }
 }

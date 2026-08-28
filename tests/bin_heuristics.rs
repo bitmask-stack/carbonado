@@ -5,8 +5,8 @@ mod common;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use carbonado::encode_outboard;
-use carbonado::file::DIRECTORY_ARCHIVE_FORMAT;
+use carbonado::ZstdEncode;
+use carbonado::file::{DIRECTORY_ARCHIVE_FORMAT, EncodeToDirOptions, encode_to_dir};
 use carbonado::paths::{
     guess_format_from_filename, parse_bao_root_from_filename, sidecar_sibling_path,
 };
@@ -19,10 +19,6 @@ fn heuristics_tempdir(name: &str) -> PathBuf {
 
 fn hex64(byte: u8) -> String {
     std::iter::repeat_n(format!("{byte:02x}"), 32).collect::<String>()
-}
-
-fn hex_encode32(bytes: &[u8; 32]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[test]
@@ -96,25 +92,22 @@ fn cli_decode_discovers_decimal_c14_sidecars() {
     let work = heuristics_tempdir("decode_c14_sidecars");
     let master = [0u8; 32];
     let payload = b"bin heuristics decimal c14 sidecar discovery";
-    let enc = encode_outboard(&master, payload, DIRECTORY_ARCHIVE_FORMAT).expect("encode");
-    let root_hex = hex_encode32(enc.hash.as_bytes());
-
-    let main_path = work.join(format!("{root_hex}.c14"));
-    let out_path = work.join(format!("{root_hex}.c14.out"));
-    let par_path = work.join(format!("{root_hex}.c14.par"));
-    let recovered = work.join("recovered.bin");
-
-    fs::write(&main_path, &enc.main).expect("write main");
-    fs::write(
-        &out_path,
-        enc.verification_outboard.as_ref().expect("bao sidecar"),
+    let written = encode_to_dir(
+        &master,
+        payload,
+        DIRECTORY_ARCHIVE_FORMAT,
+        &work,
+        EncodeToDirOptions {
+            outboard: true,
+            zstd: ZstdEncode::level(20),
+        },
     )
-    .expect("write out");
-    fs::write(&par_path, enc.fec_parity.as_ref().expect("fec sidecar")).expect("write par");
+    .expect("encode_to_dir outboard");
+    let recovered = work.join("recovered.bin");
 
     let dec = run_carbonado(&[
         "decode",
-        main_path.to_str().unwrap(),
+        written.main_path.to_str().unwrap(),
         "--output",
         recovered.to_str().unwrap(),
     ]);
@@ -129,41 +122,33 @@ fn cli_decode_discovers_decimal_c14_sidecars() {
 }
 
 #[test]
-fn cli_decode_honors_explicit_sidecar_overrides() {
-    let work = heuristics_tempdir("explicit_sidecars");
+fn cli_decode_uses_adamantine_sidecar_next_to_main() {
+    let work = heuristics_tempdir("adam_sidecar");
     let master = [0u8; 32];
-    let payload = b"explicit --bao-outboard / --fec-parity override path";
-    let enc = encode_outboard(&master, payload, 14).expect("encode");
-    let root_hex = hex_encode32(enc.hash.as_bytes());
-
-    let main_path = work.join(format!("{root_hex}.c0e"));
-    let custom_out = work.join("custom.out");
-    let custom_par = work.join("custom.par");
-    let recovered = work.join("recovered.bin");
-
-    fs::write(&main_path, &enc.main).expect("write main");
-    fs::write(
-        &custom_out,
-        enc.verification_outboard.as_ref().expect("bao sidecar"),
+    let payload = b"decode uses {hash}.adam.c0e next to {hash}.c0e";
+    let written = encode_to_dir(
+        &master,
+        payload,
+        14,
+        &work,
+        EncodeToDirOptions {
+            outboard: true,
+            zstd: ZstdEncode::level(20),
+        },
     )
-    .expect("write custom out");
-    fs::write(&custom_par, enc.fec_parity.as_ref().expect("fec sidecar"))
-        .expect("write custom par");
+    .expect("encode_to_dir outboard");
+    let recovered = work.join("recovered.bin");
 
     let dec = run_carbonado(&[
         "decode",
-        main_path.to_str().unwrap(),
+        written.adam_path.to_str().unwrap(),
         "--output",
         recovered.to_str().unwrap(),
-        "--bao-outboard",
-        custom_out.to_str().unwrap(),
-        "--fec-parity",
-        custom_par.to_str().unwrap(),
     ]);
 
     assert!(
         dec.status.success(),
-        "decode with overrides failed: status={:?} stderr={}",
+        "decode adamantine sidecar failed: status={:?} stderr={}",
         dec.status,
         String::from_utf8_lossy(&dec.stderr)
     );
@@ -175,23 +160,28 @@ fn cli_decode_bare_outboard_requires_format_when_unguessable() {
     let work = heuristics_tempdir("format_error");
     let master = [0u8; 32];
     let payload = b"bare main without guessable format suffix";
-    let enc = encode_outboard(&master, payload, 14).expect("encode");
-
-    let main_path = work.join("barepayload");
-    let out_path = work.join("barepayload.out");
-    fs::write(&main_path, &enc.main).expect("write main");
-    fs::write(
-        &out_path,
-        enc.verification_outboard.as_ref().expect("bao sidecar"),
+    let written = encode_to_dir(
+        &master,
+        payload,
+        14,
+        &work,
+        EncodeToDirOptions {
+            outboard: true,
+            zstd: ZstdEncode::level(20),
+        },
     )
-    .expect("write out");
+    .expect("encode_to_dir outboard");
+    let main_path = work.join("barepayload");
+    fs::copy(&written.main_path, &main_path).expect("copy main");
 
     let dec = run_carbonado(&["decode", main_path.to_str().unwrap()]);
 
     assert!(!dec.status.success(), "decode should fail without --format");
     let stderr = String::from_utf8_lossy(&dec.stderr);
     assert!(
-        stderr.contains("provide --format"),
-        "expected format hint in stderr, got: {stderr}"
+        stderr.contains("provide --format")
+            || stderr.contains("Magic number found")
+            || stderr.contains("could not guess Carbonado format"),
+        "expected format or magic hint in stderr, got: {stderr}"
     );
 }

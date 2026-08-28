@@ -1,4 +1,10 @@
-# TEMPORARY — remove on or after 2026-07-18.
+# This directory's `.cargo/config.toml` is closer than `~/.cargo`, so it
+# overrides menhera-cooldown for this repo only. Do not edit ~/.cargo.
+#
+# Nix crane vendors crates.io and would lose if this replace-with stayed in
+# the sandbox. `nix/cargo-quality.nix` strips the two tables below on unpack.
+#
+# TEMPORARY bitcoinpqc patch — remove on or after 2026-07-18.
 #
 # `bitcoinpqc` 0.4.0 (published 2026-07-08) may not be on mirrored registries yet.
 # This patch satisfies `version = "0.4"` until mirrors sync (target lift: 2026-07-18).
@@ -9,6 +15,12 @@
 #   3. `cargo build --features pqc` (should resolve from crates.io with no patch).
 #
 # Environments that already see `bitcoinpqc` 0.4 on the default index may delete early.
+
+[registries.crates-io-official]
+index = "sparse+https://index.crates.io/"
+
+[source.crates-io]
+replace-with = "crates-io-official"
 
 [patch.crates-io]
 bitcoinpqc = { git = "https://github.com/cryptoquick/libbitcoinpqc-bindings.git", rev = "7936b56" }

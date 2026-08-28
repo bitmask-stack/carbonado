@@ -8,10 +8,11 @@ mod common;
 
 use anyhow::Result;
 use carbonado::{
-    constants::Format, decode, encode, error::CarbonadoError, extract_slice, file::Header, scrub,
+    constants::Format, decode, error::CarbonadoError, extract_slice, file::Header, scrub,
     structs::Encoded, verify_slice,
 };
 use common::corruption::{InboardShardLayout, scattered_stream_knockout};
+use common::encode;
 use log::{debug, info};
 use rand::{Rng, RngCore};
 use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
@@ -338,30 +339,16 @@ fn fec_robustness() -> Result<()> {
     );
     assert_eq!(rec_ray.len(), orig_encoded.len()); // pair len with content (hash via outer eq)
 
-    // explicit 4-of-8 shard taint (spaced full-chunk sized zeros in response)
+    // explicit 4-of-8 symbol-slot wipe (one 4 KiB leaf in each of four slots).
     let mut four_shard = orig_encoded.clone();
-    let clen = encode_info.chunk_len as usize;
-    let step = (four_shard.len().saturating_sub(resp) / 8).max(1);
-    for i in 0..4 {
-        let p = resp + i * step;
-        let z = clen.min(four_shard.len().saturating_sub(p));
-        if z > 0 {
-            four_shard[p..p + z].fill(0);
-        }
-    }
+    common::corruption::wipe_inboard_leaves(&mut four_shard, &[0, 1, 2, 3], 0x00);
     let rec4 =
         scrub(&four_shard, hash.as_bytes(), &encode_info, 12).expect("4-shard erasure recoverable");
     assert_eq!(rec4, orig_encoded);
 
     // >4 (5) should fail to find good subset
     let mut five = orig_encoded.clone();
-    for i in 0..5 {
-        let p = resp + i * step;
-        let z = clen.min(five.len().saturating_sub(p));
-        if z > 0 {
-            five[p..p + z].fill(0);
-        }
-    }
+    common::corruption::wipe_inboard_leaves(&mut five, &[0, 1, 2, 3, 4], 0x00);
     assert!(
         scrub(&five, hash.as_bytes(), &encode_info, 12).is_err(),
         "5 shards irrecoverable"

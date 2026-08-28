@@ -5,6 +5,8 @@
 
 #![cfg(feature = "pqc")]
 
+mod common;
+
 use std::fs;
 
 use carbonado::{
@@ -17,6 +19,7 @@ use carbonado::{
     error::CarbonadoError,
     file::{self, Header},
 };
+use common::file_encode_outboard;
 use getrandom::getrandom;
 use rand::RngCore;
 
@@ -43,7 +46,7 @@ fn test_slh_outboard_sidecar_binds_header_public_key() {
     let key = random_master();
     let input = b"SLH-DSA outboard E2E: sign keyed Bao root, verify via Header.slh_public_key";
 
-    let (hdr_opt, oenc) = file::encode_outboard(&key, input, 14, None).unwrap();
+    let (hdr_opt, oenc) = file_encode_outboard(&key, input, 14, None).unwrap();
     let base_hdr = hdr_opt.unwrap();
     let bao_root = base_hdr.hash.as_bytes();
 

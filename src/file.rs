@@ -9,16 +9,15 @@ use bao::Hash;
 // nom imports removed — legacy parse_bytes / old header parsing was deleted as part of the v2 replacement.
 // (secp256k1 imports removed - clean break, legacy Header parsing deleted)
 
-use crate::stream::decode::stream_decrypt_header_path;
 use crate::{
     adamantine::{
         ADAMANTINE_CARBONADO_FMT_ENCRYPTED, ADAMANTINE_CARBONADO_FMT_PUBLIC,
-        ADAMANTINE_FLAG_REQUIRE_OTS, ADAMANTINE_HEADER_LEN, AdamantineHeader, decode_adamantine,
-        encode_adamantine,
+        ADAMANTINE_FLAG_REQUIRE_OTS, ADAMANTINE_HEADER_LEN, ADAMANTINE_MAGIC, AdamantineHeader,
+        decode_adamantine, decode_adamantine_prefix, encode_adamantine,
     },
     adamantine_payload::{
         MAX_ADAMANTINE_PAYLOAD_LEN, MAX_BAO_BUNDLE_LEN, build_adamantine_payload,
-        split_adamantine_payload, verification_slice_from_bundle,
+        dict_slice_from_bundle, split_adamantine_payload, verification_slice_from_bundle,
     },
     constants::{Format, MAGICNO},
     decoding,
@@ -31,7 +30,7 @@ use crate::{
         SegmentRef,
     },
     paths::parse_bao_root_from_filename,
-    stream::{DEFAULT_SEGMENT_PLAINTEXT_BUDGET, encode::stream_encode_outboard},
+    stream::{DEFAULT_SEGMENT_PLAINTEXT_BUDGET, ZstdEncode, encode::stream_encode_outboard},
     structs::{EncodeInfo, OutboardEncoded},
     utils::{calc_padding_len, decode_bao_hash, encode_bao_hash},
 };
@@ -57,6 +56,8 @@ pub struct DirectoryEncodeOptions {
     pub segment_format_policy: SegmentFormatPolicy,
     /// Max logical plaintext bytes per segment before sharding a file.
     pub segment_plaintext_budget: u64,
+    /// Zstd parameters (level required when any segment or the catalog uses Compression).
+    pub zstd: ZstdEncode,
     /// Optional OpenTimestamps stamping policy (requires `ots` feature).
     #[cfg(feature = "ots")]
     pub ots_policy: Option<OtsPolicy>,
@@ -68,8 +69,59 @@ impl Default for DirectoryEncodeOptions {
             encrypted: false,
             segment_format_policy: SegmentFormatPolicy::default(),
             segment_plaintext_budget: DEFAULT_SEGMENT_PLAINTEXT_BUDGET,
+            zstd: ZstdEncode::default(),
             #[cfg(feature = "ots")]
             ots_policy: None,
+        }
+    }
+}
+
+/// Options for [`encode_to_dir`].
+#[derive(Clone, Debug, Default)]
+pub struct EncodeToDirOptions {
+    /// When true, write `{hash}.cXX` + `{hash}.adam.cXX`. When false, one `{hash}.adam.cXX`.
+    pub outboard: bool,
+    /// Zstd level (required when Compression is set) and optional dictionary.
+    pub zstd: ZstdEncode,
+}
+
+/// Paths written by [`encode_to_dir`].
+#[derive(Clone, Debug)]
+pub struct EncodedToDir {
+    /// Keyed Bao root used in filenames.
+    pub hash: [u8; 32],
+    /// Format level 0–15.
+    pub format: u8,
+    /// Bare main (`{hash}.cXX`) or the single inboard `{hash}.adam.cXX`.
+    pub main_path: PathBuf,
+    /// Adamantine sidecar or the same path as `main_path` for inboard.
+    pub adam_path: PathBuf,
+    dict: Vec<u8>,
+}
+
+impl EncodedToDir {
+    /// Filename of the main artifact.
+    pub fn main_name(&self) -> String {
+        self.main_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
+    /// Filename of the Adamantine sidecar (inboard: same as [`Self::main_name`]).
+    pub fn adam_name(&self) -> String {
+        self.adam_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
+    /// Dictionary bytes stored in the Adamantine bundle, if any.
+    pub fn dict_bytes(&self) -> Option<&[u8]> {
+        if self.dict.is_empty() {
+            None
+        } else {
+            Some(self.dict.as_slice())
         }
     }
 }
@@ -353,16 +405,27 @@ pub fn decode_stream<R: Read, W: Write>(
         &mut post_preprocess,
     )?;
     post_preprocess.rewind()?;
+    let mut trailer = Vec::new();
+    input
+        .read_to_end(&mut trailer)
+        .map_err(CarbonadoError::StdIoError)?;
+    let dict = dict_from_inboard_trailer(&trailer)?;
+
     let out_len = if fmt.contains(Format::Encryption) {
-        stream_decrypt_header_path(
+        crate::stream::decode::stream_decrypt_header_path_with_dict(
             master_key,
             header.payload_nonce,
             &mut post_preprocess,
             fmt.bits(),
             output,
+            dict.as_deref(),
         )?
     } else if fmt.contains(Format::Compression) {
-        crate::stream::compress::stream_decompress(post_preprocess, output)?
+        crate::stream::compress::stream_decompress_with_dict(
+            post_preprocess,
+            output,
+            dict.as_deref(),
+        )?
     } else {
         std::io::copy(&mut post_preprocess, output).map_err(CarbonadoError::StdIoError)?
     };
@@ -404,17 +467,24 @@ pub fn decode(master_key: &[u8], encoded: &[u8]) -> Result<(Header, Vec<u8>), Ca
         &mut post_preprocess,
     )?;
     post_preprocess.rewind()?;
+    let trailer = &body[body_len..];
+    let dict = dict_from_inboard_trailer(trailer)?;
     let mut decompressed = Vec::new();
     if fmt.contains(Format::Encryption) {
-        crate::stream::stream_decrypt_header_path(
+        crate::stream::decode::stream_decrypt_header_path_with_dict(
             master_key,
             header.payload_nonce,
             &mut post_preprocess,
             fmt.bits(),
             &mut decompressed,
+            dict.as_deref(),
         )?;
     } else if fmt.contains(Format::Compression) {
-        crate::stream::compress::stream_decompress(post_preprocess, &mut decompressed)?;
+        crate::stream::compress::stream_decompress_with_dict(
+            post_preprocess,
+            &mut decompressed,
+            dict.as_deref(),
+        )?;
     } else {
         std::io::copy(&mut post_preprocess, &mut decompressed)
             .map_err(CarbonadoError::StdIoError)?;
@@ -439,7 +509,18 @@ pub fn encode(
     level: u8,
     metadata: Option<[u8; 8]>,
 ) -> Result<(Vec<u8>, EncodeInfo), CarbonadoError> {
-    encode_with_nonce(master_key, input, level, metadata, None)
+    encode_with_zstd(master_key, input, level, metadata, &ZstdEncode::default())
+}
+
+/// Headered inboard encode with explicit zstd parameters (required when Compression is set).
+pub fn encode_with_zstd(
+    master_key: &[u8],
+    input: &[u8],
+    level: u8,
+    metadata: Option<[u8; 8]>,
+    zstd: &ZstdEncode,
+) -> Result<(Vec<u8>, EncodeInfo), CarbonadoError> {
+    encode_with_nonce_and_zstd(master_key, input, level, metadata, None, zstd)
 }
 
 /// Headered inboard encode with optional fixed `payload_nonce` for encrypted formats.
@@ -461,9 +542,35 @@ pub fn encode_with_nonce(
     metadata: Option<[u8; 8]>,
     explicit_nonce: Option<[u8; 16]>,
 ) -> Result<(Vec<u8>, EncodeInfo), CarbonadoError> {
+    encode_with_nonce_and_zstd(
+        master_key,
+        input,
+        level,
+        metadata,
+        explicit_nonce,
+        &ZstdEncode::default(),
+    )
+}
+
+/// Headered inboard encode with explicit zstd parameters.
+pub fn encode_with_nonce_and_zstd(
+    master_key: &[u8],
+    input: &[u8],
+    level: u8,
+    metadata: Option<[u8; 8]>,
+    explicit_nonce: Option<[u8; 16]>,
+    zstd: &ZstdEncode,
+) -> Result<(Vec<u8>, EncodeInfo), CarbonadoError> {
     let mut out = Vec::new();
-    let (header, info) =
-        encode_stream_with_nonce(master_key, input, level, metadata, &mut out, explicit_nonce)?;
+    let (header, info) = encode_stream_with_nonce_and_zstd(
+        master_key,
+        input,
+        level,
+        metadata,
+        &mut out,
+        explicit_nonce,
+        zstd,
+    )?;
     let mut body = header.try_to_vec()?;
     body.extend_from_slice(&out);
     Ok((body, info))
@@ -482,7 +589,26 @@ pub fn encode_stream<R: Read, W: Write>(
     metadata: Option<[u8; 8]>,
     output: &mut W,
 ) -> Result<(Header, EncodeInfo), CarbonadoError> {
-    encode_stream_with_nonce(master_key, input, level, metadata, output, None)
+    encode_stream_with_zstd(
+        master_key,
+        input,
+        level,
+        metadata,
+        output,
+        &ZstdEncode::default(),
+    )
+}
+
+/// Like [`encode_stream`], with explicit zstd parameters (required when Compression is set).
+pub fn encode_stream_with_zstd<R: Read, W: Write>(
+    master_key: &[u8],
+    input: R,
+    level: u8,
+    metadata: Option<[u8; 8]>,
+    output: &mut W,
+    zstd: &ZstdEncode,
+) -> Result<(Header, EncodeInfo), CarbonadoError> {
+    encode_stream_with_nonce_and_zstd(master_key, input, level, metadata, output, None, zstd)
 }
 
 /// Like [`encode_stream`], with optional fixed `payload_nonce` for encrypted formats.
@@ -491,11 +617,32 @@ pub fn encode_stream<R: Read, W: Write>(
 /// all-zero). See [`encode_with_nonce`] for safety notes (test/determinism only).
 pub fn encode_stream_with_nonce<R: Read, W: Write>(
     master_key: &[u8],
+    input: R,
+    level: u8,
+    metadata: Option<[u8; 8]>,
+    output: &mut W,
+    explicit_nonce: Option<[u8; 16]>,
+) -> Result<(Header, EncodeInfo), CarbonadoError> {
+    encode_stream_with_nonce_and_zstd(
+        master_key,
+        input,
+        level,
+        metadata,
+        output,
+        explicit_nonce,
+        &ZstdEncode::default(),
+    )
+}
+
+/// Like [`encode_stream_with_nonce`], with explicit zstd parameters.
+pub fn encode_stream_with_nonce_and_zstd<R: Read, W: Write>(
+    master_key: &[u8],
     mut input: R,
     level: u8,
     metadata: Option<[u8; 8]>,
     output: &mut W,
     explicit_nonce: Option<[u8; 16]>,
+    zstd: &ZstdEncode,
 ) -> Result<(Header, EncodeInfo), CarbonadoError> {
     let format = Format::from(level);
     let mut payload_nonce = [0u8; 16];
@@ -507,6 +654,7 @@ pub fn encode_stream_with_nonce<R: Read, W: Write>(
         &mut payload_nonce,
         true,
         explicit_nonce,
+        zstd,
     )?;
 
     let header = Header::new(
@@ -559,6 +707,17 @@ pub fn encode_outboard(
     level: u8,
     metadata: Option<[u8; 8]>,
 ) -> Result<(Option<Header>, OutboardEncoded), CarbonadoError> {
+    encode_outboard_with_zstd(master_key, input, level, metadata, &ZstdEncode::default())
+}
+
+/// High-level outboard encode with explicit zstd parameters (required when Compression is set).
+pub fn encode_outboard_with_zstd(
+    master_key: &[u8],
+    input: &[u8],
+    level: u8,
+    metadata: Option<[u8; 8]>,
+    zstd: &ZstdEncode,
+) -> Result<(Option<Header>, OutboardEncoded), CarbonadoError> {
     let format = Format::from(level);
     let mut payload_nonce = [0u8; 16];
     let explicit_nonce = if format.contains(Format::Encryption) {
@@ -572,6 +731,7 @@ pub fn encode_outboard(
         input,
         format.bits(),
         explicit_nonce,
+        zstd,
     )?;
     let hdr = Header::new(
         master_key,
@@ -610,6 +770,7 @@ pub fn encode_outboard_stream<R: Read>(
         par_ref,
         &mut payload_nonce,
         true,
+        &ZstdEncode::default(),
     )?;
 
     let main_bytes = read_file_from_start(main_out)?;
@@ -658,6 +819,177 @@ fn read_file_from_start(f: &mut File) -> Result<Vec<u8>, CarbonadoError> {
     f.read_to_end(&mut buf)
         .map_err(CarbonadoError::StdIoError)?;
     Ok(buf)
+}
+
+/// Write a single-file archive into `outdir`.
+///
+/// Inboard: one `{hash}.adam.c{fmt:02x}` (Header + body + Adamantine after `encoded_len`).
+/// Outboard: `{hash}.c{fmt:02x}` bare main + `{hash}.adam.c{fmt:02x}` sidecar starting with
+/// `ADAMANTINE10\n`. No `.par` or `.dict` siblings.
+pub fn encode_to_dir(
+    master_key: &[u8],
+    input: &[u8],
+    format: u8,
+    outdir: &Path,
+    options: EncodeToDirOptions,
+) -> Result<EncodedToDir, CarbonadoError> {
+    fs::create_dir_all(outdir).map_err(CarbonadoError::StdIoError)?;
+    let zstd = &options.zstd;
+    let content_blake3 = *blake3::hash(input).as_bytes();
+    if options.outboard {
+        encode_to_dir_outboard(master_key, input, format, outdir, zstd, content_blake3)
+    } else {
+        encode_to_dir_inboard(master_key, input, format, outdir, zstd, content_blake3)
+    }
+}
+
+fn encode_to_dir_outboard(
+    master_key: &[u8],
+    input: &[u8],
+    format: u8,
+    outdir: &Path,
+    zstd: &ZstdEncode,
+    content_blake3: [u8; 32],
+) -> Result<EncodedToDir, CarbonadoError> {
+    let oenc = encoding::encode_outboard_with_zstd(master_key, input, format, None, zstd)?;
+    let hash = *oenc.hash.as_bytes();
+    let main_name = single_file_main_name(&hash, format);
+    let adam_name = single_file_adam_name(&hash, format);
+    let main_path = outdir.join(&main_name);
+    let adam_path = outdir.join(&adam_name);
+    write_file(&main_path, &oenc.main)?;
+    let bao = oenc.verification_outboard.as_deref().unwrap_or(&[]);
+    let parity = oenc.fec_parity.as_deref().unwrap_or(&[]);
+    let dict = zstd.dict.as_deref().unwrap_or(&[]);
+    let adam = build_single_file_adamantine(
+        format,
+        hash,
+        oenc.main.len() as u64,
+        content_blake3,
+        bao,
+        parity,
+        dict,
+    )?;
+    write_file(&adam_path, &adam)?;
+    Ok(EncodedToDir {
+        hash,
+        format,
+        main_path,
+        adam_path,
+        dict: dict.to_vec(),
+    })
+}
+
+fn encode_to_dir_inboard(
+    master_key: &[u8],
+    input: &[u8],
+    format: u8,
+    outdir: &Path,
+    zstd: &ZstdEncode,
+    content_blake3: [u8; 32],
+) -> Result<EncodedToDir, CarbonadoError> {
+    let (encoded, info) = encode_with_nonce_and_zstd(master_key, input, format, None, None, zstd)?;
+    let header = Header::try_from(&encoded[..Header::LEN])?;
+    let hash = *header.hash.as_bytes();
+    let body = &encoded[Header::LEN..];
+    if body.len() < header.encoded_len as usize {
+        return Err(CarbonadoError::InvalidHeaderLength);
+    }
+    let pipeline = &body[..header.encoded_len as usize];
+    let bao = [];
+    let parity = [];
+    let dict = zstd.dict.as_deref().unwrap_or(&[]);
+    let adam = build_single_file_adamantine(
+        format,
+        hash,
+        info.bytes_verifiable as u64,
+        content_blake3,
+        &bao,
+        &parity,
+        dict,
+    )?;
+    let mut on_disk = Vec::with_capacity(Header::LEN + pipeline.len() + adam.len());
+    on_disk.extend_from_slice(&encoded[..Header::LEN]);
+    on_disk.extend_from_slice(pipeline);
+    on_disk.extend_from_slice(&adam);
+    let adam_name = single_file_adam_name(&hash, format);
+    let adam_path = outdir.join(&adam_name);
+    write_file(&adam_path, &on_disk)?;
+    Ok(EncodedToDir {
+        hash,
+        format,
+        main_path: adam_path.clone(),
+        adam_path,
+        dict: dict.to_vec(),
+    })
+}
+
+fn single_file_main_name(hash: &[u8; 32], format: u8) -> String {
+    format!("{}.c{:02x}", hex_encode(hash), format)
+}
+
+fn single_file_adam_name(hash: &[u8; 32], format: u8) -> String {
+    format!("{}.adam.c{:02x}", hex_encode(hash), format)
+}
+
+fn build_single_file_adamantine(
+    format: u8,
+    hash: [u8; 32],
+    main_len: u64,
+    content_blake3: [u8; 32],
+    bao: &[u8],
+    parity: &[u8],
+    dict: &[u8],
+) -> Result<Vec<u8>, CarbonadoError> {
+    let mut bundle = Vec::new();
+    let vo = 0u32;
+    let vl = bao.len() as u32;
+    bundle.extend_from_slice(bao);
+    let (fo, fl) = if parity.is_empty() {
+        (0u32, 0u32)
+    } else {
+        let off = bundle.len() as u32;
+        bundle.extend_from_slice(parity);
+        (off, parity.len() as u32)
+    };
+    let (d_off, d_len) = if dict.is_empty() {
+        (0u32, 0u32)
+    } else {
+        let off = bundle.len() as u32;
+        bundle.extend_from_slice(dict);
+        (off, dict.len() as u32)
+    };
+    let manifest = FilepackManifest {
+        version: FILEPACK_MANIFEST_VERSION,
+        format_level: format,
+        catalog_bao_root: hash,
+        catalog_ots_proof: None,
+        entries: vec![FilepackEntry {
+            rel_path: "file".into(),
+            content_blake3,
+            segment_format: format,
+            segments: vec![SegmentRef {
+                segment_bao_root: hash,
+                chunk_index: 0,
+                main_len,
+                verification_outboard_offset: vo,
+                verification_outboard_len: vl,
+                fec_parity_offset: fo,
+                fec_parity_len: fl,
+                dict_offset: d_off,
+                dict_len: d_len,
+            }],
+            ots_proof: None,
+        }],
+    };
+    // Inboard single-file: Bao and FEC are in the Carbonado body. The trailer may
+    // carry only a dict. Skip outboard FEC/bao geometry validation used for directory catalogs.
+    if !bao.is_empty() || !parity.is_empty() {
+        manifest.validate()?;
+    }
+    let rkyv = manifest.into_bytes()?;
+    let payload = build_adamantine_payload(&rkyv, &bundle)?;
+    Ok(encode_adamantine(&payload, format, 0))
 }
 
 /// High-level outboard decode at the `file` layer (accepts bare main + sidecars + optional out-of-band header).
@@ -778,8 +1110,17 @@ pub fn encode_directory(
     master_key: &[u8],
     dir: &Path,
     outdir: &Path,
+    zstd: &ZstdEncode,
 ) -> Result<DirectoryArchive, CarbonadoError> {
-    encode_directory_with_options(master_key, dir, outdir, DirectoryEncodeOptions::default())
+    encode_directory_with_options(
+        master_key,
+        dir,
+        outdir,
+        DirectoryEncodeOptions {
+            zstd: zstd.clone(),
+            ..DirectoryEncodeOptions::default()
+        },
+    )
 }
 
 /// Encode a directory with explicit options (encryption, sharding budget, OTS policy).
@@ -979,7 +1320,16 @@ pub fn decode_directory(
             } else {
                 0
             };
-            let part = decoding::decode_outboard(
+            let dict = if seg_ref.dict_len > 0 {
+                Some(dict_slice_from_bundle(
+                    &bao_bundle,
+                    seg_ref.dict_offset,
+                    seg_ref.dict_len,
+                )?)
+            } else {
+                None
+            };
+            let part = decoding::decode_outboard_with_dict(
                 master_key,
                 &segment_root,
                 &seg_main,
@@ -987,6 +1337,7 @@ pub fn decode_directory(
                 fec_par,
                 padding,
                 entry.segment_format,
+                dict,
             )?;
             recovered.extend_from_slice(&part);
         }
@@ -1227,6 +1578,7 @@ fn encode_file_segments(
             chunk_index,
             bao_bundle,
             written_segment_paths,
+            &options.zstd,
         )?;
         segments.push(seg_ref);
     }
@@ -1234,6 +1586,7 @@ fn encode_file_segments(
 }
 
 /// Encode one bare segment main and append its Bao outboard blob to the bundle.
+#[allow(clippy::too_many_arguments)]
 fn write_bare_segment(
     master_key: &[u8],
     data: &[u8],
@@ -1242,8 +1595,9 @@ fn write_bare_segment(
     chunk_index: usize,
     bao_bundle: &mut BaoBundleBuilder,
     written_segment_paths: &mut Vec<PathBuf>,
+    zstd: &ZstdEncode,
 ) -> Result<SegmentRef, CarbonadoError> {
-    let oenc = encoding::encode_outboard(master_key, data, segment_format)?;
+    let oenc = encoding::encode_outboard_with_zstd(master_key, data, segment_format, None, zstd)?;
     let root = *oenc.hash.as_bytes();
     let main_len = oenc.main.len() as u64;
     if main_len > MAX_SEGMENT_MAIN_LEN {
@@ -1271,6 +1625,12 @@ fn write_bare_segment(
     } else {
         (0, 0)
     };
+    let (dict_offset, dict_len) = if let Some(dict) = zstd.dict.as_deref().filter(|d| !d.is_empty())
+    {
+        bao_bundle.append(dict)?
+    } else {
+        (0, 0)
+    };
     Ok(SegmentRef {
         segment_bao_root: root,
         chunk_index: chunk_index as u32,
@@ -1279,6 +1639,8 @@ fn write_bare_segment(
         verification_outboard_len: ver_len,
         fec_parity_offset: fec_offset,
         fec_parity_len: fec_len,
+        dict_offset,
+        dict_len,
     })
 }
 
@@ -1312,8 +1674,21 @@ fn write_catalog_artifact(
     };
 
     let bundle = bao_bundle.as_slice();
-    let encoded =
-        encode_inboard_catalog_bytes(master_key, entries, catalog_format, adam_fmt, flags, bundle)?;
+    // Catalog Carbonado is inboard c14/c15. Do not bind the file-segment zstd
+    // dictionary into the catalog frame: decode_directory has no dict for it.
+    let catalog_zstd = ZstdEncode {
+        level: options.zstd.level,
+        dict: None,
+    };
+    let encoded = encode_inboard_catalog_bytes(
+        master_key,
+        entries,
+        catalog_format,
+        adam_fmt,
+        flags,
+        bundle,
+        &catalog_zstd,
+    )?;
     #[cfg(debug_assertions)]
     if directory_encode_test_hooks::take_catalog_write_failure() {
         return Err(CarbonadoError::StdIoError(std::io::Error::other(
@@ -1353,6 +1728,7 @@ fn encode_inboard_catalog_bytes(
     adam_fmt: u8,
     flags: u8,
     bao_bundle: &[u8],
+    zstd: &ZstdEncode,
 ) -> Result<Vec<u8>, CarbonadoError> {
     let index = FilepackManifest {
         version: FILEPACK_MANIFEST_VERSION,
@@ -1365,7 +1741,8 @@ fn encode_inboard_catalog_bytes(
     let rkyv = index.into_bytes()?;
     let adam_payload = build_adamantine_payload(&rkyv, bao_bundle)?;
     let adamantine = encode_adamantine(&adam_payload, adam_fmt, flags);
-    let (encoded, _info) = encode(master_key, &adamantine, catalog_format, None)?;
+    let (encoded, _info) =
+        encode_with_nonce_and_zstd(master_key, &adamantine, catalog_format, None, None, zstd)?;
     Ok(encoded)
 }
 
@@ -1544,6 +1921,25 @@ fn validate_filepack_manifest_format_level(
 
 fn is_inboard_wire(bytes: &[u8]) -> bool {
     bytes.len() > Header::LEN && &bytes[0..12] == MAGICNO
+}
+
+fn dict_from_inboard_trailer(trailer: &[u8]) -> Result<Option<Vec<u8>>, CarbonadoError> {
+    if trailer.len() < ADAMANTINE_MAGIC.len()
+        || &trailer[..ADAMANTINE_MAGIC.len()] != ADAMANTINE_MAGIC
+    {
+        return Ok(None);
+    }
+    let (payload, _hdr, _consumed) = decode_adamantine_prefix(trailer)?;
+    let (rkyv, bundle) = split_adamantine_payload(&payload)?;
+    let manifest = FilepackManifest::from_bytes_unvalidated(&rkyv, [0u8; 32])?;
+    let Some(seg) = manifest.entries.first().and_then(|e| e.segments.first()) else {
+        return Ok(None);
+    };
+    if seg.dict_len == 0 {
+        return Ok(None);
+    }
+    let dict = dict_slice_from_bundle(&bundle, seg.dict_offset, seg.dict_len)?;
+    Ok(Some(dict.to_vec()))
 }
 
 fn hash_to_root(hash_bytes: &[u8]) -> [u8; 32] {
@@ -1863,11 +2259,12 @@ mod directory_decode_path_tests {
             ADAMANTINE_CARBONADO_FMT_PUBLIC,
             ADAMANTINE_FLAG_REQUIRE_OTS,
         );
-        let (encoded, _) = encode(
+        let (encoded, _) = encode_with_nonce_and_zstd(
             &[0u8; 32],
             &adam,
             FILEPACK_MANIFEST_FORMAT_LEVEL_PUBLIC,
             None,
+            &ZstdEncode::level(20),
         )
         .unwrap();
         let header = Header::try_from(&encoded[..Header::LEN]).unwrap();

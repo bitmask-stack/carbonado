@@ -17,7 +17,6 @@ fn contract() -> Result<()> {
     Ok(())
 }
 
-#[ignore]
 #[test]
 fn content() -> Result<()> {
     let _ = pretty_env_logger::try_init();
@@ -27,7 +26,6 @@ fn content() -> Result<()> {
     Ok(())
 }
 
-#[ignore]
 #[test]
 fn code() -> Result<()> {
     let _ = pretty_env_logger::try_init();

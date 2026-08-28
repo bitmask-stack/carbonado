@@ -12,7 +12,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use carbonado::constants::{
-    ZSTD_CONTENT_CHECKSUM, ZSTD_DICTIONARY_ID_FLAG, ZSTD_LEVEL, ZSTD_LEVEL20_WINDOW_LOG_LARGE,
+    ZSTD_CONTENT_CHECKSUM, ZSTD_DICTIONARY_ID_FLAG, ZSTD_LEVEL20, ZSTD_LEVEL20_WINDOW_LOG_LARGE,
     ZSTD_MAGIC,
 };
 use carbonado::stream::compress::compress_buffer;
@@ -60,7 +60,7 @@ fn assert_product_shared_flags(h: &ParsedZstdFrameHeader) {
 #[test]
 fn rust_constants_match_lean_spec() {
     const {
-        assert!(ZSTD_LEVEL == 20);
+        assert!(ZSTD_LEVEL20 == 20);
         assert!(matches!(ZSTD_MAGIC, [0x28, 0xb5, 0x2f, 0xfd]));
         assert!(!ZSTD_CONTENT_CHECKSUM);
         assert!(ZSTD_DICTIONARY_ID_FLAG == 0);
@@ -90,7 +90,7 @@ fn parse_rejects_truncated_bad_magic_reserved() {
 
 #[test]
 fn bulk_level20_hello_matches_lean_aot_golden() {
-    let frame = zstd::bulk::Compressor::new(ZSTD_LEVEL)
+    let frame = zstd::bulk::Compressor::new(ZSTD_LEVEL20)
         .expect("compressor")
         .compress(b"hello")
         .expect("compress hello");
@@ -111,7 +111,7 @@ fn bulk_level20_hello_matches_lean_aot_golden() {
 
 #[test]
 fn bulk_level20_empty_matches_lean_aot_golden() {
-    let frame = zstd::bulk::Compressor::new(ZSTD_LEVEL)
+    let frame = zstd::bulk::Compressor::new(ZSTD_LEVEL20)
         .expect("compressor")
         .compress(b"")
         .expect("compress empty");
@@ -129,7 +129,7 @@ fn bulk_level20_empty_matches_lean_aot_golden() {
 
 #[test]
 fn product_compress_buffer_frame_params() {
-    let frame = compress_buffer(b"hello").expect("compress_buffer hello");
+    let frame = compress_buffer(b"hello", ZSTD_LEVEL20).expect("compress_buffer hello");
     assert_eq!(&frame[..4], &ZSTD_MAGIC);
     let h = parse_zstd_frame_header(&frame).expect("parse product hello");
     assert_product_shared_flags(&h);
@@ -195,7 +195,7 @@ fn g9_outboard_c14_fixtures_match_lean_named_params() {
 #[test]
 fn stream_copy_encode_unknown_size_window_log_25() {
     let mut frame = Vec::new();
-    zstd::stream::copy_encode(b"hello" as &[u8], &mut frame, ZSTD_LEVEL).expect("copy_encode");
+    zstd::stream::copy_encode(b"hello" as &[u8], &mut frame, ZSTD_LEVEL20).expect("copy_encode");
     let h = parse_zstd_frame_header(&frame).expect("parse copy_encode");
     assert_eq!(&frame[..4], &ZSTD_MAGIC);
     assert_product_shared_flags(&h);

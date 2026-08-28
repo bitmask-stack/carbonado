@@ -27,8 +27,9 @@ fn pre_parity_shards(logical_len: usize) -> (ReedSolomon, Vec<Vec<u8>>, usize) {
     let rs = ReedSolomon::new(4, 4).expect("rs");
     let mut enc = FecInboardEncoder::new(logical_len).expect("new");
     let input = patterned(logical_len);
-    enc.feed(Cursor::new(&input)).expect("feed");
-    let stripe = enc.finish().expect("finish").expect("stripe");
+    let mut stripes = enc.feed(Cursor::new(&input)).expect("feed");
+    stripes.extend(enc.finish().expect("finish"));
+    let stripe = stripes.into_iter().next().expect("stripe");
     let chunk_len = stripe.chunk_len as usize;
     let mut shards = stripe.shards;
     for s in shards.iter_mut().skip(4) {

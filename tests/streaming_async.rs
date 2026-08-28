@@ -13,7 +13,7 @@ use std::io::{Cursor, ErrorKind};
 use carbonado::constants::FEC_M;
 use carbonado::error::CarbonadoError;
 use carbonado::stream::{stream_decode, stream_decode_async, stream_decode_buffer};
-use carbonado::stream_encode_buffer;
+use common::stream_encode_buffer;
 use futures_lite::io::Cursor as AsyncCursor;
 use rand::RngCore;
 

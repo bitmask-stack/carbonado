@@ -35,8 +35,8 @@ use crate::error::CarbonadoError;
 use crate::filepack::{self, FilepackCborEntry, Packed};
 use crate::utils::calc_padding_len;
 
-/// FilepackManifest wire schema version (v2).
-pub const FILEPACK_MANIFEST_VERSION: u32 = 2;
+/// FilepackManifest wire schema version (v3: bao + parity + dict offsets in one bundle blob).
+pub const FILEPACK_MANIFEST_VERSION: u32 = 3;
 
 /// Public directory archive format level (c14 = 0x0E).
 pub const FILEPACK_MANIFEST_FORMAT_LEVEL_PUBLIC: u8 = 0x0E;
@@ -86,6 +86,10 @@ pub struct SegmentRef {
     pub fec_parity_offset: u32,
     /// Length of this segment's FEC parity blob in the Adamantine payload bundle (0 when absent).
     pub fec_parity_len: u32,
+    /// Byte offset of this segment's RFC 8878 zstd dictionary in the Adamantine payload bundle (0 when absent).
+    pub dict_offset: u32,
+    /// Length of this segment's RFC 8878 zstd dictionary in the Adamantine payload bundle (0 when absent).
+    pub dict_len: u32,
 }
 
 /// A single file entry in a directory catalog.
@@ -134,9 +138,10 @@ struct FilepackManifestWire {
 /// use carbonado::file::{encode_directory, DirectoryArchive};
 /// use carbonado::filepack::{pack_directory, Packed};
 /// use carbonado::filepack_manifest::{FilepackManifest, FilepackSegmentMap};
+/// use carbonado::ZstdEncode;
 ///
 /// # fn example(master: &[u8; 32], src: &std::path::Path, enc: &std::path::Path) -> Result<(), carbonado::error::CarbonadoError> {
-/// let archive: DirectoryArchive = encode_directory(master, src, enc)?;
+/// let archive: DirectoryArchive = encode_directory(master, src, enc, &ZstdEncode::level(20))?;
 /// let packed: Packed = pack_directory(src)?;
 /// // Load rkyv manifest from catalog (see tests/filepack_interop.rs), then:
 /// # let encoded_entries: Vec<carbonado::filepack_manifest::FilepackEntry> = vec![];
@@ -258,6 +263,25 @@ impl FilepackManifest {
         Ok(index)
     }
 
+    /// Deserialize without outboard FEC/bao geometry checks.
+    ///
+    /// Used for single-file inboard Adamantine trailers, where Bao and FEC live in the
+    /// Carbonado body and the trailer may carry only a zstd dictionary.
+    pub(crate) fn from_bytes_unvalidated(
+        bytes: &[u8],
+        catalog_bao_root: [u8; 32],
+    ) -> Result<Self, CarbonadoError> {
+        if bytes.len() > MAX_RKYV_PAYLOAD_LEN {
+            return Err(CarbonadoError::InvalidFilepackManifest(format!(
+                "rkyv payload exceeds {MAX_RKYV_PAYLOAD_LEN} bytes"
+            )));
+        }
+        Self::check_archived_wire_limits(bytes)?;
+        let wire: FilepackManifestWire = rkyv::from_bytes::<FilepackManifestWire, RkyvError>(bytes)
+            .map_err(|e| CarbonadoError::InvalidFilepackManifest(e.to_string()))?;
+        Ok(Self::from_wire(catalog_bao_root, wire))
+    }
+
     /// Pre-deserialize limits on archived layout (entry count, string/proof sizes).
     fn check_archived_wire_limits(bytes: &[u8]) -> Result<(), CarbonadoError> {
         let archived = rkyv::access::<ArchivedFilepackManifestWire, RkyvError>(bytes)
@@ -268,6 +292,8 @@ impl FilepackManifest {
             )));
         }
         let catalog_encrypted = archived.format_level & 1 != 0;
+        let directory_catalog = archived.format_level == FILEPACK_MANIFEST_FORMAT_LEVEL_PUBLIC
+            || archived.format_level == FILEPACK_MANIFEST_FORMAT_LEVEL_ENCRYPTED;
         for entry in archived.entries.iter() {
             if entry.rel_path.len() > MAX_REL_PATH_LEN {
                 return Err(CarbonadoError::InvalidFilepackManifest(format!(
@@ -286,14 +312,15 @@ impl FilepackManifest {
                     "ots_proof exceeds {MAX_OTS_PROOF_LEN} bytes"
                 )));
             }
-            validate_segment_format_for_catalog(entry.segment_format, catalog_encrypted).map_err(
-                |e| match e {
-                    CarbonadoError::SegmentFormatMismatch(msg) => {
-                        CarbonadoError::InvalidFilepackManifest(msg)
-                    }
-                    other => other,
-                },
-            )?;
+            if directory_catalog {
+                validate_segment_format_for_catalog(entry.segment_format, catalog_encrypted)
+                    .map_err(|e| match e {
+                        CarbonadoError::SegmentFormatMismatch(msg) => {
+                            CarbonadoError::InvalidFilepackManifest(msg)
+                        }
+                        other => other,
+                    })?;
+            }
         }
         Ok(())
     }
@@ -381,15 +408,15 @@ impl FilepackManifest {
                 self.version
             )));
         }
-        if self.format_level != FILEPACK_MANIFEST_FORMAT_LEVEL_PUBLIC
-            && self.format_level != FILEPACK_MANIFEST_FORMAT_LEVEL_ENCRYPTED
-        {
+        if self.format_level > 15 {
             return Err(CarbonadoError::InvalidFilepackManifest(format!(
-                "catalog format_level must be c14 or c15, got 0x{:02x}",
+                "format_level must be 0–15, got 0x{:02x}",
                 self.format_level
             )));
         }
         let catalog_encrypted = self.format_level & 1 != 0;
+        let directory_catalog = self.format_level == FILEPACK_MANIFEST_FORMAT_LEVEL_PUBLIC
+            || self.format_level == FILEPACK_MANIFEST_FORMAT_LEVEL_ENCRYPTED;
         if let Some(proof) = &self.catalog_ots_proof
             && proof.len() > MAX_OTS_PROOF_LEN
         {
@@ -405,14 +432,20 @@ impl FilepackManifest {
         let mut prev: Option<&str> = None;
         for entry in &self.entries {
             Self::validate_rel_path(&entry.rel_path)?;
-            validate_segment_format_for_catalog(entry.segment_format, catalog_encrypted).map_err(
-                |e| match e {
-                    CarbonadoError::SegmentFormatMismatch(msg) => {
-                        CarbonadoError::InvalidFilepackManifest(msg)
-                    }
-                    other => other,
-                },
-            )?;
+            if directory_catalog {
+                validate_segment_format_for_catalog(entry.segment_format, catalog_encrypted)
+                    .map_err(|e| match e {
+                        CarbonadoError::SegmentFormatMismatch(msg) => {
+                            CarbonadoError::InvalidFilepackManifest(msg)
+                        }
+                        other => other,
+                    })?;
+            } else if entry.segment_format != self.format_level {
+                return Err(CarbonadoError::InvalidFilepackManifest(format!(
+                    "single-file segment_format 0x{:02x} must match format_level 0x{:02x}",
+                    entry.segment_format, self.format_level
+                )));
+            }
             Self::validate_segments(&entry.segments)?;
             let seg_fmt = Format::from(entry.segment_format);
             for seg in &entry.segments {
@@ -496,6 +529,23 @@ impl FilepackManifest {
                         seg.fec_parity_offset,
                         fec_end,
                         format!("{} chunk {} fec_parity", entry.rel_path, seg.chunk_index),
+                    ));
+                }
+
+                let dict_end = seg.dict_offset.checked_add(seg.dict_len).ok_or_else(|| {
+                    CarbonadoError::InvalidFilepackManifest("dict offset overflow".into())
+                })?;
+                if dict_end as usize > bundle_len {
+                    return Err(CarbonadoError::InvalidFilepackManifest(format!(
+                        "dict range for {} chunk {} exceeds bundle length {bundle_len}",
+                        entry.rel_path, seg.chunk_index
+                    )));
+                }
+                if seg.dict_len > 0 {
+                    ranges.push((
+                        seg.dict_offset,
+                        dict_end,
+                        format!("{} chunk {} dict", entry.rel_path, seg.chunk_index),
                     ));
                 }
             }
@@ -691,6 +741,30 @@ fn validate_segment_bundle_semantics(
         }
     }
 
+    if seg.dict_len > 0 {
+        let expected_dict_off = if seg.fec_parity_len > 0 {
+            seg.fec_parity_offset
+                .checked_add(seg.fec_parity_len)
+                .ok_or_else(|| {
+                    CarbonadoError::InvalidFilepackManifest("fec_parity offset overflow".into())
+                })?
+        } else {
+            seg.verification_outboard_offset
+                .checked_add(seg.verification_outboard_len)
+                .ok_or_else(|| {
+                    CarbonadoError::InvalidFilepackManifest(
+                        "verification_outboard offset overflow".into(),
+                    )
+                })?
+        };
+        if seg.dict_offset != expected_dict_off {
+            return Err(CarbonadoError::InvalidFilepackManifest(format!(
+                "dict_offset for {rel_path} chunk {} must follow bao/parity contiguously",
+                seg.chunk_index
+            )));
+        }
+    }
+
     Ok(())
 }
 
@@ -709,6 +783,8 @@ mod tests {
             verification_outboard_len: ver_len,
             fec_parity_offset: ver_len,
             fec_parity_len: fec_len,
+            dict_offset: 0,
+            dict_len: 0,
         }
     }
 
@@ -784,6 +860,8 @@ mod tests {
             verification_outboard_len: 0,
             fec_parity_offset: 0,
             fec_parity_len: 0,
+            dict_offset: 0,
+            dict_len: 0,
         });
         let err = manifest.validate().unwrap_err();
         assert!(
@@ -828,20 +906,23 @@ mod tests {
         manifest.format_level = 16;
         let err = manifest.validate().unwrap_err();
         assert!(
-            matches!(err, CarbonadoError::InvalidFilepackManifest(ref msg) if msg.contains("c14 or c15")),
+            matches!(err, CarbonadoError::InvalidFilepackManifest(ref msg) if msg.contains("0–15")),
             "got {err:?}"
         );
     }
 
     #[test]
-    fn rejects_non_catalog_format_level() {
+    fn single_file_sidecar_allows_non_catalog_format_level() {
         let mut manifest = sample_manifest();
         manifest.format_level = 6;
-        let err = manifest.validate().unwrap_err();
-        assert!(
-            matches!(err, CarbonadoError::InvalidFilepackManifest(ref msg) if msg.contains("c14 or c15")),
-            "got {err:?}"
-        );
+        manifest.entries[0].segment_format = 6;
+        for seg in &mut manifest.entries[0].segments {
+            seg.fec_parity_offset = 0;
+            seg.fec_parity_len = 0;
+        }
+        manifest
+            .validate()
+            .expect("one-entry sidecar may use any c0–c15 format_level");
     }
 
     #[test]
@@ -863,6 +944,8 @@ mod tests {
                     verification_outboard_len: 8,
                     fec_parity_offset: 0,
                     fec_parity_len: 0,
+                    dict_offset: 0,
+                    dict_len: 0,
                 }],
                 ots_proof: None,
             }],
@@ -895,6 +978,8 @@ mod tests {
                         verification_outboard_len: 64,
                         fec_parity_offset: 64,
                         fec_parity_len: fec_len,
+                        dict_offset: 0,
+                        dict_len: 0,
                     },
                     SegmentRef {
                         segment_bao_root: [4u8; 32],
@@ -904,6 +989,8 @@ mod tests {
                         verification_outboard_len: 64,
                         fec_parity_offset: 96,
                         fec_parity_len: fec_len,
+                        dict_offset: 0,
+                        dict_len: 0,
                     },
                 ],
                 ots_proof: None,
@@ -937,6 +1024,8 @@ mod tests {
                 verification_outboard_len: ver_len,
                 fec_parity_offset: fec_off,
                 fec_parity_len: fec_len,
+                dict_offset: 0,
+                dict_len: 0,
             });
         }
         let manifest = FilepackManifest {
@@ -988,6 +1077,8 @@ mod tests {
                     verification_outboard_len: 8,
                     fec_parity_offset: 8,
                     fec_parity_len: 16,
+                    dict_offset: 0,
+                    dict_len: 0,
                 }],
                 ots_proof: None,
             }],
@@ -1013,11 +1104,17 @@ mod tests {
     fn decode_outboard_rejects_missing_verification_outboard() {
         use crate::decoding::decode_outboard;
         use crate::directory::format_policy::SEGMENT_FORMAT_PUBLIC_COMPRESSED;
-        use crate::encoding::encode_outboard;
+        use crate::encoding::encode_outboard_with_zstd;
 
         let payload = b"payload";
-        let oenc = encode_outboard(&[0u8; 32], payload, SEGMENT_FORMAT_PUBLIC_COMPRESSED)
-            .expect("encode_outboard");
+        let oenc = encode_outboard_with_zstd(
+            &[0u8; 32],
+            payload,
+            SEGMENT_FORMAT_PUBLIC_COMPRESSED,
+            None,
+            &crate::stream::ZstdEncode::level(20),
+        )
+        .expect("encode_outboard");
         let err = decode_outboard(
             &[0u8; 32],
             oenc.hash.as_bytes(),
@@ -1038,11 +1135,17 @@ mod tests {
     fn encode_outboard_empty_verification_outboard_still_roundtrips() {
         use crate::decoding::decode_outboard;
         use crate::directory::format_policy::SEGMENT_FORMAT_PUBLIC_COMPRESSED;
-        use crate::encoding::encode_outboard;
+        use crate::encoding::encode_outboard_with_zstd;
 
         let payload = b"payload";
-        let oenc = encode_outboard(&[0u8; 32], payload, SEGMENT_FORMAT_PUBLIC_COMPRESSED)
-            .expect("encode_outboard");
+        let oenc = encode_outboard_with_zstd(
+            &[0u8; 32],
+            payload,
+            SEGMENT_FORMAT_PUBLIC_COMPRESSED,
+            None,
+            &crate::stream::ZstdEncode::level(20),
+        )
+        .expect("encode_outboard");
         let ver = oenc.verification_outboard.as_deref().expect("Some");
         assert_eq!(ver.len(), 0, "small payloads may have zero-length outboard");
         let decoded = decode_outboard(

@@ -12,7 +12,7 @@
 
 There is no `carbonado-sys`, no Cargo `backend-lean`, and no product C ABI. Do not claim G8 C-ABI parity.
 
-- AOT CLI (`packages.carbonado` / `nix run`) runs **Programs A–G**: constants, EtM, FEC, keyed Bao, full pipeline (c0–c15), Header wire, scrub, stream bounds, multi-segment shards, **zstd-20 compression (linked)**, **SLH1 sidecar wire + bind-to-root model**, **Adamantine 1.0 directories**, **encode/decode/slh CLI**.
+- AOT CLI (`packages.carbonado` / `nix run`) runs **Programs A–G**: constants, EtM, FEC, keyed Bao, full pipeline (c0–c15), Header wire, scrub, stream bounds, multi-segment shards, **zstd compression (level is encoder input; AOT demo uses 20)**, **SLH1 sidecar wire + bind-to-root model**, **Adamantine 1.0 directories**, **encode/decode/slh CLI**.
 - Rust tree (`src/`, `tests/`, …) **stays** first-class. **G1/W5a closed:** permanent policy — **no** `ref/carbonado-rust` product pin. Not a license to delete `src/` or `tests/`.
 - Lean theorem/test tree is **`CarbonadoTest/`** (not `Tests/`) so it does not collide with Rust `tests/` on case-insensitive filesystems (Darwin APFS).
 - Dependency direction is **CarbonadoTest → Carbonado** only.

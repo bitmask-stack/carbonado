@@ -40,7 +40,7 @@ pub fn run_carbonado_env(args: &[&str], env: &[(&str, &str)]) -> std::process::O
 }
 
 pub fn find_single_archive(outdir: &Path) -> PathBuf {
-    // Single-file CLI uses hex format suffix (e.g. format 14 -> `.c0e`), not decimal `.c14`.
+    // Single-file CLI uses hex format suffix (e.g. format 14 -> `.c0e` / `.adam.c0e`).
     let mut matches: Vec<PathBuf> = fs::read_dir(outdir)
         .expect("read outdir")
         .filter_map(|e| e.ok())
@@ -56,6 +56,18 @@ pub fn find_single_archive(outdir: &Path) -> PathBuf {
         })
         .collect();
     matches.sort();
+    let mut mains: Vec<PathBuf> = matches
+        .iter()
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| !n.contains(".adam."))
+        })
+        .cloned()
+        .collect();
+    if mains.len() == 1 {
+        return mains.remove(0);
+    }
     assert_eq!(
         matches.len(),
         1,

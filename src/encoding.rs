@@ -2,15 +2,28 @@ use log::trace;
 
 use crate::{error::CarbonadoError, structs::Encoded};
 
+use crate::stream::ZstdEncode;
 use crate::stream::encode::stream_encode_buffer_with_nonce;
 use crate::stream::encode::stream_encode_outboard_buffer;
 
 /// Encode data into Carbonado format (delegates to the streaming pipeline).
 ///
 /// Encrypted formats use a CSPRNG nonce (embedded layout). For deterministic encrypted
-/// bodies (G9 fixtures), use [`encode_with_nonce`].
+/// bodies (G9 fixtures), use [`encode_with_nonce`]. Compression requires
+/// [`encode_with_zstd`] with an explicit level.
 pub fn encode(master_key: &[u8], input: &[u8], format: u8) -> Result<Encoded, CarbonadoError> {
-    encode_with_nonce(master_key, input, format, None)
+    encode_with_zstd(master_key, input, format, None, &ZstdEncode::default())
+}
+
+/// Encode with explicit zstd parameters (required when the Compression bit is set).
+pub fn encode_with_zstd(
+    master_key: &[u8],
+    input: &[u8],
+    format: u8,
+    explicit_nonce: Option<[u8; 16]>,
+    zstd: &ZstdEncode,
+) -> Result<Encoded, CarbonadoError> {
+    encode_with_nonce_and_zstd(master_key, input, format, explicit_nonce, zstd)
 }
 
 /// Low-level body encode with optional fixed nonce for encrypted formats.
@@ -32,19 +45,47 @@ pub fn encode_with_nonce(
     format: u8,
     explicit_nonce: Option<[u8; 16]>,
 ) -> Result<Encoded, CarbonadoError> {
+    encode_with_nonce_and_zstd(
+        master_key,
+        input,
+        format,
+        explicit_nonce,
+        &ZstdEncode::default(),
+    )
+}
+
+fn encode_with_nonce_and_zstd(
+    master_key: &[u8],
+    input: &[u8],
+    format: u8,
+    explicit_nonce: Option<[u8; 16]>,
+    zstd: &ZstdEncode,
+) -> Result<Encoded, CarbonadoError> {
     let (verifiable, hash, info) =
-        stream_encode_buffer_with_nonce(master_key, input, format, explicit_nonce)?;
+        stream_encode_buffer_with_nonce(master_key, input, format, explicit_nonce, zstd)?;
     Ok(Encoded(verifiable, hash, info))
 }
 
-/// Outboard variant for public and encrypted formats.
+/// Outboard variant for public and encrypted formats. Compression requires
+/// [`encode_outboard_with_zstd`].
 pub fn encode_outboard(
     master_key: &[u8],
     input: &[u8],
     format: u8,
 ) -> Result<crate::structs::OutboardEncoded, CarbonadoError> {
+    encode_outboard_with_zstd(master_key, input, format, None, &ZstdEncode::default())
+}
+
+/// Outboard encode with explicit zstd parameters.
+pub fn encode_outboard_with_zstd(
+    master_key: &[u8],
+    input: &[u8],
+    format: u8,
+    explicit_nonce: Option<[u8; 16]>,
+    zstd: &ZstdEncode,
+) -> Result<crate::structs::OutboardEncoded, CarbonadoError> {
     trace!("encode_outboard format=0x{format:02x}");
-    stream_encode_outboard_buffer(master_key, input, format, None)
+    stream_encode_outboard_buffer(master_key, input, format, explicit_nonce, zstd)
 }
 
 // Scrub recovery re-exports

@@ -4,11 +4,11 @@ mod common;
 
 use anyhow::Result;
 use carbonado::{
-    decode, decode_outboard, encode, encode_outboard, error::CarbonadoError, scrub, scrub_outboard,
-    structs::Encoded,
+    decode, decode_outboard, error::CarbonadoError, scrub, scrub_outboard, structs::Encoded,
 };
 use common::corruption::{InboardShardLayout, flip_byte};
 use common::format_matrix::{format_label, public_fec_levels, verification_fec_levels};
+use common::{encode, encode_outboard};
 use rand::Rng;
 
 fn master_for(level: u8) -> [u8; 32] {

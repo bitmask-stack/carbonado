@@ -1,4 +1,4 @@
-//! Reed-Solomon 4/8 FEC streaming with a 16 KiB (4×4 KiB slice) stripe accumulator.
+//! Reed-Solomon 4/8 FEC as 16 KiB logical stripes of eight 4 KiB leaves.
 
 use std::io::{Read, Write};
 
@@ -6,25 +6,65 @@ use reed_solomon_erasure::ReedSolomon;
 use reed_solomon_erasure::galois_8::Field;
 
 use crate::{
-    constants::{FEC_K, FEC_M, SLICE_LEN},
+    constants::{FEC_K, FEC_M, FEC_STRIPE_INBOARD_LEN, FEC_STRIPE_LOGICAL_LEN, SLICE_LEN},
     error::CarbonadoError,
     utils::calc_padding_len,
 };
 
-/// Result of one completed FEC stripe (8 shards × `chunk_len`).
+/// Result of one completed FEC stripe (8 shards × 4 KiB).
 #[derive(Clone, Debug)]
 pub struct FecStripe {
     pub shards: Vec<Vec<u8>>,
     pub chunk_len: u32,
 }
 
-/// Inboard FEC encoder: consumes logical bytes, emits one concatenated stripe.
+impl FecStripe {
+    fn empty_shards() -> Vec<Vec<u8>> {
+        (0..FEC_M).map(|_| vec![0u8; SLICE_LEN as usize]).collect()
+    }
+}
+
+/// Split one stripe into data leaves (4 × 4 KiB) and parity leaves (4 × 4 KiB).
+///
+/// Outboard main is the concatenation of data leaves across stripes (padded
+/// logical body). Parity leaves are the stream Adamantine stores in the bundle.
+pub fn stripe_data_and_parity_leaves(stripe: &FecStripe) -> (&[Vec<u8>], &[Vec<u8>]) {
+    stripe.shards.split_at(FEC_K)
+}
+
+/// Concatenate data leaves of every stripe (padded logical body, stripe order).
+pub fn concat_data_leaves(stripes: &[FecStripe]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(stripes.len() * FEC_STRIPE_LOGICAL_LEN as usize);
+    for stripe in stripes {
+        let (data, _) = stripe_data_and_parity_leaves(stripe);
+        for leaf in data {
+            out.extend_from_slice(leaf);
+        }
+    }
+    out
+}
+
+/// Concatenate parity leaves of every stripe (Adamantine / `.par` stream).
+pub fn concat_parity_leaves(stripes: &[FecStripe]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(
+        stripes.len() * (FEC_STRIPE_INBOARD_LEN - FEC_STRIPE_LOGICAL_LEN) as usize,
+    );
+    for stripe in stripes {
+        let (_, parity) = stripe_data_and_parity_leaves(stripe);
+        for leaf in parity {
+            out.extend_from_slice(leaf);
+        }
+    }
+    out
+}
+
+/// Inboard FEC encoder: consumes logical bytes, emits one 32 KiB stripe per 16 KiB.
 pub struct FecInboardEncoder {
+    logical_len: usize,
     padded_len: usize,
-    chunk_len: usize,
     padding_total: u32,
     pos: usize,
-    shards: Vec<Vec<u8>>,
+    current: Vec<u8>,
     rs: ReedSolomon<Field>,
     finished: bool,
 }
@@ -34,29 +74,24 @@ impl FecInboardEncoder {
     pub fn new(logical_len: usize) -> Result<Self, CarbonadoError> {
         if logical_len == 0 {
             return Ok(Self {
+                logical_len: 0,
                 padded_len: 0,
-                chunk_len: 0,
                 padding_total: 0,
                 pos: 0,
-                shards: vec![],
+                current: Vec::new(),
                 rs: ReedSolomon::new(FEC_K, FEC_M - FEC_K)?,
                 finished: true,
             });
         }
-        let (padding_total, chunk_len) = calc_padding_len(logical_len);
+        let (padding_total, _chunk_len) = calc_padding_len(logical_len);
         let padded_len = logical_len + padding_total as usize;
-        let rs = ReedSolomon::<Field>::new(FEC_K, FEC_M - FEC_K)?;
-        let mut shards = Vec::with_capacity(FEC_M);
-        for _ in 0..FEC_M {
-            shards.push(vec![0u8; chunk_len as usize]);
-        }
         Ok(Self {
+            logical_len,
             padded_len,
-            chunk_len: chunk_len as usize,
             padding_total,
             pos: 0,
-            shards,
-            rs,
+            current: Vec::with_capacity(FEC_STRIPE_LOGICAL_LEN as usize),
+            rs: ReedSolomon::<Field>::new(FEC_K, FEC_M - FEC_K)?,
             finished: false,
         })
     }
@@ -65,123 +100,135 @@ impl FecInboardEncoder {
         self.padding_total
     }
 
+    /// RS symbol size: one 4 KiB Bao leaf (not `padded_len / 4`).
     pub fn chunk_len(&self) -> u32 {
-        self.chunk_len as u32
+        if self.padded_len == 0 { 0 } else { SLICE_LEN }
     }
 
-    /// Feed logical bytes from `input`. Caller must supply exactly `logical_len` bytes total
-    /// (via [`Read::take`] or equivalent) before [`Self::finish`]. Excess bytes error;
-    /// padding is zero-filled only in `finish`.
-    pub fn feed<R: Read>(&mut self, mut input: R) -> Result<Option<FecStripe>, CarbonadoError> {
+    /// Feed logical bytes from `input`. Completed 16 KiB stripes are returned.
+    /// Caller must supply exactly `logical_len` bytes total before [`Self::finish`].
+    pub fn feed<R: Read>(&mut self, mut input: R) -> Result<Vec<FecStripe>, CarbonadoError> {
         if self.finished {
-            return Ok(None);
+            return Ok(vec![]);
         }
+        let mut completed = Vec::new();
         let mut buf = [0u8; SLICE_LEN as usize];
         loop {
             let n = input.read(&mut buf).map_err(CarbonadoError::StdIoError)?;
             if n == 0 {
                 break;
             }
-            self.feed_logical_bytes(&buf[..n])?;
+            self.feed_logical_bytes(&buf[..n], &mut completed)?;
         }
-        Ok(None)
+        Ok(completed)
     }
 
     /// Finalize when the caller has fed exactly `logical_len` bytes (padding added internally).
-    pub fn finish(&mut self) -> Result<Option<FecStripe>, CarbonadoError> {
-        if self.finished || self.padded_len == 0 {
-            return Ok(None);
+    pub fn finish(&mut self) -> Result<Vec<FecStripe>, CarbonadoError> {
+        if self.finished {
+            return Ok(vec![]);
         }
-        let logical_len = self.logical_len();
-        if self.pos < logical_len {
+        if self.pos < self.logical_len {
             return Err(CarbonadoError::StdIoError(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 "FEC encoder: short read before finish",
             )));
         }
+        let mut completed = Vec::new();
         if self.pos < self.padded_len {
             let zeros = vec![0u8; self.padded_len - self.pos];
-            self.feed_padding_bytes(&zeros)?;
+            self.feed_padding_bytes(&zeros, &mut completed)?;
+        }
+        if !self.current.is_empty() {
+            return Err(CarbonadoError::InternalStateError(
+                "FEC encoder: unfinished stripe after padding".to_string(),
+            ));
         }
         self.finished = true;
-        Ok(Some(self.take_stripe()?))
+        Ok(completed)
     }
 
-    fn logical_len(&self) -> usize {
-        self.padded_len - self.padding_total as usize
-    }
-
-    fn feed_logical_bytes(&mut self, data: &[u8]) -> Result<(), CarbonadoError> {
-        let logical_len = self.logical_len();
+    fn feed_logical_bytes(
+        &mut self,
+        data: &[u8],
+        completed: &mut Vec<FecStripe>,
+    ) -> Result<(), CarbonadoError> {
         let mut off = 0usize;
         while off < data.len() {
-            if self.pos >= logical_len {
+            if self.pos >= self.logical_len {
                 return Err(CarbonadoError::StdIoError(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     "FEC encoder: input exceeds logical length",
                 )));
             }
-            let shard_idx = self.pos / self.chunk_len;
-            let shard_off = self.pos % self.chunk_len;
-            if shard_idx >= FEC_K {
-                break;
-            }
-            let room = self.chunk_len - shard_off;
-            let cap = logical_len - self.pos;
+            let cap = self.logical_len - self.pos;
+            let room = FEC_STRIPE_LOGICAL_LEN as usize - self.current.len();
             let take = (data.len() - off).min(room).min(cap);
-            self.shards[shard_idx][shard_off..shard_off + take]
-                .copy_from_slice(&data[off..off + take]);
+            self.current.extend_from_slice(&data[off..off + take]);
             self.pos += take;
             off += take;
+            if self.current.len() == FEC_STRIPE_LOGICAL_LEN as usize {
+                completed.push(self.take_stripe()?);
+            }
         }
         Ok(())
     }
 
-    fn feed_padding_bytes(&mut self, data: &[u8]) -> Result<(), CarbonadoError> {
+    fn feed_padding_bytes(
+        &mut self,
+        data: &[u8],
+        completed: &mut Vec<FecStripe>,
+    ) -> Result<(), CarbonadoError> {
         let mut off = 0usize;
         while off < data.len() && self.pos < self.padded_len {
-            let shard_idx = self.pos / self.chunk_len;
-            let shard_off = self.pos % self.chunk_len;
-            if shard_idx >= FEC_K {
-                break;
-            }
-            let room = self.chunk_len - shard_off;
+            let room = FEC_STRIPE_LOGICAL_LEN as usize - self.current.len();
             let take = (data.len() - off).min(room).min(self.padded_len - self.pos);
-            self.shards[shard_idx][shard_off..shard_off + take]
-                .copy_from_slice(&data[off..off + take]);
+            self.current.extend_from_slice(&data[off..off + take]);
             self.pos += take;
             off += take;
+            if self.current.len() == FEC_STRIPE_LOGICAL_LEN as usize {
+                completed.push(self.take_stripe()?);
+            }
         }
         Ok(())
     }
 
     fn take_stripe(&mut self) -> Result<FecStripe, CarbonadoError> {
-        #[cfg(feature = "parallel")]
-        {
-            crate::stream::parallel::encode_rs_parity(&self.rs, &mut self.shards, self.chunk_len)?;
+        let mut shards = FecStripe::empty_shards();
+        let leaf = SLICE_LEN as usize;
+        for (i, shard) in shards.iter_mut().enumerate().take(FEC_K) {
+            shard.copy_from_slice(&self.current[i * leaf..(i + 1) * leaf]);
         }
-        #[cfg(not(feature = "parallel"))]
-        {
-            self.rs.encode(&mut self.shards)?;
-        }
-        for s in &self.shards {
-            if s.len() != self.chunk_len {
-                return Err(CarbonadoError::EncodeInvalidChunkLength(
-                    self.chunk_len as u32,
-                    s.len(),
-                ));
-            }
-        }
+        self.current.clear();
+        encode_stripe_parity(&self.rs, &mut shards)?;
         Ok(FecStripe {
-            shards: std::mem::take(&mut self.shards),
-            chunk_len: self.chunk_len as u32,
+            shards,
+            chunk_len: SLICE_LEN,
         })
     }
 }
 
+fn encode_stripe_parity(
+    rs: &ReedSolomon<Field>,
+    shards: &mut [Vec<u8>],
+) -> Result<(), CarbonadoError> {
+    #[cfg(feature = "parallel")]
+    {
+        crate::stream::parallel::encode_rs_parity(rs, shards, SLICE_LEN as usize)?;
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        rs.encode(shards)?;
+    }
+    for s in shards.iter() {
+        if s.len() != SLICE_LEN as usize {
+            return Err(CarbonadoError::EncodeInvalidChunkLength(SLICE_LEN, s.len()));
+        }
+    }
+    Ok(())
+}
+
 /// [`positioned_io::ReadAt`] view over concatenated inboard FEC stripe shards.
-///
-/// Avoids flattening shard data into a staging `Vec` before keyed Bao inboard encode (S3).
 pub struct FecStripeReadAt<'a> {
     stripe: &'a FecStripe,
     len: u64,
@@ -207,32 +254,85 @@ impl<'a> FecStripeReadAt<'a> {
 
 impl positioned_io::ReadAt for FecStripeReadAt<'_> {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+        read_at_shards(&self.stripe.shards, self.len, offset, buf)
+    }
+}
+
+/// [`ReadAt`] over every stripe of an inboard FEC body, in stripe order.
+pub struct FecStripesReadAt<'a> {
+    stripes: &'a [FecStripe],
+    len: u64,
+}
+
+impl<'a> FecStripesReadAt<'a> {
+    pub fn new(stripes: &'a [FecStripe]) -> Self {
+        let len = stripes.len() as u64 * u64::from(FEC_STRIPE_INBOARD_LEN);
+        Self { stripes, len }
+    }
+
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl positioned_io::ReadAt for FecStripesReadAt<'_> {
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
         if offset >= self.len || buf.is_empty() {
             return Ok(0);
         }
+        let stripe_len = u64::from(FEC_STRIPE_INBOARD_LEN);
         let mut written = 0usize;
         let mut pos = offset;
-        let mut cum = 0u64;
-        for shard in &self.stripe.shards {
-            let shard_len = shard.len() as u64;
-            let shard_end = cum + shard_len;
-            if pos >= shard_end {
-                cum = shard_end;
-                continue;
-            }
-            let start = (pos - cum) as usize;
-            let avail = shard.len() - start;
-            let to_copy = avail.min(buf.len() - written);
-            buf[written..written + to_copy].copy_from_slice(&shard[start..start + to_copy]);
-            written += to_copy;
-            pos += to_copy as u64;
-            cum = shard_end;
-            if written >= buf.len() {
+        while written < buf.len() && pos < self.len {
+            let stripe_idx = (pos / stripe_len) as usize;
+            let stripe_off = pos % stripe_len;
+            let view = FecStripeReadAt::new(&self.stripes[stripe_idx]);
+            let n = view.read_at(stripe_off, &mut buf[written..])?;
+            if n == 0 {
                 break;
             }
+            written += n;
+            pos += n as u64;
         }
         Ok(written)
     }
+}
+
+fn read_at_shards(
+    shards: &[Vec<u8>],
+    len: u64,
+    offset: u64,
+    buf: &mut [u8],
+) -> std::io::Result<usize> {
+    if offset >= len || buf.is_empty() {
+        return Ok(0);
+    }
+    let mut written = 0usize;
+    let mut pos = offset;
+    let mut cum = 0u64;
+    for shard in shards {
+        let shard_len = shard.len() as u64;
+        let shard_end = cum + shard_len;
+        if pos >= shard_end {
+            cum = shard_end;
+            continue;
+        }
+        let start = (pos - cum) as usize;
+        let avail = shard.len() - start;
+        let to_copy = avail.min(buf.len() - written);
+        buf[written..written + to_copy].copy_from_slice(&shard[start..start + to_copy]);
+        written += to_copy;
+        pos += to_copy as u64;
+        cum = shard_end;
+        if written >= buf.len() {
+            break;
+        }
+    }
+    Ok(written)
 }
 
 /// Write all shards of a stripe to `output` (inboard layout).
@@ -248,7 +348,7 @@ pub fn write_inboard_stripe<W: Write>(
     Ok(n)
 }
 
-/// Write parity shards only (outboard `.par` sidecar).
+/// Write parity shards only (outboard `.par` sidecar / Adamantine bundle).
 pub fn write_outboard_parity<W: Write>(
     stripe: &FecStripe,
     output: &mut W,
@@ -261,17 +361,62 @@ pub fn write_outboard_parity<W: Write>(
     Ok(n)
 }
 
-/// [`WriteAt`] sink for keyed Bao inboard decode into one RS stripe (S4).
+/// Write data leaves only (outboard main = data leaves in stripe order).
+pub fn write_data_leaves<W: Write>(
+    stripe: &FecStripe,
+    output: &mut W,
+) -> Result<u64, CarbonadoError> {
+    let mut n = 0u64;
+    for s in stripe.shards.iter().take(FEC_K) {
+        output.write_all(s).map_err(CarbonadoError::StdIoError)?;
+        n += s.len() as u64;
+    }
+    Ok(n)
+}
+
+/// Reconstruct one stripe from up to 8 optional 4 KiB symbols (erasures are `None`).
+pub fn reconstruct_stripe(shards: &mut [Option<Vec<u8>>]) -> Result<Vec<Vec<u8>>, CarbonadoError> {
+    if shards.len() != FEC_M {
+        return Err(CarbonadoError::UnevenFecChunks);
+    }
+    let good = shards.iter().filter(|s| s.is_some()).count();
+    if good < FEC_K {
+        return Err(CarbonadoError::InvalidScrubbedHash);
+    }
+    let leaf = SLICE_LEN as usize;
+    for s in shards.iter().flatten() {
+        if s.len() != leaf {
+            return Err(CarbonadoError::UnevenFecChunks);
+        }
+    }
+    let rs = ReedSolomon::<Field>::new(FEC_K, FEC_M - FEC_K)?;
+    rs.reconstruct(shards)?;
+    let mut out = Vec::with_capacity(FEC_M);
+    for s in shards.iter_mut() {
+        out.push(s.take().ok_or(CarbonadoError::UnevenFecChunks)?);
+    }
+    Ok(out)
+}
+
+fn reconstruct_stripe_logical(
+    shards: &mut [Option<Vec<u8>>],
+    logical_out: &mut Vec<u8>,
+) -> Result<(), CarbonadoError> {
+    let rebuilt = reconstruct_stripe(shards)?;
+    for leaf in rebuilt.iter().take(FEC_K) {
+        logical_out.extend_from_slice(leaf);
+    }
+    Ok(())
+}
+
+/// [`WriteAt`] sink for keyed Bao inboard decode of a multi-stripe FEC body.
 ///
-/// Retains at most `FEC_M` shard buffers (`O(stripe)`); RS-reconstructs on [`Self::finish`].
-///
-/// `filled` tracks the maximum end offset written. Completion assumes `keyed_decode_ranges` with
-/// `ChunkRanges::all()` populates `[0, content_len)` contiguously on success (bao-tree contract).
+/// Retains the FEC body (`O(FEC body)` shard bytes) then RS-reconstructs per 16 KiB
+/// stripe on [`Self::finish_into`].
 pub struct FecInboardWriteAt {
     content_len: u64,
     padding: u32,
-    shard_len: usize,
-    shards: Vec<Vec<u8>>,
+    buf: Vec<u8>,
     filled: u64,
     finished: bool,
 }
@@ -282,34 +427,25 @@ impl FecInboardWriteAt {
             return Ok(Self {
                 content_len: 0,
                 padding,
-                shard_len: 0,
-                shards: vec![],
+                buf: vec![],
                 filled: 0,
                 finished: false,
             });
         }
         let len = content_len as usize;
-        if !len.is_multiple_of(FEC_M) {
+        if !len.is_multiple_of(FEC_STRIPE_INBOARD_LEN as usize) {
             return Err(CarbonadoError::UnevenFecChunks);
-        }
-        let shard_len = len / FEC_M;
-        let mut shards = Vec::with_capacity(FEC_M);
-        for _ in 0..FEC_M {
-            shards.push(vec![0u8; shard_len]);
         }
         Ok(Self {
             content_len,
             padding,
-            shard_len,
-            shards,
+            buf: vec![0u8; len],
             filled: 0,
             finished: false,
         })
     }
 
-    /// RS-decode and stream logical bytes (padding stripped) into `output` without a full
-    /// intermediate logical `Vec`. Peak RAM remains O(FEC body) for the shard buffers
-    /// (one segment-wide stripe under current geometry).
+    /// RS-decode each stripe and stream logical bytes (padding stripped) into `output`.
     pub fn finish_into<W: Write>(mut self, output: &mut W) -> Result<u64, CarbonadoError> {
         if self.finished {
             return Err(CarbonadoError::InternalStateError(
@@ -329,34 +465,14 @@ impl FecInboardWriteAt {
                 ),
             )));
         }
-        let mut shard_opts: Vec<Option<Vec<u8>>> = self.shards.drain(..).map(Some).collect();
-        let rs = ReedSolomon::<Field>::new(FEC_K, FEC_M - FEC_K)?;
-        rs.reconstruct(&mut shard_opts)?;
-        let data_len = self.shard_len.saturating_mul(FEC_K);
-        if self.padding as usize > data_len {
-            return Err(CarbonadoError::ScrubbedLengthMismatch(
-                data_len,
-                self.padding as usize,
-            ));
-        }
-        let logical_len = data_len - self.padding as usize;
-        let mut remaining = logical_len;
-        let mut written = 0u64;
-        for s in shard_opts.iter().take(FEC_K).flatten() {
-            if remaining == 0 {
-                break;
-            }
-            let n = remaining.min(s.len());
-            output
-                .write_all(&s[..n])
-                .map_err(CarbonadoError::StdIoError)?;
-            remaining -= n;
-            written += n as u64;
-        }
-        Ok(written)
+        let decoded = decode_inboard_stripes(&self.buf, self.padding)?;
+        output
+            .write_all(&decoded)
+            .map_err(CarbonadoError::StdIoError)?;
+        Ok(decoded.len() as u64)
     }
 
-    /// RS-decode the accumulated stripe and return logical bytes (padding stripped).
+    /// RS-decode the accumulated body and return logical bytes (padding stripped).
     pub fn finish(self) -> Result<Vec<u8>, CarbonadoError> {
         let mut decoded = Vec::new();
         self.finish_into(&mut decoded)?;
@@ -380,20 +496,9 @@ impl positioned_io::WriteAt for FecInboardWriteAt {
         {
             return Err(write_past_content_len_error());
         }
-        let mut written = 0usize;
-        let mut pos = offset;
-        while written < data.len() {
-            let shard_idx = (pos as usize) / self.shard_len;
-            let shard_off = (pos as usize) % self.shard_len;
-            let room = self.shard_len - shard_off;
-            let cap = (self.content_len - pos) as usize;
-            let take = (data.len() - written).min(room).min(cap);
-            self.shards[shard_idx][shard_off..shard_off + take]
-                .copy_from_slice(&data[written..written + take]);
-            self.filled = self.filled.max(pos + take as u64);
-            written += take;
-            pos += take as u64;
-        }
+        let rel = offset as usize;
+        self.buf[rel..rel + data.len()].copy_from_slice(data);
+        self.filled = self.filled.max(offset + data.len() as u64);
         Ok(data.len())
     }
 
@@ -411,9 +516,6 @@ impl positioned_io::WriteAt for FecInboardWriteAt {
 ///
 /// Production inboard non-FEC verification uses [`crate::stream::spool::SeekWriteAt`] (disk
 /// spool, O(chunk) RAM). This type remains for unit tests of WriteAt completeness contracts.
-///
-/// `filled` tracks the maximum end offset written; relies on full-range Bao decode completion
-/// (see [`FecInboardWriteAt`]).
 pub struct LogicalBufferWriteAt {
     content_len: u64,
     buf: Vec<u8>,
@@ -468,38 +570,63 @@ impl positioned_io::WriteAt for LogicalBufferWriteAt {
     }
 }
 
-/// Inboard FEC decode from a reader of concatenated shards.
-pub fn stream_decode_inboard<R: Read, W: Write>(
-    mut input: R,
-    padding: u32,
-    logical_shard_len: usize,
-    output: &mut W,
-) -> Result<u64, CarbonadoError> {
-    if logical_shard_len == 0 {
-        return Ok(0);
+fn decode_inboard_stripes(input: &[u8], padding: u32) -> Result<Vec<u8>, CarbonadoError> {
+    if input.is_empty() {
+        return Ok(vec![]);
     }
-    let shard_len = logical_shard_len;
-    let mut shards: Vec<Option<Vec<u8>>> = vec![None; FEC_M];
-    for shard in shards.iter_mut() {
-        let mut buf = vec![0u8; shard_len];
-        input
-            .read_exact(&mut buf)
-            .map_err(CarbonadoError::StdIoError)?;
-        *shard = Some(buf);
+    const STRIPE: usize = FEC_STRIPE_INBOARD_LEN as usize;
+    const LEAF: usize = SLICE_LEN as usize;
+    let (stripes, remainder) = input.as_chunks::<STRIPE>();
+    if !remainder.is_empty() {
+        return Err(CarbonadoError::UnevenFecChunks);
     }
-    let rs = ReedSolomon::<Field>::new(FEC_K, FEC_M - FEC_K)?;
-    rs.reconstruct(&mut shards)?;
-    let mut decoded = Vec::new();
-    for s in shards.iter().take(FEC_K).flatten() {
-        decoded.extend_from_slice(s);
+    let mut logical = Vec::with_capacity(input.len() / 2);
+    for stripe in stripes {
+        let (leaves, leaf_rem) = stripe.as_chunks::<LEAF>();
+        debug_assert!(leaf_rem.is_empty());
+        let mut shards: Vec<Option<Vec<u8>>> = leaves.iter().map(|c| Some(c.to_vec())).collect();
+        reconstruct_stripe_logical(&mut shards, &mut logical)?;
     }
-    if padding as usize > decoded.len() {
+    if padding as usize > logical.len() {
         return Err(CarbonadoError::ScrubbedLengthMismatch(
-            decoded.len(),
+            logical.len(),
             padding as usize,
         ));
     }
-    decoded.truncate(decoded.len() - padding as usize);
+    logical.truncate(logical.len() - padding as usize);
+    Ok(logical)
+}
+
+/// Inboard FEC decode from a reader of concatenated 32 KiB stripes.
+pub fn stream_decode_inboard<R: Read, W: Write>(
+    mut input: R,
+    padding: u32,
+    _logical_shard_len: usize,
+    output: &mut W,
+) -> Result<u64, CarbonadoError> {
+    let stripe_len = FEC_STRIPE_INBOARD_LEN as usize;
+    let mut body = Vec::new();
+    let mut buf = vec![0u8; stripe_len];
+    loop {
+        let mut got = 0usize;
+        while got < stripe_len {
+            let n = input
+                .read(&mut buf[got..])
+                .map_err(CarbonadoError::StdIoError)?;
+            if n == 0 {
+                break;
+            }
+            got += n;
+        }
+        if got == 0 {
+            break;
+        }
+        if got != stripe_len {
+            return Err(CarbonadoError::UnevenFecChunks);
+        }
+        body.extend_from_slice(&buf);
+    }
+    let decoded = decode_inboard_stripes(&body, padding)?;
     output
         .write_all(&decoded)
         .map_err(CarbonadoError::StdIoError)?;
@@ -508,9 +635,8 @@ pub fn stream_decode_inboard<R: Read, W: Write>(
 
 /// Outboard FEC decode: bare main reader + parity reader -> logical output.
 ///
-/// **Degraded / truncated main:** prefer [`crate::decoding::fec_with_parity`] via
-/// [`crate::stream::stream_decode_outboard_buffer`], which derives stripe geometry from
-/// the parity sidecar (encode-time `chunk_len`) rather than `calc_padding_len(main_len)`.
+/// Parity is the concatenated 4 KiB parity leaves (4 per stripe). Main is the
+/// logical body (data leaves with padding stripped, or a prefix thereof).
 pub fn stream_decode_outboard<R: Read, W: Write>(
     mut main: R,
     mut parity: R,
@@ -521,22 +647,8 @@ pub fn stream_decode_outboard<R: Read, W: Write>(
     if main_len == 0 && padding == 0 {
         return Ok(0);
     }
-
-    // Read parity incrementally into a buffer (streamed via `copy`, not single `read_to_end`).
     let mut parity_buf = Vec::new();
     std::io::copy(&mut parity, &mut parity_buf).map_err(CarbonadoError::StdIoError)?;
-    let parity_shards = FEC_M - FEC_K;
-    if !parity_buf.len().is_multiple_of(parity_shards) {
-        return Err(CarbonadoError::UnevenFecChunks);
-    }
-    let shard_len = parity_buf.len() / parity_shards;
-    let padded_total = shard_len * FEC_K;
-    let pad = padding as usize;
-    if pad > padded_total {
-        return Err(CarbonadoError::ScrubbedLengthMismatch(padded_total, pad));
-    }
-    let logical_len = padded_total - pad;
-
     let mut main_buf = Vec::new();
     if main_len > 0 {
         let mut buf = [0u8; SLICE_LEN as usize];
@@ -551,29 +663,65 @@ pub fn stream_decode_outboard<R: Read, W: Write>(
             read_main += take;
         }
     }
-    let copy = main_buf.len().min(logical_len);
+    let decoded = decode_outboard_stripes(&main_buf, &parity_buf, padding)?;
+    output
+        .write_all(&decoded)
+        .map_err(CarbonadoError::StdIoError)?;
+    Ok(decoded.len() as u64)
+}
 
+pub(crate) fn decode_outboard_stripes(
+    main: &[u8],
+    parity: &[u8],
+    padding: u32,
+) -> Result<Vec<u8>, CarbonadoError> {
+    if main.is_empty() && parity.is_empty() {
+        return Ok(vec![]);
+    }
+    const LEAF: usize = SLICE_LEN as usize;
+    const PARITY_STRIPE: usize = (FEC_M - FEC_K) * LEAF;
+    const LOGICAL_STRIPE: usize = FEC_STRIPE_LOGICAL_LEN as usize;
+    let (parity_stripes, remainder) = parity.as_chunks::<PARITY_STRIPE>();
+    if !remainder.is_empty() {
+        return Err(CarbonadoError::UnevenFecChunks);
+    }
+    let n_stripes = parity_stripes.len();
+    let padded_total = n_stripes * LOGICAL_STRIPE;
+    let pad = padding as usize;
+    if pad > padded_total {
+        return Err(CarbonadoError::ScrubbedLengthMismatch(padded_total, pad));
+    }
+    let logical_len = padded_total - pad;
     let mut padded = vec![0u8; padded_total];
-    padded[..copy].copy_from_slice(&main_buf[..copy]);
+    let copy = main.len().min(logical_len);
+    padded[..copy].copy_from_slice(&main[..copy]);
 
-    let mut shards: Vec<Option<Vec<u8>>> = vec![None; FEC_M];
-    for (i, shard) in shards.iter_mut().enumerate().take(FEC_K) {
-        let start = i * shard_len;
-        let end = start + shard_len;
-        if end <= copy {
-            *shard = Some(padded[start..end].to_vec());
+    let mut decoded = Vec::with_capacity(logical_len);
+    let (logical_stripes, logical_rem) = padded.as_chunks::<LOGICAL_STRIPE>();
+    debug_assert!(logical_rem.is_empty());
+    for (stripe_idx, (logical_stripe, parity_stripe)) in
+        logical_stripes.iter().zip(parity_stripes).enumerate()
+    {
+        let mut shards: Vec<Option<Vec<u8>>> = vec![None; FEC_M];
+        let data_off = stripe_idx * LOGICAL_STRIPE;
+        let (data_leaves, data_rem) = logical_stripe.as_chunks::<LEAF>();
+        debug_assert!(data_rem.is_empty());
+        for (i, (shard, chunk)) in shards.iter_mut().take(FEC_K).zip(data_leaves).enumerate() {
+            let start = data_off + i * LEAF;
+            let end = start + LEAF;
+            if end <= copy {
+                *shard = Some(chunk.to_vec());
+            } else if start < copy {
+                // Partial last data leaf: treat as erasure.
+                *shard = None;
+            }
         }
-    }
-    for j in 0..parity_shards {
-        let start = j * shard_len;
-        shards[FEC_K + j] = Some(parity_buf[start..start + shard_len].to_vec());
-    }
-
-    let rs = ReedSolomon::<Field>::new(FEC_K, FEC_M - FEC_K)?;
-    rs.reconstruct(&mut shards)?;
-    let mut decoded = Vec::new();
-    for s in shards.iter().take(FEC_K).flatten() {
-        decoded.extend_from_slice(s);
+        let (parity_leaves, par_rem) = parity_stripe.as_chunks::<LEAF>();
+        debug_assert!(par_rem.is_empty());
+        for (shard, chunk) in shards[FEC_K..].iter_mut().zip(parity_leaves) {
+            *shard = Some(chunk.to_vec());
+        }
+        reconstruct_stripe_logical(&mut shards, &mut decoded)?;
     }
     if decoded.len() < logical_len {
         return Err(CarbonadoError::ScrubbedLengthMismatch(
@@ -582,10 +730,7 @@ pub fn stream_decode_outboard<R: Read, W: Write>(
         ));
     }
     decoded.truncate(logical_len);
-    output
-        .write_all(&decoded)
-        .map_err(CarbonadoError::StdIoError)?;
-    Ok(decoded.len() as u64)
+    Ok(decoded)
 }
 
 fn fec_short_read_error() -> CarbonadoError {
@@ -595,59 +740,65 @@ fn fec_short_read_error() -> CarbonadoError {
     ))
 }
 
-/// Feed exactly `logical_len` bytes from `input` and emit one inboard FEC stripe.
-///
-/// Uses [`Read::take`] so callers cannot over-feed; returns an error on short read.
-pub fn feed_inboard_fec_stripe<R: Read>(
+/// Feed exactly `logical_len` bytes and emit every inboard FEC stripe.
+pub fn feed_inboard_fec_stripes<R: Read>(
     logical_len: usize,
     input: &mut R,
-) -> Result<(FecStripe, u32, u32), CarbonadoError> {
+) -> Result<(Vec<FecStripe>, u32, u32), CarbonadoError> {
     if logical_len == 0 {
         return Err(CarbonadoError::UnevenFecChunks);
     }
     let mut enc = FecInboardEncoder::new(logical_len)?;
     let mut limited = input.take(logical_len as u64);
-    enc.feed(&mut limited)?;
+    let mut stripes = enc.feed(&mut limited)?;
     if limited.limit() > 0 {
         return Err(fec_short_read_error());
     }
-    let stripe = enc.finish()?.ok_or(CarbonadoError::UnevenFecChunks)?;
-    Ok((stripe, enc.padding_len(), enc.chunk_len()))
+    stripes.extend(enc.finish()?);
+    if stripes.is_empty() {
+        return Err(CarbonadoError::UnevenFecChunks);
+    }
+    Ok((stripes, enc.padding_len(), enc.chunk_len()))
 }
 
-/// Buffer-path helper: encode entire logical blob in one stripe.
-fn take_stripe(enc: &mut FecInboardEncoder, input: &[u8]) -> Result<FecStripe, CarbonadoError> {
-    if let Some(stripe) = enc.feed(std::io::Cursor::new(input))? {
-        return Ok(stripe);
+/// Back-compat alias: same as [`feed_inboard_fec_stripes`].
+pub fn feed_inboard_fec_stripe<R: Read>(
+    logical_len: usize,
+    input: &mut R,
+) -> Result<(Vec<FecStripe>, u32, u32), CarbonadoError> {
+    feed_inboard_fec_stripes(logical_len, input)
+}
+
+/// Encode logical bytes into inboard stripes (4 KiB leaves, stripe order).
+pub fn encode_stripes(input: &[u8]) -> Result<(Vec<FecStripe>, u32, u32), CarbonadoError> {
+    if input.is_empty() {
+        return Ok((vec![], 0, 0));
     }
-    enc.finish()?.ok_or(CarbonadoError::UnevenFecChunks)
+    let mut enc = FecInboardEncoder::new(input.len())?;
+    let mut stripes = enc.feed(std::io::Cursor::new(input))?;
+    stripes.extend(enc.finish()?);
+    Ok((stripes, enc.padding_len(), enc.chunk_len()))
 }
 
 pub fn encode_inboard_buffer(input: &[u8]) -> Result<(Vec<u8>, u32, u32), CarbonadoError> {
     if input.is_empty() {
         return Ok((vec![], 0, 0));
     }
-    let mut enc = FecInboardEncoder::new(input.len())?;
-    let stripe = take_stripe(&mut enc, input)?;
-    let padding_len = enc.padding_len();
-    let chunk_len = enc.chunk_len();
+    let (stripes, padding_len, chunk_len) = encode_stripes(input)?;
     let mut out = Vec::new();
-    write_inboard_stripe(&stripe, &mut out)?;
+    for stripe in &stripes {
+        write_inboard_stripe(stripe, &mut out)?;
+    }
     Ok((out, padding_len, chunk_len))
 }
 
-/// Buffer-path helper: parity shards only for outboard FEC.
+/// Buffer-path helper: parity leaves only for outboard FEC / Adamantine.
 pub fn encode_outboard_parity_buffer(input: &[u8]) -> Result<(u32, u32, Vec<u8>), CarbonadoError> {
     if input.is_empty() {
         return Ok((0, 0, vec![]));
     }
-    let mut enc = FecInboardEncoder::new(input.len())?;
-    let stripe = take_stripe(&mut enc, input)?;
-    let padding_len = enc.padding_len();
-    let chunk_len = enc.chunk_len();
-    let mut parity = Vec::new();
-    write_outboard_parity(&stripe, &mut parity)?;
-    Ok((padding_len, chunk_len, parity))
+    let (stripes, padding_len, chunk_len) = encode_stripes(input)?;
+    Ok((padding_len, chunk_len, concat_parity_leaves(&stripes)))
 }
 
 #[cfg(test)]
@@ -658,19 +809,16 @@ mod tests {
     use crate::decoding::fec;
 
     #[test]
-    fn fec_stripe_geometry_matches_calc_padding_len() {
-        for logical_len in [1usize, 4095, 4096, 4097, 16 * 1024 - 1, 16 * 1024] {
+    fn fec_stripe_geometry_is_4kib_leaves() {
+        for logical_len in [1usize, 4095, 4096, 4097, 16 * 1024 - 1, 16 * 1024, 32_768] {
             let input: Vec<u8> = (0..logical_len).map(|i| (i % 251) as u8).collect();
             let (encoded, pl, cl) = encode_inboard_buffer(&input).expect("encode");
-            let (exp_pl, exp_cl) = calc_padding_len(logical_len);
+            let (exp_pl, _exp_cl) = calc_padding_len(logical_len);
             assert_eq!(pl, exp_pl, "padding len for {logical_len}");
-            assert_eq!(cl, exp_cl, "chunk len for {logical_len}");
-            if logical_len == 0 {
-                assert!(encoded.is_empty());
-                continue;
-            }
-            assert_eq!(encoded.len(), FEC_M * cl as usize);
-            assert_eq!(cl % SLICE_LEN, 0, "chunk_len must align to SLICE_LEN");
+            assert_eq!(cl, SLICE_LEN, "chunk_len is 4 KiB for {logical_len}");
+            let padded = logical_len + pl as usize;
+            let n_stripes = padded / FEC_STRIPE_LOGICAL_LEN as usize;
+            assert_eq!(encoded.len(), n_stripes * FEC_STRIPE_INBOARD_LEN as usize);
         }
     }
 
@@ -689,16 +837,27 @@ mod tests {
     }
 
     #[test]
+    fn two_stripes_place_second_data_after_first_parity() {
+        let input: Vec<u8> = (0..32_768).map(|i| (i % 251) as u8).collect();
+        let (encoded, _, cl) = encode_inboard_buffer(&input).expect("encode");
+        assert_eq!(cl, SLICE_LEN);
+        assert_eq!(encoded.len(), 2 * FEC_STRIPE_INBOARD_LEN as usize);
+        assert_eq!(&encoded[0..4096], &input[0..4096]);
+        assert_ne!(&encoded[16_384..20_480], &input[16_384..20_480]);
+        assert_eq!(&encoded[32_768..36_864], &input[16_384..20_480]);
+    }
+
+    #[test]
     fn fec_stripe_read_at_matches_flattened_stripe() {
         use positioned_io::ReadAt;
 
         let input: Vec<u8> = (0..12_288).map(|i| (i % 251) as u8).collect();
-        let mut enc = FecInboardEncoder::new(input.len()).expect("new");
-        let stripe = take_stripe(&mut enc, &input).expect("stripe");
+        let (stripes, _, _) = encode_stripes(&input).expect("stripes");
+        assert_eq!(stripes.len(), 1);
         let mut flat = Vec::new();
-        write_inboard_stripe(&stripe, &mut flat).expect("flatten");
+        write_inboard_stripe(&stripes[0], &mut flat).expect("flatten");
 
-        let view = FecStripeReadAt::new(&stripe);
+        let view = FecStripeReadAt::new(&stripes[0]);
         assert_eq!(view.len(), flat.len() as u64);
 
         let mut via_read_at = vec![0u8; flat.len()];
@@ -707,13 +866,20 @@ mod tests {
             .expect("read_at full stripe");
         assert_eq!(n, flat.len());
         assert_eq!(via_read_at, flat);
+    }
 
-        let mut tail = [0u8; 64];
-        let n = view
-            .read_at(flat.len() as u64 - 32, &mut tail)
-            .expect("read_at tail");
-        assert_eq!(n, 32);
-        assert_eq!(&tail[..32], &flat[flat.len() - 32..]);
+    #[test]
+    fn fec_stripes_read_at_matches_concatenated_body() {
+        use positioned_io::ReadAt;
+
+        let input: Vec<u8> = (0..32_768).map(|i| (i % 251) as u8).collect();
+        let (stripes, _, _) = encode_stripes(&input).expect("stripes");
+        let (flat, _, _) = encode_inboard_buffer(&input).expect("flat");
+        let view = FecStripesReadAt::new(&stripes);
+        let mut got = vec![0u8; flat.len()];
+        let n = view.read_at(0, &mut got).expect("read_at");
+        assert_eq!(n, flat.len());
+        assert_eq!(got, flat);
     }
 
     #[test]
@@ -736,7 +902,8 @@ mod tests {
     fn feed_inboard_fec_stripe_errors_on_short_read() {
         let input: Vec<u8> = (0..8192).map(|i| (i % 251) as u8).collect();
         let short = &input[..4096];
-        let err = feed_inboard_fec_stripe(input.len(), &mut Cursor::new(short)).expect_err("short");
+        let err =
+            feed_inboard_fec_stripes(input.len(), &mut Cursor::new(short)).expect_err("short");
         assert!(
             matches!(
                 err,
@@ -748,22 +915,27 @@ mod tests {
 
     #[test]
     fn fec_incremental_feed_matches_single_buffer_feed() {
-        let input: Vec<u8> = (0..12_288).map(|i| (i % 251) as u8).collect();
+        let input: Vec<u8> = (0..32_768).map(|i| (i % 251) as u8).collect();
         let (buf_encoded, _, _) = encode_inboard_buffer(&input).expect("buffer");
 
         let mut enc = FecInboardEncoder::new(input.len()).expect("new");
         let mut off = 0usize;
+        let mut stripes = Vec::new();
         while off < input.len() {
             let step = 512.min(input.len() - off);
-            let _ = enc
-                .feed(Cursor::new(&input[off..off + step]))
-                .expect("feed");
+            stripes.extend(
+                enc.feed(Cursor::new(&input[off..off + step]))
+                    .expect("feed"),
+            );
             off += step;
         }
-        let stripe = enc.finish().expect("finish").expect("final stripe");
+        stripes.extend(enc.finish().expect("finish"));
         let mut incremental = Vec::new();
-        write_inboard_stripe(&stripe, &mut incremental).expect("write");
+        for stripe in &stripes {
+            write_inboard_stripe(stripe, &mut incremental).expect("write");
+        }
         assert_eq!(incremental, buf_encoded);
+        assert_eq!(stripes.len(), 2);
     }
 
     #[test]
@@ -772,10 +944,9 @@ mod tests {
 
         let input: Vec<u8> = (0..8192).map(|i| (i % 251) as u8).collect();
         let (pl, chunk_len, parity) = encode_outboard_parity_buffer(&input).expect("parity");
-        // Outboard bare main is the pre-FEC logical body; parity sidecar holds RS parity shards.
         let decoded = fec_with_parity(&input, &parity, pl).expect("fec outboard");
         assert_eq!(decoded, input);
-        assert_eq!(chunk_len % SLICE_LEN, 0);
+        assert_eq!(chunk_len, SLICE_LEN);
     }
 
     #[test]
@@ -828,49 +999,36 @@ mod tests {
     }
 
     #[test]
-    fn fec_with_parity_corrupt_parity_does_not_recover_original() {
-        use crate::decoding::fec_with_parity;
-
-        let input: Vec<u8> = (0..16_384).map(|i| (i % 251) as u8).collect();
-        let (pl, chunk_len, parity) = encode_outboard_parity_buffer(&input).expect("parity");
-        let chunk = chunk_len as usize;
-        let mut bad_parity = parity.clone();
-        for j in 0..3 {
-            bad_parity[j * chunk..(j + 1) * chunk].fill(0xFF);
+    fn stripe_data_and_parity_lens() {
+        let input: Vec<u8> = (0..32_768).map(|i| (i % 251) as u8).collect();
+        let (stripes, _, _) = encode_stripes(&input).expect("stripes");
+        assert_eq!(stripes.len(), 2);
+        for stripe in &stripes {
+            let (data, parity) = stripe_data_and_parity_leaves(stripe);
+            assert_eq!(data.len(), FEC_K);
+            assert_eq!(parity.len(), FEC_M - FEC_K);
+            assert!(data.iter().all(|l| l.len() == SLICE_LEN as usize));
+            assert!(parity.iter().all(|l| l.len() == SLICE_LEN as usize));
         }
-        // RS reconstruct treats present-but-corrupt shards as valid; output must differ.
-        let decoded = fec_with_parity(&[], &bad_parity, pl).expect("reconstruct returns Ok");
-        assert_ne!(decoded, input);
-    }
-
-    #[test]
-    fn fec_with_parity_empty_parity_with_nonempty_input_errors() {
-        use crate::decoding::fec_with_parity;
-        use crate::error::CarbonadoError;
-
-        let input: Vec<u8> = (0..4096).map(|i| (i % 251) as u8).collect();
-        let (pl, _, _) = encode_outboard_parity_buffer(&input).expect("parity");
-        let err = fec_with_parity(&input, &[], pl).unwrap_err();
-        assert!(matches!(
-            err,
-            CarbonadoError::UnevenFecChunks
-                | CarbonadoError::FecError(_)
-                | CarbonadoError::ScrubbedLengthMismatch(0, _)
-        ));
+        let data = concat_data_leaves(&stripes);
+        assert_eq!(data, input);
+        assert_eq!(
+            concat_parity_leaves(&stripes).len(),
+            2 * (FEC_M - FEC_K) * SLICE_LEN as usize
+        );
     }
 
     #[test]
     fn fec_inboard_write_at_roundtrip_matches_decoding_fec() {
         use positioned_io::WriteAt;
 
-        let input: Vec<u8> = (0..12_288).map(|i| (i % 251) as u8).collect();
+        let input: Vec<u8> = (0..32_768).map(|i| (i % 251) as u8).collect();
         let (encoded, pl, _) = encode_inboard_buffer(&input).expect("encode");
         let content_len = encoded.len() as u64;
         let expected = fec(&encoded, pl).expect("buffer fec");
 
         let mut sink = FecInboardWriteAt::new(content_len, pl).expect("new");
-        // Out-of-order shard-sized writes (mirrors Bao leaf ordering).
-        let shard_len = encoded.len() / FEC_M;
+        let shard_len = SLICE_LEN as usize;
         for (i, shard) in encoded.chunks(shard_len).enumerate() {
             let off = (i * shard_len) as u64;
             sink.write_at(off, shard).expect("write_at shard");
@@ -886,7 +1044,7 @@ mod tests {
         let input: Vec<u8> = (0..4096).map(|i| (i % 251) as u8).collect();
         let (encoded, pl, _) = encode_inboard_buffer(&input).expect("encode");
         let content_len = encoded.len() as u64;
-        let shard_len = encoded.len() / FEC_M;
+        let shard_len = SLICE_LEN as usize;
 
         let mut sink = FecInboardWriteAt::new(content_len, pl).expect("new");
         sink.write_at(0, &encoded[..shard_len])

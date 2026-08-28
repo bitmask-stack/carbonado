@@ -48,8 +48,34 @@ pub fn stream_decode_outboard_buffer(
     format: u8,
     explicit_nonce: Option<[u8; 16]>,
 ) -> Result<Vec<u8>, CarbonadoError> {
+    stream_decode_outboard_buffer_with_dict(
+        master_key,
+        hash,
+        main,
+        verification_outboard,
+        fec_parity,
+        padding,
+        format,
+        explicit_nonce,
+        None,
+    )
+}
+
+/// Outboard buffer decode with an optional RFC 8878 dictionary from the Adamantine bundle.
+#[allow(clippy::too_many_arguments)]
+pub fn stream_decode_outboard_buffer_with_dict(
+    master_key: &[u8],
+    hash: &[u8],
+    main: &[u8],
+    verification_outboard: Option<&[u8]>,
+    fec_parity: Option<&[u8]>,
+    padding: u32,
+    format: u8,
+    explicit_nonce: Option<[u8; 16]>,
+    dict: Option<&[u8]>,
+) -> Result<Vec<u8>, CarbonadoError> {
     let mut out = Vec::new();
-    stream_decode_outboard(
+    stream_decode_outboard_with_dict(
         master_key,
         hash,
         Cursor::new(main),
@@ -59,6 +85,7 @@ pub fn stream_decode_outboard_buffer(
         format,
         explicit_nonce,
         &mut out,
+        dict,
     )?;
     Ok(out)
 }
@@ -287,12 +314,12 @@ fn stream_decode_post_preprocess_seek<R: Read + Seek, W: Write>(
             let mut decrypted = SeekableSpool::new()?;
             stream_decrypt_seek(master_key, input, &mut decrypted, ct_len)?;
             decrypted.rewind()?;
-            crate::stream::compress::stream_decompress(decrypted, output)
+            crate::stream::compress::stream_decompress_with_dict(decrypted, output, None)
         } else {
             stream_decrypt_seek(master_key, input, output, ct_len)
         }
     } else if fmt.contains(Format::Compression) {
-        crate::stream::compress::stream_decompress(input, output)
+        crate::stream::compress::stream_decompress_with_dict(input, output, None)
     } else if let Some(len) = body_len {
         let mut limited = input.take(len);
         copy(&mut limited, output).map_err(CarbonadoError::StdIoError)
@@ -316,6 +343,34 @@ pub fn stream_decode_outboard<M: Read, O: Read, P: Read, W: Write>(
     explicit_nonce: Option<[u8; 16]>,
     output: &mut W,
 ) -> Result<u64, CarbonadoError> {
+    stream_decode_outboard_with_dict(
+        master_key,
+        hash,
+        main,
+        verification_outboard,
+        fec_parity,
+        padding,
+        format,
+        explicit_nonce,
+        output,
+        None,
+    )
+}
+
+/// Outboard decode with an optional RFC 8878 dictionary from the Adamantine bundle.
+#[allow(clippy::too_many_arguments)]
+pub fn stream_decode_outboard_with_dict<M: Read, O: Read, P: Read, W: Write>(
+    master_key: &[u8],
+    hash: &[u8],
+    main: M,
+    verification_outboard: Option<O>,
+    fec_parity: Option<P>,
+    padding: u32,
+    format: u8,
+    explicit_nonce: Option<[u8; 16]>,
+    output: &mut W,
+    dict: Option<&[u8]>,
+) -> Result<u64, CarbonadoError> {
     stream_decode_outboard_s4(
         master_key,
         hash,
@@ -326,6 +381,7 @@ pub fn stream_decode_outboard<M: Read, O: Read, P: Read, W: Write>(
         format,
         explicit_nonce,
         output,
+        dict,
     )
 }
 
@@ -341,6 +397,7 @@ fn stream_decode_outboard_s4<M: Read, O: Read, P: Read, W: Write>(
     format: u8,
     explicit_nonce: Option<[u8; 16]>,
     output: &mut W,
+    dict: Option<&[u8]>,
 ) -> Result<u64, CarbonadoError> {
     let fmt = Format::from(format);
     let mut after_bao_spool = SeekableSpool::new()?;
@@ -401,7 +458,7 @@ fn stream_decode_outboard_s4<M: Read, O: Read, P: Read, W: Write>(
                     Some(ct_len),
                 )?;
                 decrypted.rewind()?;
-                crate::stream::compress::stream_decompress(decrypted, output)
+                crate::stream::compress::stream_decompress_with_dict(decrypted, output, dict)
             } else {
                 stream_decrypt_with_nonce_seek(
                     master_key,
@@ -422,13 +479,13 @@ fn stream_decode_outboard_s4<M: Read, O: Read, P: Read, W: Write>(
                     Some(ct_len),
                 )?;
                 decrypted.rewind()?;
-                crate::stream::compress::stream_decompress(decrypted, output)
+                crate::stream::compress::stream_decompress_with_dict(decrypted, output, dict)
             } else {
                 stream_decrypt_seek(master_key, &mut after_fec_spool, output, Some(ct_len))
             }
         }
     } else if fmt.contains(Format::Compression) {
-        crate::stream::compress::stream_decompress(after_fec_spool, output)
+        crate::stream::compress::stream_decompress_with_dict(after_fec_spool, output, dict)
     } else {
         copy(&mut after_fec_spool, output).map_err(CarbonadoError::StdIoError)
     }
@@ -461,7 +518,41 @@ pub fn stream_decrypt_header_path<R: Read + Seek, W: Write>(
             Some(ct_len),
         )?;
         decrypted.rewind()?;
-        crate::stream::compress::stream_decompress(decrypted, output)
+        crate::stream::compress::stream_decompress_with_dict(decrypted, output, None)
+    } else {
+        stream_decrypt_with_nonce_seek(master_key, nonce, input, output, Some(ct_len))
+    }
+}
+
+/// Header-path decrypt then optional zstd decompress with dictionary.
+pub fn stream_decrypt_header_path_with_dict<R: Read + Seek, W: Write>(
+    master_key: &[u8],
+    nonce: [u8; 16],
+    mut input: R,
+    format: u8,
+    output: &mut W,
+    dict: Option<&[u8]>,
+) -> Result<u64, CarbonadoError> {
+    let fmt = Format::from(format);
+    let ct_len = input
+        .seek(SeekFrom::End(0))
+        .map_err(CarbonadoError::StdIoError)?
+        .saturating_sub(64);
+    input
+        .seek(SeekFrom::Start(0))
+        .map_err(CarbonadoError::StdIoError)?;
+
+    if fmt.contains(Format::Compression) {
+        let mut decrypted = SeekableSpool::new()?;
+        stream_decrypt_with_nonce_seek(
+            master_key,
+            nonce,
+            &mut input,
+            &mut decrypted,
+            Some(ct_len),
+        )?;
+        decrypted.rewind()?;
+        crate::stream::compress::stream_decompress_with_dict(decrypted, output, dict)
     } else {
         stream_decrypt_with_nonce_seek(master_key, nonce, input, output, Some(ct_len))
     }

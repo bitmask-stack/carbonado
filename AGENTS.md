@@ -833,6 +833,7 @@ Offset  Size  Field
 
 **Directory archive layout (fixed v1.0):**
 - **Catalog:** inboard headered `{catalog_root}.adam.c14` or `.adam.c15` (`CARBONADO20\n` + body); no `.out`/`.par`
+- **Single-file (0.7.1):** inboard is one `{hash}.adam.cXX` (Header + body + optional Adamantine after `encoded_len`). Outboard is `{hash}.cXX` + `{hash}.adam.cXX` sidecar starting with `ADAMANTINE10\n`. Same-stem pair is not a directory catalog. Zstd level is encoder input (no silent default 20). Dict lives in the Adamantine bundle, not a `.dict` sibling.
 - **Segments:** bare mains `{seg_root}.c12`/`.c14`/`.c13`/`.c15` only; verification outboard + FEC parity centralized in Adam payload bundle
 - **No** directory `.out`, `.par`, or `.ots` sidecar files
 - **Scrub:** directory segments are FEC-capable (c12–c15). Slice verification + FEC parity from the centralized bundle; `scrub_outboard` recovers corrupt bare mains within the RS 4/8 budget (≤4 shard taints). `MissingFecParity` when `Format::Fec` is set, `main_len > 0`, and `fec_parity_len` is zero (zero-byte mains use empty FEC slice at decode).

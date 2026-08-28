@@ -23,9 +23,10 @@ use carbonado::stream::parallel::{
     ParallelConfig, encode_rs_parity_serial, encode_rs_parity_with_config,
     rs_parity_parallelism_active,
 };
-use carbonado::stream::{stream_decode_buffer, stream_encode_buffer};
-use carbonado::{decode, encode, scrub, structs::Encoded};
+use carbonado::stream::stream_decode_buffer;
+use carbonado::{decode, scrub, structs::Encoded};
 use common::corruption::{InboardShardLayout, flip_byte};
+use common::{encode, stream_encode_buffer};
 use reed_solomon_erasure::galois_8::ReedSolomon;
 
 use common::inboard_parity::{assert_inboard_body_roundtrip, preprocess_and_body};
@@ -60,15 +61,18 @@ fn rs_parity_parallel_matches_serial_reference() {
     for logical_len in [4096usize, 16_384, 65_536, 262_144] {
         let input = patterned(logical_len);
         let mut enc = FecInboardEncoder::new(logical_len).expect("new");
-        enc.feed(Cursor::new(&input)).expect("feed");
-        let stripe = enc.finish().expect("finish").expect("stripe");
-        let chunk_len = stripe.chunk_len as usize;
-
-        let serial_shards = serial_parity_from_data_shards(&rs, &stripe.shards[..FEC_K], chunk_len);
-        assert_eq!(
-            stripe.shards, serial_shards,
-            "parity shards must match serial reference for logical_len={logical_len}"
-        );
+        let mut stripes = enc.feed(Cursor::new(&input)).expect("feed");
+        stripes.extend(enc.finish().expect("finish"));
+        assert!(!stripes.is_empty(), "logical_len={logical_len}");
+        for stripe in &stripes {
+            let chunk_len = stripe.chunk_len as usize;
+            let serial_shards =
+                serial_parity_from_data_shards(&rs, &stripe.shards[..FEC_K], chunk_len);
+            assert_eq!(
+                stripe.shards, serial_shards,
+                "parity shards must match serial reference for logical_len={logical_len}"
+            );
+        }
     }
 }
 
@@ -82,19 +86,24 @@ fn stripe_boundary_parallel_fec_matches_serial_reference() {
         let (encoded_parallel, pl, cl) = encode_inboard_buffer(&input).expect("parallel encode");
 
         let mut enc = FecInboardEncoder::new(logical_len).expect("new");
-        enc.feed(Cursor::new(&input)).expect("feed");
-        let stripe = enc.finish().expect("finish").expect("stripe");
-        let serial_shards =
-            serial_parity_from_data_shards(&rs, &stripe.shards[..FEC_K], stripe.chunk_len as usize);
+        let mut stripes = enc.feed(Cursor::new(&input)).expect("feed");
+        stripes.extend(enc.finish().expect("finish"));
         let mut encoded_serial = Vec::new();
-        carbonado::stream::fec::write_inboard_stripe(
-            &FecStripe {
-                shards: serial_shards,
-                chunk_len: cl,
-            },
-            &mut encoded_serial,
-        )
-        .expect("flatten serial");
+        for stripe in &stripes {
+            let serial_shards = serial_parity_from_data_shards(
+                &rs,
+                &stripe.shards[..FEC_K],
+                stripe.chunk_len as usize,
+            );
+            carbonado::stream::fec::write_inboard_stripe(
+                &FecStripe {
+                    shards: serial_shards,
+                    chunk_len: cl,
+                },
+                &mut encoded_serial,
+            )
+            .expect("flatten serial");
+        }
 
         assert_eq!(
             encoded_parallel, encoded_serial,
@@ -147,19 +156,21 @@ fn outboard_parity_parallel_matches_serial_buffer_path() {
     let (pl, cl, parity_parallel) = encode_outboard_parity_buffer(&input).expect("parallel path");
 
     let mut enc = FecInboardEncoder::new(input.len()).expect("new");
-    enc.feed(Cursor::new(&input)).expect("feed");
-    let stripe = enc.finish().expect("finish").expect("stripe");
-    let serial_shards =
-        serial_parity_from_data_shards(&rs, &stripe.shards[..FEC_K], stripe.chunk_len as usize);
+    let mut stripes = enc.feed(Cursor::new(&input)).expect("feed");
+    stripes.extend(enc.finish().expect("finish"));
     let mut parity_serial = Vec::new();
-    write_outboard_parity(
-        &FecStripe {
-            shards: serial_shards,
-            chunk_len: cl,
-        },
-        &mut parity_serial,
-    )
-    .expect("write parity");
+    for stripe in &stripes {
+        let serial_shards =
+            serial_parity_from_data_shards(&rs, &stripe.shards[..FEC_K], stripe.chunk_len as usize);
+        write_outboard_parity(
+            &FecStripe {
+                shards: serial_shards,
+                chunk_len: cl,
+            },
+            &mut parity_serial,
+        )
+        .expect("write parity");
+    }
 
     assert_eq!(parity_parallel, parity_serial, "outboard parity bytes");
     assert_eq!(pl, enc.padding_len());
@@ -224,8 +235,9 @@ fn parallel_config_max_threads_preserves_parity_bytes() {
     let input = patterned(16_384);
 
     let mut enc = FecInboardEncoder::new(input.len()).expect("new");
-    enc.feed(Cursor::new(&input)).expect("feed");
-    let stripe = enc.finish().expect("finish").expect("stripe");
+    let mut stripes = enc.feed(Cursor::new(&input)).expect("feed");
+    stripes.extend(enc.finish().expect("finish"));
+    let stripe = stripes.into_iter().next().expect("stripe");
     let chunk_len = stripe.chunk_len as usize;
     let data = stripe.shards[..FEC_K].to_vec();
 

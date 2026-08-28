@@ -142,7 +142,7 @@ Receiver:
   - Bao ordering independent of datagram arrival order
 ```
 
-50% packet loss ≈ 50% shard loss at the **chaos-injection coordinates** (`InboardShardLayout` / `erase_shards`) — within RS 4/8 if losses are spread (not concentrated on >4 shards). True inboard wire is Bao-wrapped; `tests/udp_fec_sim.rs` documents the approximate model explicitly. `fec_chaos.rs` models distributed knockout at the same coordinates.
+50% packet loss ≈ 50% RS **symbol** loss (`erase_shards` / `inboard_symbol_payload`: every 4 KiB leaf with that symbol, not a tall column). That stays within RS 4/8 if losses stay at ≤4 of 8 symbols per stripe. True inboard wire is Bao-wrapped; `tests/udp_fec_sim.rs` is the datagram model. `fec_chaos.rs` knocks out the same leaves.
 
 ## JBOD / RAID replacement
 

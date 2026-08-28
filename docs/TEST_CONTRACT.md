@@ -56,7 +56,8 @@ Helpers under `tests/common/` are not separate contract files; they support the 
 | **parallel** | `serial_fec_path.rs` | Serial FEC encoder vs buffer path |
 | **g9_goldens** | `g9_cross_backend.rs` | Rust decode of committed Lean AOT goldens + rust self-roundtrip (`just test-g9`) |
 | **determinism** | `determinism_roundtrip.rs` | codecode (EDE) + decodec (DED); same-engine compress + directory |
-| **zstd** | `zstd_frame_params.rs` | Frame flags vs Lean AOT goldens (honest descriptor residual) |
+| **zstd** | `zstd_frame_params.rs` | Frame flags vs Lean AOT goldens (honest descriptor residual); explicit level, no library default |
+| **zstd** | `adam_zstd.rs` | Required zstd level; inboard/outboard Adamantine file counts; dict ID in bundle; layout detect |
 | **rkyv** | `rkyv_golden_lock.rs` | Directory catalog rkyv goldens |
 
 Removed 2026-08-24: `lean_backend_smoke.rs`, `lean_backend_phase2.rs`, `lean_backend_phase3.rs`, `lean_backend_phase4.rs` (they existed only for Cargo `backend-lean` via C).

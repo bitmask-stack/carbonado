@@ -2,9 +2,9 @@
 name = "carbonado"
 edition = "2024"
 rust-version = "1.98.0"
-version = "0.7.0"
+version = "0.7.1"
 license = "MIT"
-description = "An apocalypse-resistant data storage format for the truly paranoid. Fully symmetric AES-256-CTR + HMAC-SHA512 (EtM) container. Callers supply high-entropy master keys; passphrase KDF (e.g. Argon2id) is caller responsibility. SLH-DSA signatures are provided only as sidecars (via `bitcoinpqc`). Clean cryptographic break from ECIES — v1 encrypted archives require external migration."
+description = "Apocalypse-resistant archival format for consensus-critical data. One portable file: AES-256-CTR + HMAC-SHA512, keyed Bao, Reed-Solomon 4/8, optional zstd, SLH-DSA sidecars."
 documentation = "https://docs.rs/carbonado"
 homepage = "https://github.com/bitmask-stack/carbonado"
 repository = "https://github.com/bitmask-stack/carbonado.git"
@@ -122,6 +122,10 @@ harness = false
 name = "parallel_bench"
 harness = false
 required-features = ["parallel"]
+
+[[bench]]
+name = "fec_stripe_bench"
+harness = false
 
 # Primary CLI: `cargo install carbonado` or `cargo install --path . --bin carbonado`
 [[bin]]

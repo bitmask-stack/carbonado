@@ -1,7 +1,8 @@
 //! RFC 8878 / `ref/zstd/doc/zstd_compression_format.md` frame-header parser.
 //!
 //! Mirrors Lean `Carbonado.Compress.parseZstdFrameHeader` so Rust tests can
-//! assert the same parameter bits the spec names.
+//! assert the same parameter bits the spec names, including Dictionary_ID when
+//! a dict is supplied (flag 0 when not).
 
 use carbonado::constants::ZSTD_MAGIC;
 

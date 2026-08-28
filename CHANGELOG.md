@@ -2,6 +2,15 @@
 
 All notable changes to the Carbonado crate and `carbonado` CLI are documented here.
 
+## [0.7.1] — 2026-08-27
+
+### Changed
+
+- **Zstd level is encoder input.** Compression encode fails with `MissingZstdLevel` unless an explicit level is supplied. There is no silent library default of 20. Tests and the CLI may pass `20` explicitly (`--zstd-level`).
+- **Single-file Adamantine sidecar.** Outboard writes exactly `{hash}.cXX` + `{hash}.adam.cXX` (`ADAMANTINE10\n`). Inboard writes exactly one `{hash}.adam.cXX` (Header + body + Adamantine after `encoded_len`). No `.par` or `.dict` siblings. Same-stem `.cXX` + `.adam.cXX` is single-file outboard, not a directory catalog.
+- **FilepackManifest v3.** One bundle blob with keyed Bao outboard, RS parity (empty if no FEC), and RFC 8878 dictionary (empty if none). `SegmentRef` adds `dict_offset` / `dict_len`. Until 1.0 there is no dual-read of old `.out`/`.par` companions.
+- **Optional `--zstd-dict`.** Dictionary bytes are stored in the Adamantine dict section. Frame `Dictionary_ID` must match. Decode with a named ID and empty dict section fails (`MissingZstdDictionary`).
+
 ## [0.7.0] — 2026-08-24
 
 First crates.io release of the v2 format (`CARBONADO20\n`). Last published crate was **0.6.0** (v1/ECIES). In-tree `2.0.0` / `2.1.0` numbers were never published.

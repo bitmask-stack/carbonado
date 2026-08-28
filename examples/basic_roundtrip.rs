@@ -8,7 +8,9 @@
 //! - Never reuse a master key across unrelated datasets without rotation.
 //! - See AGENTS.md §2 for full invariants, nonce rules, and recommendations.
 
-use carbonado::{constants, decode, decode_outboard, encode, encode_outboard};
+use carbonado::{
+    ZstdEncode, constants, decode, decode_outboard, encode_outboard, encode_with_zstd,
+};
 use getrandom::getrandom;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -28,7 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Using the low-level encode/decode API here for the demo.
     // Most production code will prefer the high-level carbonado::file API.
-    let encoded = encode(&master_key, plaintext, level)?;
+    let encoded = encode_with_zstd(&master_key, plaintext, level, None, &ZstdEncode::level(20))?;
 
     println!("Encoded size: {} bytes", encoded.0.len());
     println!(

@@ -36,7 +36,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cmd.as_str() {
         "encode" => {
-            let archive = encode_directory(&master, &input, &output)?;
+            let archive =
+                encode_directory(&master, &input, &output, &carbonado::ZstdEncode::level(20))?;
             let root_hex: String = archive
                 .catalog_bao_root
                 .iter()

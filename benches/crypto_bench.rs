@@ -139,6 +139,7 @@ fn bench_encode_directory(c: &mut Criterion) {
                 black_box(&master_key),
                 black_box(&input),
                 black_box(&out_base),
+                black_box(&carbonado::ZstdEncode::level(20)),
             )
             .unwrap();
             black_box(archive.entry_count);

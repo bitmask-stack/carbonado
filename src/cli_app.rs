@@ -20,11 +20,13 @@ use clap::{Parser, Subcommand};
                   plaintext at the path from `carbonado key path` (override: CARBONADO_MNEMONIC_PATH). \
                   Later encode/decode reuse it unless `--master` is given. Decode never auto-generates.\n\n\
                   ARTIFACTS:\n  \
-                  Single-file default: inboard headered `{hash}.c{fmt:02x}` (format 14 → `.c0e`).\n  \
-                  `--outboard`: bare main + optional `.out`/`.par` sidecars (single-file only).\n  \
+                  Single-file inboard: one `{hash}.adam.c{fmt:02x}` (format 14 → `.adam.c0e`).\n  \
+                  `--outboard`: `{hash}.c{fmt:02x}` bare + `{hash}.adam.c{fmt:02x}` sidecar \
+                  (starts with ADAMANTINE10\\n). No `.par` / `.dict` siblings.\n  \
                   Directory: inboard Adamantine 1.0 catalog `.adam.c14` (or `.adam.c15` with \
                   `--encrypted`) and heterogeneous bare segment mains (c12/c14 or c13/c15). Output \
-                  defaults to `{input}-archive/`.\n\n\
+                  defaults to `{input}-archive/`.\n  \
+                  `--zstd-level` is required when the Compression bit is set (including default format 14).\n\n\
                   See `carbonado <command> --help` for per-command options.",
     after_help = "EXAMPLES:\n  \
                   carbonado encode secret.bin --format 15\n  \
@@ -56,12 +58,18 @@ pub enum Commands {
         /// Format level 0–15 (default 14 = public verifiable; odd values = encrypted)
         #[arg(short, long, default_value_t = 14, value_name = "LEVEL")]
         format: u8,
-        /// Single-file only: bare main + `.out`/`.par` sidecars (default single-file is inboard).
+        /// Single-file only: `{hash}.cXX` + `{hash}.adam.cXX` sidecar (default single-file is inboard).
         #[arg(long)]
         outboard: bool,
         /// Directory only: encrypted catalog c15 and segment formats c13/c15 (auto-creates BIP39 seed if needed)
         #[arg(long)]
         encrypted: bool,
+        /// Zstd compression level (required when the Compression bit is set)
+        #[arg(long, value_name = "LEVEL")]
+        zstd_level: Option<i32>,
+        /// Optional RFC 8878 zstd dictionary file (bytes stored in the Adamantine dict section)
+        #[arg(long, value_name = "PATH")]
+        zstd_dict: Option<PathBuf>,
         /// 32-byte master key as 64 hex chars (overrides stored BIP39 seed)
         #[arg(long, value_name = "HEX")]
         master: Option<String>,
@@ -85,15 +93,9 @@ pub enum Commands {
         /// Bare outboard only: format level 0–15 when not encoded in filename (rejected on headered inboard)
         #[arg(short, long, value_name = "LEVEL")]
         format: Option<u8>,
-        /// Bare outboard only: FEC padding in bytes [default: 0, auto when `.par` sidecar present]
+        /// Bare outboard only: FEC padding in bytes [default: 0, auto from Adamantine sidecar]
         #[arg(long, default_value = "0", value_name = "BYTES")]
         padding: u32,
-        /// Bare outboard only: path to verification `.out` sidecar [default: sibling of input]
-        #[arg(long, alias = "bao-outboard", value_name = "PATH")]
-        verification_outboard: Option<PathBuf>,
-        /// Bare outboard only: path to FEC `.par` sidecar [default: sibling of input]
-        #[arg(long, value_name = "PATH")]
-        fec_parity: Option<PathBuf>,
     },
 }
 

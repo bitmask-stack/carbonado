@@ -1,6 +1,6 @@
 //! CBOR filepack ↔ rkyv FilepackManifest interop (Phase 4).
 //!
-//! Cross-tool contract: rkyv `FilepackManifest` v2 wire inside Adamantine 1.0 plus
+//! Cross-tool contract: rkyv `FilepackManifest` v3 wire inside Adamantine 1.0 plus
 //! Adamantine decimal on-disk segment naming (`{root}.c12` / `.c14` / `.adam.c14` / `.adam.c15`).
 
 use carbonado::{
@@ -46,7 +46,13 @@ fn adam_catalog_path(enc_dir: &Path, root: &[u8; 32], format: u8) -> PathBuf {
 }
 
 fn encode_samples_directory(enc_dir: &Path) -> DirectoryArchive {
-    encode_directory(&ZERO_KEY, &samples_dir(), enc_dir).expect("encode_directory")
+    encode_directory(
+        &ZERO_KEY,
+        &samples_dir(),
+        enc_dir,
+        &carbonado::ZstdEncode::level(20),
+    )
+    .expect("encode_directory")
 }
 
 fn load_manifest_from_catalog(enc_dir: &Path, catalog_root: &[u8; 32]) -> FilepackManifest {
@@ -108,6 +114,8 @@ fn mock_segment_ref(main_len: u64, chunk_index: u32, root_byte: u8) -> SegmentRe
         verification_outboard_len: ver_len,
         fec_parity_offset: ver_len,
         fec_parity_len: fec_len,
+        dict_offset: 0,
+        dict_len: 0,
     }
 }
 
@@ -531,6 +539,8 @@ fn dump_interop_golden_fixture_values() {
     let enc_dir = tempdir("dump_golden");
     let (_archive, manifest) = encode_samples_manifest(&enc_dir);
     let rkyv_bytes = manifest.to_bytes().expect("to_bytes");
+    eprintln!("catalog_bao_root={}", hex32(&_archive.catalog_bao_root));
+    eprintln!("manifest_version={}", manifest.version);
     eprintln!("manifest_rkyv_len={}", rkyv_bytes.len());
     eprintln!("manifest_rkyv_sha256={}", sha256_hex(&rkyv_bytes));
     let catalog_path = enc_dir.join(format!("{}.adam.c14", hex32(&_archive.catalog_bao_root)));
@@ -546,12 +556,14 @@ fn dump_interop_golden_fixture_values() {
         );
         for seg in &entry.segments {
             eprintln!(
-                "  chunk {} ver_off={} ver_len={} fec_off={} fec_len={}",
+                "  chunk {} ver_off={} ver_len={} fec_off={} fec_len={} dict_off={} dict_len={}",
                 seg.chunk_index,
                 seg.verification_outboard_offset,
                 seg.verification_outboard_len,
                 seg.fec_parity_offset,
-                seg.fec_parity_len
+                seg.fec_parity_len,
+                seg.dict_offset,
+                seg.dict_len
             );
         }
     }

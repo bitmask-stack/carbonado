@@ -5,14 +5,16 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use bao::Hash;
 
 use crate::{
-    constants::{FEC_M, Format, SLICE_LEN},
+    constants::{FEC_K, FEC_M, Format, SLICE_LEN},
     error::CarbonadoError,
     stream::{
-        compress::stream_compress,
+        compress::{ZstdEncode, require_zstd_level, stream_compress_with_dict},
         crypto_stream::{
             stream_encrypt, stream_encrypt_embedded_with_nonce, stream_encrypt_with_nonce_seek,
         },
-        fec::{FecStripeReadAt, feed_inboard_fec_stripe, write_inboard_stripe},
+        fec::{
+            FecStripesReadAt, feed_inboard_fec_stripes, write_inboard_stripe, write_outboard_parity,
+        },
         spool::SeekableSpool,
     },
     structs::{EncodeInfo, OutboardEncoded},
@@ -21,7 +23,7 @@ use crate::{
 use crate::stream::bao::stream_verification_outboard;
 use crate::stream::{
     bao::{verification_inboard_buffer, verification_outboard_buffer},
-    compress::compress_buffer,
+    compress::{compress_buffer, compress_buffer_with_dict},
     crypto_stream::stream_encrypt_with_nonce,
     fec::{encode_inboard_buffer, encode_outboard_parity_buffer},
 };
@@ -57,6 +59,7 @@ pub struct PreprocessStats {
 /// all-zero). When `None`, draw a CSPRNG nonce (production).
 /// Prefer CSPRNG for live archives; fixed nonces are for tests/determinism only — see
 /// AGENTS §2.1.4 (nonce uniqueness; reuse under the same master is catastrophic).
+#[allow(clippy::too_many_arguments)]
 pub fn stream_preprocess<R: Read, W: Read + Write + Seek>(
     master_key: &[u8],
     format: Format,
@@ -65,17 +68,19 @@ pub fn stream_preprocess<R: Read, W: Read + Write + Seek>(
     payload_nonce: &mut [u8; 16],
     header_path_encrypt: bool,
     fixed_nonce: Option<[u8; 16]>,
+    zstd: &ZstdEncode,
 ) -> Result<PreprocessStats, CarbonadoError> {
     body_sink
         .seek(std::io::SeekFrom::Start(0))
         .map_err(CarbonadoError::StdIoError)?;
     let mut input_len = 0u64;
     if format.contains(Format::Compression) {
+        let level = require_zstd_level(zstd)?;
         let mut counter = CountingReader {
             inner: &mut input,
             count: 0,
         };
-        stream_compress(&mut counter, &mut *body_sink)?;
+        stream_compress_with_dict(&mut counter, &mut *body_sink, level, zstd.dict.as_deref())?;
         input_len = counter.count;
         body_sink.rewind().map_err(CarbonadoError::StdIoError)?;
     } else {
@@ -149,6 +154,7 @@ pub fn stream_preprocess<R: Read, W: Read + Write + Seek>(
 
 /// [`stream_preprocess`] for [`SeekableSpool`] sinks — encrypt replace uses
 /// [`SeekableSpool::overwrite_from`] so file size matches ciphertext (no stale tail bytes).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn stream_preprocess_spool<R: Read>(
     master_key: &[u8],
     format: Format,
@@ -157,15 +163,17 @@ pub(crate) fn stream_preprocess_spool<R: Read>(
     payload_nonce: &mut [u8; 16],
     header_path_encrypt: bool,
     fixed_nonce: Option<[u8; 16]>,
+    zstd: &ZstdEncode,
 ) -> Result<PreprocessStats, CarbonadoError> {
     body_sink.rewind()?;
     let mut input_len = 0u64;
     if format.contains(Format::Compression) {
+        let level = require_zstd_level(zstd)?;
         let mut counter = CountingReader {
             inner: &mut input,
             count: 0,
         };
-        stream_compress(&mut counter, &mut *body_sink)?;
+        stream_compress_with_dict(&mut counter, &mut *body_sink, level, zstd.dict.as_deref())?;
         input_len = counter.count;
         body_sink.rewind()?;
     } else {
@@ -300,7 +308,18 @@ pub fn stream_encode_buffer(
     input: &[u8],
     format: u8,
 ) -> Result<(Vec<u8>, Hash, EncodeInfo), CarbonadoError> {
-    stream_encode_buffer_with_nonce(master_key, input, format, None)
+    stream_encode_buffer_with_zstd(master_key, input, format, None, &ZstdEncode::default())
+}
+
+/// Inboard buffer encode with explicit zstd parameters (required when Compression is set).
+pub fn stream_encode_buffer_with_zstd(
+    master_key: &[u8],
+    input: &[u8],
+    format: u8,
+    explicit_nonce: Option<[u8; 16]>,
+    zstd: &ZstdEncode,
+) -> Result<(Vec<u8>, Hash, EncodeInfo), CarbonadoError> {
+    stream_encode_buffer_with_nonce(master_key, input, format, explicit_nonce, zstd)
 }
 
 /// Inboard body encode with optional fixed nonce for encrypted formats.
@@ -320,6 +339,7 @@ pub fn stream_encode_buffer_with_nonce(
     input: &[u8],
     format: u8,
     explicit_nonce: Option<[u8; 16]>,
+    zstd: &ZstdEncode,
 ) -> Result<(Vec<u8>, Hash, EncodeInfo), CarbonadoError> {
     let fmt = Format::from(format);
     let input_len = input.len() as u32;
@@ -328,7 +348,12 @@ pub fn stream_encode_buffer_with_nonce(
     let mut bytes_encrypted = 0u32;
 
     if fmt.contains(Format::Compression) {
-        body = compress_buffer(input)?;
+        let level = require_zstd_level(zstd)?;
+        body = if let Some(dict) = zstd.dict.as_deref().filter(|d| !d.is_empty()) {
+            compress_buffer_with_dict(input, level, dict)?
+        } else {
+            compress_buffer(input, level)?
+        };
         bytes_compressed = body.len() as u32;
     }
     if fmt.contains(Format::Encryption) {
@@ -411,13 +436,19 @@ pub fn stream_encode_outboard_buffer(
     input: &[u8],
     format: u8,
     explicit_nonce: Option<[u8; 16]>,
+    zstd: &ZstdEncode,
 ) -> Result<OutboardEncoded, CarbonadoError> {
     let fmt = Format::from(format);
     let input_len = input.len() as u32;
     let mut bytes_compressed = 0u32;
 
     let compressed = if fmt.contains(Format::Compression) {
-        let c = compress_buffer(input)?;
+        let level = require_zstd_level(zstd)?;
+        let c = if let Some(dict) = zstd.dict.as_deref().filter(|d| !d.is_empty()) {
+            compress_buffer_with_dict(input, level, dict)?
+        } else {
+            compress_buffer(input, level)?
+        };
         bytes_compressed = c.len() as u32;
         c
     } else {
@@ -453,8 +484,11 @@ pub fn stream_encode_outboard_buffer(
     let (post_fec_or_bare, padding_len, chunk_len, bytes_ecc, fec_parity, vslice, cslice) =
         if fmt.contains(Format::Fec) {
             let (pl, cl, parity) = encode_outboard_parity_buffer(&post_comp_or_enc)?;
-            let would_bytes = (FEC_M as u32) * cl;
-            let vs = would_bytes / SLICE_LEN;
+            let vs = if cl == 0 {
+                0
+            } else {
+                (parity.len() as u32 / ((FEC_M - FEC_K) as u32 * SLICE_LEN)) * FEC_M as u32
+            };
             if !vs.is_multiple_of(8) {
                 return Err(CarbonadoError::InvalidVerifiableSliceCount(vs));
             }
@@ -519,6 +553,7 @@ pub fn stream_encode_outboard<M: Read + Write + Seek, O: Write, P: Write>(
     parity_out: Option<&mut P>,
     payload_nonce: &mut [u8; 16],
     header_path_encrypt: bool,
+    zstd: &ZstdEncode,
 ) -> Result<(Hash, EncodeInfo), CarbonadoError> {
     stream_encode_outboard_s4(
         master_key,
@@ -529,6 +564,7 @@ pub fn stream_encode_outboard<M: Read + Write + Seek, O: Write, P: Write>(
         parity_out,
         payload_nonce,
         header_path_encrypt,
+        zstd,
     )
 }
 
@@ -543,6 +579,7 @@ fn stream_encode_outboard_s4<M: Read + Write + Seek, O: Write, P: Write>(
     mut parity_out: Option<&mut P>,
     payload_nonce: &mut [u8; 16],
     header_path_encrypt: bool,
+    zstd: &ZstdEncode,
 ) -> Result<(Hash, EncodeInfo), CarbonadoError> {
     let fmt = Format::from(format);
     // Fail-closed: required sidecar writers when format bits demand them.
@@ -562,6 +599,7 @@ fn stream_encode_outboard_s4<M: Read + Write + Seek, O: Write, P: Write>(
         payload_nonce,
         header_path_encrypt,
         None,
+        zstd,
     )?;
     let bare_len = stats.bare_len;
     main_out.rewind().map_err(CarbonadoError::StdIoError)?;
@@ -570,12 +608,14 @@ fn stream_encode_outboard_s4<M: Read + Write + Seek, O: Write, P: Write>(
         if bare_len == 0 {
             (0, 0, 0, 0)
         } else {
-            let (stripe, pl, cl) = feed_inboard_fec_stripe(bare_len as usize, &mut *main_out)?;
-            // parity_out is Some after fail-closed check above.
+            let (stripes, pl, cl) = feed_inboard_fec_stripes(bare_len as usize, &mut *main_out)?;
             let par = parity_out
                 .as_mut()
                 .ok_or(CarbonadoError::MissingFecParity)?;
-            let par_len = crate::stream::fec::write_outboard_parity(&stripe, par)?;
+            let mut par_len = 0u64;
+            for stripe in &stripes {
+                par_len += write_outboard_parity(stripe, par)?;
+            }
             main_out.rewind().map_err(CarbonadoError::StdIoError)?;
             (pl, cl, par_len as u32, par_len as u32)
         }
@@ -593,7 +633,11 @@ fn stream_encode_outboard_s4<M: Read + Write + Seek, O: Write, P: Write>(
     };
 
     let verifiable_slice_count = if fmt.contains(Format::Fec) {
-        ((FEC_M as u32) * chunk_len) / SLICE_LEN
+        if chunk_len == 0 {
+            0
+        } else {
+            (bytes_ecc / (FEC_M as u32 - FEC_K as u32).max(1)) * FEC_M as u32 / SLICE_LEN
+        }
     } else {
         0
     };
@@ -642,8 +686,8 @@ pub fn stream_encode_inboard_body_from_bytes<W: Write>(
 /// [`PreprocessStats::bare_len`] for accurate [`EncodeInfo`] bookkeeping.
 ///
 /// FEC (`Format::Fec`) feeds `data` incrementally via [`FecInboardEncoder`] — peak encode
-/// memory is O(stripe), not O(bare_len). Verification reads the FEC stripe via
-/// [`FecStripeReadAt`] without flattening to a staging `Vec` (S3).
+/// memory is O(stripe), not O(bare_len). Verification reads stripes via
+/// [`FecStripesReadAt`] without flattening to a staging `Vec` (S3).
 pub fn stream_encode_inboard_body<D: Read + Seek, W: Write>(
     mut data: D,
     preprocess: PreprocessStats,
@@ -665,14 +709,12 @@ pub fn stream_encode_inboard_body<D: Read + Seek, W: Write>(
             (0, 0, 0, hash, bytes_verifiable)
         } else {
             data.rewind().map_err(CarbonadoError::StdIoError)?;
-            // S2: `Read::take(content_len)` + `feed_inboard_fec_stripe` — regression:
-            // `streaming_limits::stream_encode_inboard_body_fec_bounded_read_contract`
-            let (stripe, padding_len, chunk_len) =
-                feed_inboard_fec_stripe(content_len as usize, &mut data)?;
-            let bytes_ecc = (FEC_M as u32) * chunk_len;
+            let (stripes, padding_len, chunk_len) =
+                feed_inboard_fec_stripes(content_len as usize, &mut data)?;
+            let bytes_ecc = stripes.len() as u32 * FEC_M as u32 * chunk_len;
 
             if fmt.contains(Format::Verification) {
-                let stripe_view = FecStripeReadAt::new(&stripe);
+                let stripe_view = FecStripesReadAt::new(&stripes);
                 let fec_len = stripe_view.len();
                 let (h, written) = crate::stream::bao::stream_verification_inboard(
                     stripe_view,
@@ -682,7 +724,10 @@ pub fn stream_encode_inboard_body<D: Read + Seek, W: Write>(
                 )?;
                 (padding_len, chunk_len, bytes_ecc, h, written as u32)
             } else {
-                let written = write_inboard_stripe(&stripe, output)? as u32;
+                let mut written = 0u32;
+                for stripe in &stripes {
+                    written += write_inboard_stripe(stripe, output)? as u32;
+                }
                 (
                     padding_len,
                     chunk_len,
@@ -792,6 +837,7 @@ pub fn stream_encode_inboard<R: Read, W: Write>(
     output: &mut W,
     payload_nonce: &mut [u8; 16],
     header_path_encrypt: bool,
+    zstd: &ZstdEncode,
 ) -> Result<(Hash, EncodeInfo, PreprocessStats), CarbonadoError> {
     stream_encode_inboard_with_nonce(
         master_key,
@@ -801,6 +847,7 @@ pub fn stream_encode_inboard<R: Read, W: Write>(
         payload_nonce,
         header_path_encrypt,
         None,
+        zstd,
     )
 }
 
@@ -810,6 +857,7 @@ pub fn stream_encode_inboard<R: Read, W: Write>(
 /// When `None`, a CSPRNG nonce is drawn. **Test/determinism only** for fixed nonces —
 /// nonce reuse under the same master is catastrophic (AGENTS §2.1.4). Prefer
 /// [`stream_encode_inboard`] for production.
+#[allow(clippy::too_many_arguments)]
 pub fn stream_encode_inboard_with_nonce<R: Read, W: Write>(
     master_key: &[u8],
     input: R,
@@ -818,6 +866,7 @@ pub fn stream_encode_inboard_with_nonce<R: Read, W: Write>(
     payload_nonce: &mut [u8; 16],
     header_path_encrypt: bool,
     fixed_nonce: Option<[u8; 16]>,
+    zstd: &ZstdEncode,
 ) -> Result<(Hash, EncodeInfo, PreprocessStats), CarbonadoError> {
     let fmt = Format::from(format);
     let mut spool = SeekableSpool::new()?;
@@ -829,6 +878,7 @@ pub fn stream_encode_inboard_with_nonce<R: Read, W: Write>(
         payload_nonce,
         header_path_encrypt,
         fixed_nonce,
+        zstd,
     )?;
     let (hash, info) = stream_encode_inboard_body(&mut spool, stats, format, output)?;
     Ok((hash, info, stats))

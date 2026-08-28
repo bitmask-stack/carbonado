@@ -122,7 +122,7 @@ Carbonado uses **reed-solomon-erasure 4/8**: any **4 of 8** shards reconstruct t
 
 1. ~~Directory segment corruption + centralized bundle extract + FEC scrub~~ **Done** — `tests/directory_archive.rs::{directory_segment_corruption_bao_bundle_extract_scrub_roundtrip,directory_fec_scrub_matrix_c12_c13_c14_c15,directory_multi_segment_fec_bundle_indices}` (c12–c15 segments: verification + FEC parity indexed in Adamantine bundle; `scrub_outboard` recovers corrupt bare mains within ≤4 shard taints; c15 encrypted five-shard knockout documented as `InvalidScrubbedHash` negative)
 2. ~~Cross-tool interop fixtures (manifest + segment naming)~~ **Done** — `tests/fixtures/directory_interop_golden.json` + `tests/filepack_interop.rs::{adamantine_decimal_segment_naming_contract,golden_directory_interop_checksums_and_manifest_wire}`
-3. ~~UDP shard mapping contract test (chaos-injection datagram ↔ shard slot at `InboardShardLayout` coordinates)~~ **Done** — `tests/udp_fec_sim.rs` (datagram drop = `erase_shards` at approximate coordinates; not normative Bao-wrapped wire; ≤4-drop scrub recovery; c12 five-drop irrecoverable)
+3. ~~UDP shard mapping contract test (chaos-injection datagram ↔ RS symbol leaves)~~ **Done** — `tests/udp_fec_sim.rs` (datagram = concatenated 4 KiB stripe leaves per symbol; drop = `erase_shards`; not normative Bao-wrapped wire; ≤4-drop scrub recovery; five-drop irrecoverable at c12; c14 may recover on zero padding leaves)
 
 ### P4 — External normative
 
