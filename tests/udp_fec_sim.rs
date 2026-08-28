@@ -1,50 +1,49 @@
 //! UDP / FEC chaos injection model (RS 4/8) — **not** normative on-disk wire layout.
 //!
-//! This crate simulates JBOD/UDP **shard erasure** using the same approximate
-//! `InboardShardLayout` helper as `tests/common/corruption.rs` and `tests/fec_chaos.rs`
-//! (`shard_byte_range` spaced by `chunk_len` from the 8-byte Bao prefix). That linear
-//! model is for distributed knockout / `erase_shards` injection only; true inboard
-//! c12/c14 wire is `[u64 LE content_len | keyed Bao response]` with FEC stripes inside
-//! the Bao envelope (`src/stream/encode.rs`, `src/stream/bao.rs`).
+//! One chaos datagram is every 4 KiB inboard Bao leaf with a given RS symbol
+//! (`inboard_symbol_payload` / `erase_shards`). That is stripe geometry, not a
+//! tall `chunk_len` column. True inboard c12/c14 wire is
+//! `[u64 LE content_len | keyed Bao response]` with FEC stripes inside the Bao
+//! envelope (`src/stream/encode.rs`, `src/stream/bao.rs`).
 //!
-//! **Intended contract under test:** if a transport maps one logical RS shard column to
-//! one datagram payload *at the scrub injection coordinates*, then dropping ≤4 datagrams
-//! should match `erase_shards` + `scrub` recovery. At five drops: c12 is irrecoverable
-//! (`InvalidScrubbedHash`); c14 may still recover (Snappy/geometry asymmetry — see
-//! `five_datagram_drops_c12_irrecoverable_c14_documents_asymmetry`). Bao provides keyed
-//! verification independent of datagram arrival order.
+//! **Contract:** dropping ≤4 of 8 symbol datagrams matches `erase_shards` + `scrub`
+//! recovery. Five symbol drops at c12 are irrecoverable (`InvalidScrubbedHash`).
+//! c14 may still recover: zstd padding leaves are already zeros, so `fill(0)` is
+//! not a Bao erasure. That is not a weaker 50% budget. Bao verifies independent
+//! of arrival order.
 //!
-//! Format coverage: 4-drop recovery uses c14 (Snappy+Bao+Zfec); 5-drop asymmetry is
-//! exercised on both c12 (Bao+Zfec) and c14.
+//! Format coverage: 4-drop recovery uses c14 (zstd+Bao+FEC); 5-drop c12 vs c14
+//! is `five_datagram_drops_c12_irrecoverable_c14_documents_asymmetry`.
 
 mod common;
 
 use anyhow::Result;
 use carbonado::{
-    constants::{FEC_K, FEC_M},
-    decode, encode,
+    constants::{FEC_K, FEC_M, SLICE_LEN},
+    decode,
     error::CarbonadoError,
     scrub,
     structs::Encoded,
 };
-use common::corruption::{erase_shards, InboardShardLayout, OutboardShardLayout};
+use common::corruption::{
+    InboardShardLayout, OutboardShardLayout, erase_shards, inboard_symbol_payload,
+    write_inboard_symbol_payload,
+};
+use common::{encode, encode_outboard};
 
-/// Chaos-injection datagram: `shard_index` + payload at `InboardShardLayout` coordinates.
+/// Chaos-injection datagram: one RS symbol's 4 KiB leaves concatenated.
 #[derive(Clone, Debug)]
 struct FecDatagram {
     shard_index: usize,
     payload: Vec<u8>,
 }
 
-/// Split encoded buffer into eight chaos-injection shard slots (helper-internal geometry).
+/// Split encoded buffer into eight symbol datagrams (stripe leaves, not tall columns).
 fn inboard_to_datagrams(encoded: &[u8], layout: &InboardShardLayout) -> Vec<FecDatagram> {
     (0..layout.num_shards)
-        .map(|shard_index| {
-            let range = layout.shard_byte_range(shard_index);
-            FecDatagram {
-                shard_index,
-                payload: encoded[range].to_vec(),
-            }
+        .map(|shard_index| FecDatagram {
+            shard_index,
+            payload: inboard_symbol_payload(encoded, layout, shard_index),
         })
         .collect()
 }
@@ -57,16 +56,16 @@ fn datagrams_to_inboard(
     buf: &mut [u8],
 ) -> Result<()> {
     for dgram in datagrams {
-        let range = layout.shard_byte_range(dgram.shard_index);
-        if range.len() != dgram.payload.len() {
+        if let Err((got, expected)) =
+            write_inboard_symbol_payload(buf, layout, dgram.shard_index, &dgram.payload)
+        {
             anyhow::bail!(
                 "datagram shard {} payload len {} != layout range len {}",
                 dgram.shard_index,
-                dgram.payload.len(),
-                range.len()
+                got,
+                expected
             );
         }
-        buf[range].copy_from_slice(&dgram.payload);
     }
     Ok(())
 }
@@ -190,11 +189,23 @@ fn chaos_datagram_slots_align_with_inboard_shard_layout_helper() -> Result<()> {
         "RS 4/8 chaos model uses eight shard slots"
     );
 
+    assert_eq!(
+        info.chunk_len, SLICE_LEN,
+        "RS symbol / Bao leaf is 4 KiB, not a tall column (got {})",
+        info.chunk_len
+    );
+    // 32 KiB logical → two 16 KiB stripes → two 4 KiB leaves per symbol.
+    assert_eq!(
+        datagrams[0].payload.len(),
+        2 * SLICE_LEN as usize,
+        "symbol datagram is concatenated stripe leaves, not one chunk_len column"
+    );
+
     for dgram in &datagrams {
-        let range = layout.shard_byte_range(dgram.shard_index);
+        let expected = inboard_symbol_payload(&encoded, &layout, dgram.shard_index);
         assert_eq!(
-            dgram.payload, encoded[range],
-            "chaos slot {} must match InboardShardLayout range (helper-internal)",
+            dgram.payload, expected,
+            "chaos slot {} must match stripe leaves for that RS symbol",
             dgram.shard_index
         );
     }
@@ -238,10 +249,9 @@ fn duplicate_datagram_shard_index_last_writer_wins() -> Result<()> {
 
     let mut reassembled = vec![0u8; encoded.len()];
     datagrams_to_inboard(&[first, second], &layout, &mut reassembled)?;
-    let range = layout.shard_byte_range(1);
     assert_eq!(
-        &reassembled[range.clone()],
-        &encoded[range],
+        inboard_symbol_payload(&reassembled, &layout, 1),
+        inboard_symbol_payload(&encoded, &layout, 1),
         "duplicate shard_index: last datagram wins"
     );
     Ok(())
@@ -304,8 +314,8 @@ fn five_datagram_drops_c12_irrecoverable_c14_documents_asymmetry() -> Result<()>
                 "five datagram drops must be irrecoverable at c12, got {err:?}"
             );
         } else {
-            // c14 + Snappy: at the approximate chaos coordinates, five erased stripes can
-            // still leave enough RS columns for scrub recovery (documented asymmetry vs c12).
+            // c14 + zstd: five symbol fills can be no-ops on already-zero padding
+            // leaves, so Bao still verifies those slots. Not a weaker 50% budget.
             let recovered = scrub_result.expect("c14 five-drop scrub recovery");
             assert_eq!(recovered, orig);
         }
@@ -321,10 +331,9 @@ fn directory_bundle_parity_outboard_scrub_recovery() -> Result<()> {
             fec_slice_from_bundle, split_adamantine_payload, verification_slice_from_bundle,
         },
         directory::SegmentFormatPolicy,
-        encode_outboard,
         file::{
-            decode, decode_directory, encode_directory_with_options, DirectoryEncodeOptions,
-            DIRECTORY_ARCHIVE_FORMAT,
+            DIRECTORY_ARCHIVE_FORMAT, DirectoryEncodeOptions, decode, decode_directory,
+            encode_directory_with_options,
         },
         filepack_manifest::FilepackManifest,
         scrub_outboard,
@@ -353,6 +362,7 @@ fn directory_bundle_parity_outboard_scrub_recovery() -> Result<()> {
         &enc_dir,
         DirectoryEncodeOptions {
             segment_format_policy: SegmentFormatPolicy::ForceC12,
+            zstd: carbonado::ZstdEncode::level(20),
             ..DirectoryEncodeOptions::default()
         },
     )?;

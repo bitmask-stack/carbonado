@@ -10,7 +10,7 @@
 //! ```text
 //! Offset  Size  Field
 //! 0       13    magic            ADAMANTINE10\n   (version 1.0 in magic)
-//! 13      1     carbonado_fmt    0x0E | 0x0F (catalog only)
+//! 13      1     carbonado_fmt    catalog c14/c15 or single-file format 0–15
 //! 14      1     flags            u8 (bit0 REQUIRE_OTS = per-entry proofs required at decode; bits 1–7 reserved, must be 0)
 //! 15      4     payload_len      u32 LE
 //! 19      N     payload          rkyv + Bao bundle (see adamantine_payload)
@@ -132,6 +132,31 @@ pub fn decode_adamantine(bytes: &[u8]) -> Result<(Vec<u8>, AdamantineHeader), Ca
     ))
 }
 
+/// Parse an Adamantine envelope at the start of `bytes`, allowing trailing bytes (COTS).
+pub fn decode_adamantine_prefix(
+    bytes: &[u8],
+) -> Result<(Vec<u8>, AdamantineHeader, usize), CarbonadoError> {
+    if bytes.len() < ADAMANTINE_HEADER_LEN {
+        return Err(CarbonadoError::InvalidAdamantineHeader);
+    }
+    let payload_len = u32::from_le_bytes(
+        bytes[15..19]
+            .try_into()
+            .map_err(|_| CarbonadoError::InvalidAdamantineHeader)?,
+    );
+    let payload_end = ADAMANTINE_HEADER_LEN
+        .checked_add(payload_len as usize)
+        .ok_or(CarbonadoError::InvalidAdamantineHeader)?;
+    if bytes.len() < payload_end {
+        return Err(CarbonadoError::InvalidAdamantinePayloadLength {
+            expected: payload_len,
+            available: bytes.len().saturating_sub(ADAMANTINE_HEADER_LEN),
+        });
+    }
+    let (payload, hdr) = decode_adamantine(&bytes[..payload_end])?;
+    Ok((payload, hdr, payload_end))
+}
+
 /// Parse `ADAMANTINE{digit}{digit}\n` or `ADAMANTINE{digit}\n` version from unsupported magic.
 fn parse_unsupported_magic_version(magic: &[u8]) -> Option<(u8, u8)> {
     if magic.len() < 12 {
@@ -155,7 +180,7 @@ fn parse_unsupported_magic_version(magic: &[u8]) -> Option<(u8, u8)> {
 }
 
 fn validate_carbonado_fmt(fmt: u8) -> Result<(), CarbonadoError> {
-    if fmt != ADAMANTINE_CARBONADO_FMT_PUBLIC && fmt != ADAMANTINE_CARBONADO_FMT_ENCRYPTED {
+    if fmt > 15 {
         return Err(CarbonadoError::InvalidAdamantineCarbonadoFormat(fmt));
     }
     Ok(())
@@ -280,11 +305,11 @@ mod tests {
     #[test]
     fn reject_invalid_carbonado_fmt() {
         let mut bytes = encode_adamantine(b"x", ADAMANTINE_CARBONADO_FMT_PUBLIC, 0);
-        bytes[13] = 6;
+        bytes[13] = 16;
         let err = decode_adamantine(&bytes).unwrap_err();
         assert!(matches!(
             err,
-            CarbonadoError::InvalidAdamantineCarbonadoFormat(6)
+            CarbonadoError::InvalidAdamantineCarbonadoFormat(16)
         ));
     }
 

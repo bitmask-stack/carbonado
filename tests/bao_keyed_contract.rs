@@ -14,22 +14,23 @@ use std::io::Cursor;
 
 use anyhow::Result;
 use bao_tree::{
-    blake3,
+    BaoTree, ChunkNum, ChunkRanges, blake3,
     io::{
         outboard::PostOrderMemOutboard,
         sync::{decode_ranges, keyed_encode_ranges_validated, keyed_valid_ranges},
     },
-    BaoTree, ChunkNum, ChunkRanges,
 };
+mod common;
+
 use carbonado::{
     carbonado_verification_key,
     constants::{BAO_BLOCK_SIZE, SLICE_LEN},
-    decode_outboard, encode, encode_outboard,
+    decode_outboard,
     error::CarbonadoError,
     stream::bao::{verification_inboard_buffer, verification_outboard_buffer},
-    stream::encode::stream_encode_buffer,
     verify_slice, verify_slice_inboard_seekable, verify_slice_outboard,
 };
+use common::{encode, encode_outboard, stream_encode_buffer};
 use rand::RngCore;
 
 const BAO_ONLY: u8 = 0x04;

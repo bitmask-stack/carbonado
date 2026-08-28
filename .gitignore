@@ -1,6 +1,10 @@
 /target
-/Cargo.lock
+
 *.7z
+
+# CI (and optional local) in-workspace bao-tree checkout. Local `just setup-bao-tree`
+# still uses the sibling ../bao-tree; do not commit a machine-local tree here.
+/bao-tree
 
 # Carbonado encode artifacts when CLI `-o` is omitted (defaults to `.`)
 recovered.bin
@@ -22,3 +26,10 @@ recovered_dir/
 /*.adam.c[0-9][0-9].par
 /*.adam.c[0-9].ots
 /*.adam.c[0-9][0-9].ots
+
+# Nix / Lean build artifacts
+/result
+/result-*
+/.lake
+/**/.lake
+ref/parity-harness/**/target/

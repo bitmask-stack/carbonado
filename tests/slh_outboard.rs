@@ -1,22 +1,25 @@
 //! Phase 1B: SLH-DSA sidecar E2E (requires `pqc` feature).
 //!
-//! CI must run `cargo test --all-features` (or `--features pqc`) for this crate;
-//! `--no-default-features` skips all tests here (`bitcoinpqc` / `pqc` is optional).
+//! Default features already enable `pqc`. Builds without `pqc` skip this crate
+//! (`#![cfg(feature = "pqc")]`).
 
 #![cfg(feature = "pqc")]
+
+mod common;
 
 use std::fs;
 
 use carbonado::{
     constants::Format,
     crypto::{
+        Algorithm, PublicKey, SLH1_MAGIC, SLH1_SIDECAR_LEN, SLH1_SIGNATURE_LEN, Signature,
         read_slh_sidecar, slh_dsa_generate_keypair, slh_dsa_sign, slh_dsa_verify,
-        write_slh_sidecar, Algorithm, PublicKey, Signature, SLH1_MAGIC, SLH1_SIDECAR_LEN,
-        SLH1_SIGNATURE_LEN,
+        write_slh_sidecar,
     },
     error::CarbonadoError,
     file::{self, Header},
 };
+use common::file_encode_outboard;
 use getrandom::getrandom;
 use rand::RngCore;
 
@@ -43,7 +46,7 @@ fn test_slh_outboard_sidecar_binds_header_public_key() {
     let key = random_master();
     let input = b"SLH-DSA outboard E2E: sign keyed Bao root, verify via Header.slh_public_key";
 
-    let (hdr_opt, oenc) = file::encode_outboard(&key, input, 14, None).unwrap();
+    let (hdr_opt, oenc) = file_encode_outboard(&key, input, 14, None).unwrap();
     let base_hdr = hdr_opt.unwrap();
     let bao_root = base_hdr.hash.as_bytes();
 

@@ -14,9 +14,9 @@ use std::io::Cursor;
 use carbonado::constants::FEC_M;
 use carbonado::stream::fec::FecInboardEncoder;
 use carbonado::stream::parallel::{
-    encode_rs_parity_serial, encode_rs_parity_with_config, ParallelConfig,
+    ParallelConfig, encode_rs_parity_serial, encode_rs_parity_with_config,
 };
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use reed_solomon_erasure::galois_8::ReedSolomon;
 
 fn patterned(len: usize) -> Vec<u8> {
@@ -27,8 +27,9 @@ fn pre_parity_shards(logical_len: usize) -> (ReedSolomon, Vec<Vec<u8>>, usize) {
     let rs = ReedSolomon::new(4, 4).expect("rs");
     let mut enc = FecInboardEncoder::new(logical_len).expect("new");
     let input = patterned(logical_len);
-    enc.feed(Cursor::new(&input)).expect("feed");
-    let stripe = enc.finish().expect("finish").expect("stripe");
+    let mut stripes = enc.feed(Cursor::new(&input)).expect("feed");
+    stripes.extend(enc.finish().expect("finish"));
+    let stripe = stripes.into_iter().next().expect("stripe");
     let chunk_len = stripe.chunk_len as usize;
     let mut shards = stripe.shards;
     for s in shards.iter_mut().skip(4) {

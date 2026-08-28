@@ -5,13 +5,14 @@ use std::{fs::OpenOptions, io::Write, path::PathBuf};
 use anyhow::Result;
 use carbonado::{
     constants::Format,
-    decode, decode_outboard, encode, encode_outboard,
+    decode, decode_outboard,
     error::CarbonadoError,
     file::{self, Header},
     filepack, scrub, scrub_outboard,
     structs::{Encoded, OutboardEncoded},
 };
 use common::format_matrix::ALL_FORMAT_LEVELS;
+use common::{encode, encode_outboard, file_encode_outboard};
 use log::{debug, info, trace};
 use rand::RngCore;
 use wasm_bindgen_test::wasm_bindgen_test_configure;
@@ -175,19 +176,10 @@ fn scrub_specific_errors() -> Result<()> {
         assert!(matches!(err, CarbonadoError::ScrubRequiresVerification));
     }
 
-    // For a Bao+Zfec, make irrecoverable (>4 shards) -> InvalidScrubbedHash
+    // For a Bao+Zfec, make irrecoverable (>4 leaves in one stripe) -> InvalidScrubbedHash
     let Encoded(e, h, ei) = encode(&key, input, 12)?;
     let mut too_bad = e.clone();
-    // taint 5+ shard regions aggressively (large input ensures effective distributed hit)
-    let step = (too_bad.len().saturating_sub(8) / 8).max(16);
-    let clen = ei.chunk_len as usize;
-    for i in 0..5 {
-        let p = 8 + i * step;
-        let z = clen.min(too_bad.len().saturating_sub(p));
-        if z > 0 {
-            too_bad[p..p + z].fill(0);
-        }
-    }
+    common::corruption::wipe_inboard_leaves(&mut too_bad, &[0, 1, 2, 3, 4], 0);
     let err = scrub(&too_bad, h.as_bytes(), &ei, 12).unwrap_err();
     assert!(
         matches!(err, CarbonadoError::InvalidScrubbedHash),
@@ -314,24 +306,24 @@ fn outboard_and_keyed_c_number() -> Result<()> {
     assert!(matches!(err_z, CarbonadoError::MissingFecParity));
 
     // tampered sidecar (flip byte in a real ob if present) -> verification error (strict)
-    if let Some(mut good_ob) = o4.verification_outboard.clone() {
-        if !good_ob.is_empty() {
-            good_ob[0] ^= 0xff;
-            let err_verify = decode_outboard(
-                &PUBLIC_MASTER,
-                o4.hash.as_bytes(),
-                &o4.main,
-                Some(good_ob.as_slice()),
-                None,
-                o4.info.padding_len,
-                4,
-            )
-            .unwrap_err();
-            assert!(matches!(
-                err_verify,
-                CarbonadoError::OutboardVerificationFailed(_)
-            ));
-        }
+    if let Some(mut good_ob) = o4.verification_outboard.clone()
+        && !good_ob.is_empty()
+    {
+        good_ob[0] ^= 0xff;
+        let err_verify = decode_outboard(
+            &PUBLIC_MASTER,
+            o4.hash.as_bytes(),
+            &o4.main,
+            Some(good_ob.as_slice()),
+            None,
+            o4.info.padding_len,
+            4,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err_verify,
+            CarbonadoError::OutboardVerificationFailed(_)
+        ));
     }
 
     Ok(())
@@ -370,7 +362,7 @@ fn file_outboard_high_level_bare_and_header() -> Result<()> {
     // Public levels: bare main (no magic header in main), Some(header) for out-of-band, sidecars present for bits
     for &level in &[0u8, 2, 4, 6, 8, 10, 12, 14] {
         let (hdr_opt, oenc): (Option<Header>, OutboardEncoded) =
-            file::encode_outboard(&key, input, level, Some(*b"testmeta"))?;
+            file_encode_outboard(&key, input, level, Some(*b"testmeta"))?;
         assert!(
             hdr_opt.is_some(),
             "out-of-band header for public file outboard level {}",
@@ -433,7 +425,7 @@ fn file_outboard_high_level_bare_and_header() -> Result<()> {
 
     // 0-byte public via file outboard
     let empty: &[u8] = &[];
-    let (h0, o0) = file::encode_outboard(&key, empty, 4, None)?;
+    let (h0, o0) = file_encode_outboard(&key, empty, 4, None)?;
     assert!(h0.is_some());
     assert!(o0.main.is_empty());
     let h0_bytes = h0.as_ref().map(|hh| hh.try_to_vec().unwrap());
@@ -450,15 +442,15 @@ fn file_outboard_high_level_bare_and_header() -> Result<()> {
     assert_eq!(r0, empty);
 
     // c# commitment still holds via file layer
-    let o4 = file::encode_outboard(&key, input, 4, None)?.1;
-    let o6 = file::encode_outboard(&key, input, 6, None)?.1;
+    let o4 = file_encode_outboard(&key, input, 4, None)?.1;
+    let o6 = file_encode_outboard(&key, input, 6, None)?.1;
     assert_ne!(
         o4.hash, o6.hash,
         "file outboard different c produce different keyed roots"
     );
 
     // Encrypted outboard: bare main (no MAGIC), bao sidecar, nonce in out-of-band header
-    let (he_opt, oe) = file::encode_outboard(&key, input, 5, None)?;
+    let (he_opt, oe) = file_encode_outboard(&key, input, 5, None)?;
     assert!(he_opt.is_some());
     let hdr_e = he_opt.unwrap();
     assert!(
@@ -505,7 +497,7 @@ fn file_outboard_high_level_bare_and_header() -> Result<()> {
     );
 
     // error: missing sidecar for bao public via file decode_outboard (specific error)
-    let ob = file::encode_outboard(&key, input, 4, None)?.1;
+    let ob = file_encode_outboard(&key, input, 4, None)?.1;
     let err = file::decode_outboard(
         &key,
         ob.hash.as_bytes(),
@@ -603,7 +595,7 @@ fn file_outboard_metadata_roundtrip_and_mac_binding() -> Result<()> {
     let input = b"metadata test for outboard header auth";
     let meta = Some(*b"metameta");
 
-    let (hdr_opt, oenc) = file::encode_outboard(&key, input, 4, meta)?;
+    let (hdr_opt, oenc) = file_encode_outboard(&key, input, 4, meta)?;
     let hdr = hdr_opt.expect("public outboard produces out-of-band header");
     assert_eq!(hdr.metadata, meta, "metadata roundtrips in header");
 

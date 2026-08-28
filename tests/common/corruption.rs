@@ -1,12 +1,14 @@
 //! Shared corruption helpers for FEC / scrub / chaos integration tests.
 //!
-//! Models inboard Bao+FEC layout as used by `scrub`: 8-byte content-length prefix,
-//! then a response region partitioned into `FEC_M` logical shard stripes spaced by
-//! `chunk_len` (see `tests/codec.rs::fec_robustness` — empirically matches scrub extract).
+//! Inboard Bao+FEC bodies are a sequence of 4 KiB Bao leaves: eight leaves per
+//! 16 KiB logical stripe (4 data + 4 parity). Leaf payload ranges come from
+//! [`carbonado::stream::inboard_leaf_data_ranges`] so nicks hit leaf data, not
+//! parent hash pairs.
 
 use std::ops::Range;
 
 use carbonado::constants::{FEC_K, FEC_M};
+use carbonado::stream::inboard_leaf_data_ranges;
 use rand::Rng;
 
 /// Bao inboard prefix: `u64 LE` content length of the logical (post-FEC) body.
@@ -31,11 +33,11 @@ impl InboardShardLayout {
         }
     }
 
-    /// Approximate byte span for shard `idx` in the encoded buffer (for chaos injection).
+    /// Linear fallback span for shard `idx` (`bao_prefix + idx * chunk_len`).
     ///
-    /// Scrub extracts shards via keyed Bao slices; this linear model matches the
-    /// spacing used in existing robustness tests and is sufficient for distributed
-    /// knockout that stays within RS 4/8 recovery when ≤4 shards are touched.
+    /// Stripe datagrams and `erase_shards` use [`inboard_symbol_payload`] (every
+    /// 4 KiB leaf with that RS symbol). This range is only the last-resort map
+    /// when `inboard_leaf_data_ranges` cannot walk the body.
     pub fn shard_byte_range(&self, shard_idx: usize) -> Range<usize> {
         assert!(shard_idx < self.num_shards);
         // Match `tests/codec.rs::fec_robustness`: step = chunk_len, not response_len / 8.
@@ -54,6 +56,65 @@ impl InboardShardLayout {
 pub struct KnockoutReport {
     pub positions: Vec<usize>,
     pub shards_touched: Vec<usize>,
+}
+
+fn leaf_ranges_or_linear(buf: &[u8], layout: &InboardShardLayout) -> Vec<Range<usize>> {
+    match inboard_leaf_data_ranges(buf) {
+        Ok(ranges) if !ranges.is_empty() => ranges,
+        _ => (0..layout.num_shards)
+            .map(|i| layout.shard_byte_range(i))
+            .filter(|r| !r.is_empty())
+            .collect(),
+    }
+}
+
+fn leaf_symbol(index: usize) -> usize {
+    index % FEC_M
+}
+
+/// Concatenate every 4 KiB inboard leaf whose RS symbol is `symbol` (`0..FEC_M`).
+///
+/// One UDP chaos datagram is this concat, not a tall `chunk_len` column.
+pub fn inboard_symbol_payload(buf: &[u8], layout: &InboardShardLayout, symbol: usize) -> Vec<u8> {
+    assert!(symbol < layout.num_shards);
+    let mut out = Vec::new();
+    for (i, range) in leaf_ranges_or_linear(buf, layout).into_iter().enumerate() {
+        if leaf_symbol(i) == symbol && !range.is_empty() {
+            out.extend_from_slice(&buf[range]);
+        }
+    }
+    out
+}
+
+/// Write `payload` into every 4 KiB leaf with RS `symbol`, in leaf order.
+///
+/// `Err((got, expected))` when `payload` is not the concat of those leaf ranges.
+pub fn write_inboard_symbol_payload(
+    buf: &mut [u8],
+    layout: &InboardShardLayout,
+    symbol: usize,
+    payload: &[u8],
+) -> Result<(), (usize, usize)> {
+    assert!(symbol < layout.num_shards);
+    let ranges = leaf_ranges_or_linear(buf, layout);
+    let expected: usize = ranges
+        .iter()
+        .enumerate()
+        .filter(|(i, r)| leaf_symbol(*i) == symbol && !r.is_empty())
+        .map(|(_, r)| r.len())
+        .sum();
+    if payload.len() != expected {
+        return Err((payload.len(), expected));
+    }
+    let mut off = 0usize;
+    for (i, range) in ranges.into_iter().enumerate() {
+        if leaf_symbol(i) == symbol && !range.is_empty() {
+            let n = range.len();
+            buf[range].copy_from_slice(&payload[off..off + n]);
+            off += n;
+        }
+    }
+    Ok(())
 }
 
 /// Knock out (zero) random bytes spread across at most `max_bad_shards` distinct shards.
@@ -108,23 +169,23 @@ pub fn scattered_stream_knockout(
     rng: &mut impl Rng,
 ) -> KnockoutReport {
     let cap = max_bad_shards.min(FEC_K);
-    // Data-shard indices with non-empty byte ranges only.
-    let shard_assignments: Vec<usize> = (0..cap)
-        .filter(|&s| !layout.shard_byte_range(s).is_empty())
+    let ranges = leaf_ranges_or_linear(buf, layout);
+    let leaf_assignments: Vec<usize> = (0..ranges.len())
+        .filter(|&i| leaf_symbol(i) < cap && !ranges[i].is_empty())
         .collect();
     let mut report = KnockoutReport {
         positions: Vec::with_capacity(total_knockouts),
         shards_touched: Vec::new(),
     };
-    if shard_assignments.is_empty() {
+    if leaf_assignments.is_empty() {
         return report;
     }
 
     let max_attempts = total_knockouts.saturating_mul(8).max(1);
     let mut attempts = 0usize;
     while report.positions.len() < total_knockouts && attempts < max_attempts {
-        let shard = shard_assignments[rng.gen_range(0..shard_assignments.len())];
-        let range = layout.shard_byte_range(shard);
+        let leaf = leaf_assignments[rng.gen_range(0..leaf_assignments.len())];
+        let range = &ranges[leaf];
         if range.is_empty() {
             attempts += 1;
             continue;
@@ -132,20 +193,21 @@ pub fn scattered_stream_knockout(
         let pos = rng.gen_range(range.start..range.end);
         buf[pos] ^= rng.gen_range(1u8..=255);
         report.positions.push(pos);
-        if !report.shards_touched.contains(&shard) {
-            report.shards_touched.push(shard);
+        let symbol = leaf_symbol(leaf);
+        if !report.shards_touched.contains(&symbol) {
+            report.shards_touched.push(symbol);
         }
         attempts += 1;
     }
     report
 }
 
-/// Zero an entire shard stripe (simulates full shard loss).
+/// Zero every inboard leaf whose symbol is in `shard_indices` (simulates slot loss).
 pub fn erase_shards(buf: &mut [u8], layout: &InboardShardLayout, shard_indices: &[usize]) {
-    for &idx in shard_indices {
-        let range = layout.shard_byte_range(idx);
-        if !range.is_empty() {
-            buf[range].fill(0);
+    let ranges = leaf_ranges_or_linear(buf, layout);
+    for (i, range) in ranges.iter().enumerate() {
+        if shard_indices.contains(&leaf_symbol(i)) && !range.is_empty() {
+            buf[range.clone()].fill(0);
         }
     }
 }
@@ -155,6 +217,50 @@ pub fn flip_byte(buf: &mut [u8], offset: usize, mask: u8) {
     if offset < buf.len() {
         buf[offset] ^= mask;
     }
+}
+
+/// Fill selected 4 KiB Bao leaves in an inboard blob with `fill`.
+///
+/// Parent hash pairs are left intact so other leaves still Bao-verify.
+pub fn wipe_inboard_leaves(buf: &mut [u8], leaf_indices: &[u32], fill: u8) {
+    let ranges = inboard_leaf_data_ranges(buf).expect("inboard leaf ranges");
+    for &idx in leaf_indices {
+        let i = idx as usize;
+        if i < ranges.len() {
+            let range = ranges[i].clone();
+            if range.end <= buf.len() {
+                buf[range].fill(fill);
+            }
+        }
+    }
+}
+
+/// Every inboard leaf index whose symbol is in `slots` (0..8).
+pub fn leaves_with_symbol_slots(leaf_count: u32, slots: &[u8]) -> Vec<u32> {
+    (0..leaf_count)
+        .filter(|leaf| {
+            let symbol = (*leaf % FEC_M as u32) as u8;
+            slots.contains(&symbol)
+        })
+        .collect()
+}
+
+/// First `count` leaf indices in `[0, leaf_count)` (row-major order).
+pub fn first_n_leaves(leaf_count: u32, count: u32) -> Vec<u32> {
+    (0..count.min(leaf_count)).collect()
+}
+
+/// Last `count` leaf indices in `[0, leaf_count)`.
+pub fn last_n_leaves(leaf_count: u32, count: u32) -> Vec<u32> {
+    let count = count.min(leaf_count);
+    ((leaf_count - count)..leaf_count).collect()
+}
+
+/// Every other leaf (`leaf % 2 == 0`) up to `count` (50% when `count == leaf_count / 2`).
+pub fn every_other_leaf(leaf_count: u32, start_parity: u32) -> Vec<u32> {
+    (0..leaf_count)
+        .filter(|leaf| leaf % 2 == start_parity)
+        .collect()
 }
 
 /// Layout of data-shard stripes inside an outboard bare main (c8–c15 with Zfec).

@@ -1,37 +1,34 @@
 [package]
 name = "carbonado"
-edition = "2021"
-version = "2.0.0"
+edition = "2024"
+rust-version = "1.98.0"
+version = "0.7.1"
 license = "MIT"
-description = "An apocalypse-resistant data storage format for the truly paranoid. Fully symmetric AES-256-CTR + HMAC-SHA512 (EtM) container. Callers supply high-entropy master keys; passphrase KDF (e.g. Argon2id) is caller responsibility. SLH-DSA signatures are provided only as sidecars (via `bitcoinpqc`). Clean cryptographic break from ECIES — v1 encrypted archives require external migration."
+description = "Apocalypse-resistant archival format for consensus-critical data. One portable file: AES-256-CTR + HMAC-SHA512, keyed Bao, Reed-Solomon 4/8, optional zstd, SLH-DSA sidecars."
 documentation = "https://docs.rs/carbonado"
 homepage = "https://github.com/bitmask-stack/carbonado"
 repository = "https://github.com/bitmask-stack/carbonado.git"
 readme = "README.md"
 keywords = ["archive", "encryption", "erasure-coding", "bao", "backup"]
 categories = ["command-line-utilities", "cryptography"]
-include = ["src/**/*", "LICENSE", "README.md", "doc/man/*.1", "doc/man/README.md", ".cargo/config.toml.example"]
+# Slim crates.io package: library + CLI sources, license, readme, man pages.
+# Do not ship tests, examples, benches, Lean, nix, or ref/ oracles.
+# `/LICENSE` and `/README.md` are crate-root only (`README.md` would match ref/**).
+include = ["src/**/*", "/LICENSE", "/README.md", "doc/man/*.1", "doc/man/README.md"]
 
 [dependencies]
 # bao kept for Hash re-export (blake3::Hash), pub re-export in lib, and legacy error type bridging.
-# All Bao logic now uses the local keyed fork for 4KB chunk groups + format-keyed roots.
+# All Bao logic uses n0-computer/bao-tree keyed 4KB groups + format-keyed roots.
 bao = "0.13"
 
-# Local keyed fork (SurmountSystems/bao-tree) — default 4KB groups (BlockSize::from_chunk_log(2))
-# via BAO_BLOCK_SIZE. Keyed mode makes root = keyed_hash(key_from_format, data) so the
-# Bao hash commits to the exact format pipeline chosen (multi-dimensional naming).
-# See AGENTS.md and constants::BAO_BLOCK_SIZE.
-# Temporary until upstreamed to n0-computer/bao-tree.
-# To fetch the fork (for agents):
-#   git clone -b 76-keyed-bao git@github.com:SurmountSystems/bao-tree.git ../bao-tree
-#   (or: git clone -b 76-keyed-bao https://github.com/SurmountSystems/bao-tree.git ../bao-tree)
-# Keyed fork (SurmountSystems/bao-tree branch 76-keyed-bao). Git dep supports `cargo install`
-# from crates.io and `cargo install --path .` without a sibling checkout.
-# For faster local iteration, copy `.cargo/config.toml.example` → `.cargo/config.toml`
-# after `just setup-bao-tree` to patch in `../bao-tree`.
-# We set default-features = false because the fork's defaults pull in tokio/fs/etc
-# which are not needed (we only use sync keyed) and break some cross/wasm targets.
-bao_tree = { package = "bao-tree", git = "https://github.com/SurmountSystems/bao-tree.git", branch = "76-keyed-bao", default-features = false, features = ["validate"] }
+# Keyed Bao: n0-computer/bao-tree 0.16.1 (PR 78 keyed APIs, crates.io 2026-08-26).
+# Default 4KB groups (BlockSize::from_chunk_log(2)) via BAO_BLOCK_SIZE. Keyed mode
+# makes root = keyed_hash(key_from_format, data) so the Bao hash commits to the
+# exact format pipeline (multi-dimensional naming). See AGENTS.md and
+# constants::BAO_BLOCK_SIZE.
+# default-features = false: crate defaults pull in tokio/fs and break some
+# cross/wasm targets. We only need sync keyed + validate.
+bao_tree = { package = "bao-tree", version = "0.16.1", default-features = false, features = ["validate"] }
 futures-lite = { version = "2", optional = true, default-features = false, features = ["std"] }
 tokio = { version = "1", features = ["rt"], optional = true }
 bitmask-enum = "2.1.0"
@@ -84,7 +81,11 @@ bitcoinpqc = { version = "0.4", optional = true }
 # Future quantum-resistant key formats (qpub etc.) will be handled separately.
 
 [features]
-default = ["pqc", "ots", "cli", "parallel"]
+# Default: Rust engine + existing features. There is no Cargo Lean backend
+# (no carbonado-sys / libcarbonado). Lean lives in Carbonado/ as proofs + AOT demo.
+default = ["backend-rust", "pqc", "ots", "cli", "parallel"]
+# Empty marker kept so `--features backend-rust` / serial-FEC recipes stay valid.
+backend-rust = []
 pqc = ["dep:bitcoinpqc"]
 # OpenTimestamps stub stamping (offline/testable; no network calendar in default build).
 ots = []
@@ -121,6 +122,10 @@ harness = false
 name = "parallel_bench"
 harness = false
 required-features = ["parallel"]
+
+[[bench]]
+name = "fec_stripe_bench"
+harness = false
 
 # Primary CLI: `cargo install carbonado` or `cargo install --path . --bin carbonado`
 [[bin]]

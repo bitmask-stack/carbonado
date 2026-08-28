@@ -1,4 +1,8 @@
 //! Async streaming decode parity tests (Phase 2). Requires `--features async`.
+//!
+//! **R10:** Dual freeze (`just test-lean-ci`) never enables `async` → this file is 0 tests under
+//! freeze (permanent). Optional dual smoke: lean features + `async`/`async-tokio` +
+//! `CARBONADO_LEAN_LIB` — `stream_decode_async` is dual-aware via R5 E1 `stream_decode`.
 
 #![cfg(feature = "async")]
 
@@ -9,7 +13,7 @@ use std::io::{Cursor, ErrorKind};
 use carbonado::constants::FEC_M;
 use carbonado::error::CarbonadoError;
 use carbonado::stream::{stream_decode, stream_decode_async, stream_decode_buffer};
-use carbonado::stream_encode_buffer;
+use common::stream_encode_buffer;
 use futures_lite::io::Cursor as AsyncCursor;
 use rand::RngCore;
 
@@ -207,7 +211,8 @@ async fn stream_decode_async_truncated_bounded_body_staging_errors_c4_c8() {
     }
 }
 
-/// Verification c12: spool staging fails before Bao; sync fails at Bao (`BaoResponseTruncated`).
+/// Verification c12 truncated body: async always fails at spool staging
+/// (`truncated encoded body`). Sync incremental Bao → `BaoResponseTruncated`.
 #[tokio::test]
 async fn stream_decode_async_truncated_bounded_verification_diverges_from_sync_c12() {
     let input: Vec<u8> = (0..8192).map(|i| (i % 251) as u8).collect();
@@ -403,7 +408,8 @@ async fn stream_decode_async_short_bao_body_invalid_header_length() {
     assert!(out.is_empty());
 }
 
-/// `async-tokio` compiles the `spawn_blocking` offload path (exercised under `--all-features` CI).
+/// `async-tokio` compiles the `spawn_blocking` offload path (desktop optional matrix:
+/// `cargo test --features "async,async-tokio,man-gen"`; never `--all-features`).
 #[cfg(feature = "async-tokio")]
 #[test]
 fn async_tokio_spawn_blocking_path_enabled() {

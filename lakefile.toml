@@ -1,0 +1,13 @@
+name = "carbonado"
+version = "0.1.0"
+defaultTargets = ["carbonado"]
+
+[[lean_lib]]
+name = "Carbonado"
+
+[[lean_lib]]
+name = "CarbonadoTest"
+
+[[lean_exe]]
+name = "carbonado"
+root = "Carbonado.Main"

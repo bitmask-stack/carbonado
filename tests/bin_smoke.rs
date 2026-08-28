@@ -27,6 +27,8 @@ fn bin_smoke_single_file_encode_decode_roundtrip() {
         input.to_str().unwrap(),
         "--format",
         "14",
+        "--zstd-level",
+        "20",
         "--outboard",
         "--output",
         outdir.to_str().unwrap(),
@@ -72,6 +74,8 @@ fn bin_smoke_directory_encode_decode_roundtrip() {
     let enc = run_carbonado(&[
         "encode",
         samples.to_str().unwrap(),
+        "--zstd-level",
+        "20",
         "--output",
         outdir.to_str().unwrap(),
     ]);

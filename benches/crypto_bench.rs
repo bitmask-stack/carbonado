@@ -16,7 +16,7 @@
 use carbonado::crypto::{slh_dsa_generate_keypair, slh_dsa_sign, slh_dsa_verify};
 use carbonado::file::encode_directory;
 use carbonado::{decode, decode_outboard, encode, encode_outboard, scrub_outboard};
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
 use getrandom::getrandom;
 use std::fs;
 use std::path::PathBuf;
@@ -139,6 +139,7 @@ fn bench_encode_directory(c: &mut Criterion) {
                 black_box(&master_key),
                 black_box(&input),
                 black_box(&out_base),
+                black_box(&carbonado::ZstdEncode::level(20)),
             )
             .unwrap();
             black_box(archive.entry_count);

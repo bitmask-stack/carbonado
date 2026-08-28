@@ -3,11 +3,14 @@
 //! Short-input guards for `file::decode_outboard` (header path) are consolidated here;
 //! see also `tests/header_tamper.rs::decode_outboard_short_header_returns_invalid_header_length_not_panic`.
 
+mod common;
+
 use carbonado::{
     decode_outboard,
     error::CarbonadoError,
     file::{self, Header},
 };
+use common::file_encode_outboard;
 use proptest::prelude::*;
 use rand::RngCore;
 
@@ -77,7 +80,7 @@ fn adversarial_short_inputs_return_err_not_panic() {
 
     // file::decode_outboard header path: empty and almost-header inputs.
     let (hdr_opt, oenc) =
-        file::encode_outboard(&key, b"short input consolidation", 14, None).unwrap();
+        file_encode_outboard(&key, b"short input consolidation", 14, None).unwrap();
     let hdr = hdr_opt.unwrap();
     let hash = hdr.hash.as_bytes();
 

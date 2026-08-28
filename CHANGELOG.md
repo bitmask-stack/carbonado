@@ -2,7 +2,22 @@
 
 All notable changes to the Carbonado crate and `carbonado` CLI are documented here.
 
-## [Unreleased] — 2.1.0 (directory archive redesign)
+## [0.7.1] — 2026-08-27
+
+### Changed
+
+- **Zstd level is encoder input.** Compression encode fails with `MissingZstdLevel` unless an explicit level is supplied. There is no silent library default of 20. Tests and the CLI may pass `20` explicitly (`--zstd-level`).
+- **Single-file Adamantine sidecar.** Outboard writes exactly `{hash}.cXX` + `{hash}.adam.cXX` (`ADAMANTINE10\n`). Inboard writes exactly one `{hash}.adam.cXX` (Header + body + Adamantine after `encoded_len`). No `.par` or `.dict` siblings. Same-stem `.cXX` + `.adam.cXX` is single-file outboard, not a directory catalog.
+- **FilepackManifest v3.** One bundle blob with keyed Bao outboard, RS parity (empty if no FEC), and RFC 8878 dictionary (empty if none). `SegmentRef` adds `dict_offset` / `dict_len`. Until 1.0 there is no dual-read of old `.out`/`.par` companions.
+- **Optional `--zstd-dict`.** Dictionary bytes are stored in the Adamantine dict section. Frame `Dictionary_ID` must match. Decode with a named ID and empty dict section fails (`MissingZstdDictionary`).
+
+## [0.7.0] — 2026-08-24
+
+First crates.io release of the v2 format (`CARBONADO20\n`). Last published crate was **0.6.0** (v1/ECIES). In-tree `2.0.0` / `2.1.0` numbers were never published.
+
+### Removed
+
+- **`carbonado-sys` / product C ABI / Cargo `backend-lean`.** Lean remains proofs + AOT demo. Rust `tests/` remain the Rust contract. Do not claim G8 C-ABI parity. Tiny C remains only for Lean AOT demo `@[extern]` (zstd, SLH).
 
 ### Added
 
@@ -17,6 +32,9 @@ All notable changes to the Carbonado crate and `carbonado` CLI are documented he
 
 ### Changed
 
+- **Crate version 0.7.0** (crates.io next after 0.6.0). Format magic remains `CARBONADO20\n`.
+- **Rust edition 2024 / rustc 1.98:** package `edition = "2024"`, `rust-version = "1.98.0"`, `rust-toolchain.toml` channel `1.98.0`. CI uses the same toolchain pin. Flake adds `oxalica/rust-overlay` for 1.98 in the dev shell and a `rustc-1_98` check (separate nixpkgs overlay so Lean AOT does not rebuild on Rust pin changes).
+- **bao-tree 0.16.1** from crates.io (keyed 4 KiB groups, PR 78). Replaces the git `rev` pin at the PR 78 merge.
 - **M1 pipeline memory (hard break):** non-FEC verification decode (c6) uses `SeekWriteAt` over the post-preprocess spool (O(chunk) RAM; no full logical `Vec`). FEC verification uses `FecInboardWriteAt::finish_into` (stream logical bytes without a second full logical buffer; shard buffers remain O(FEC body) under segment-wide RS geometry). See `doc/STREAMING_PARALLELISM.md`.
 - **M2 outboard verify memory:** `stream_verification_outboard_verify` uses `PostOrderOutboard` + `ReadAt` (on-demand hash pairs) instead of copying the full sidecar into `PostOrderMemOutboard`. Streaming outboard decode keeps the sidecar on a disk spool.
 - **S5 scrub verify oracle:** `scrub` pre-check uses `verify_inboard_keyed` (`DiscardWriteAt` sink) instead of buffer `verification()` full-body staging; `scrub_outboard` pre-check uses `stream_verification_outboard_verify` with `io::sink()`. Memory tiers in `doc/STREAMING_PARALLELISM.md`.
@@ -29,11 +47,9 @@ All notable changes to the Carbonado crate and `carbonado` CLI are documented he
 - **Error variant rename (breaking):** `InvalidPackIndex` → `InvalidFilepackManifest`. No enum alias is provided.
 - **Narrowed error taxonomy:** OTS proof size failures → `InvalidOtsProof`; Adamantine oversized `payload_len` → `InvalidAdamantinePayloadTooLarge`; directory decode integrity failures → `SegmentMainLenMismatch`, `ContentBlake3Mismatch`, `OutputPathEscape`, `OtsFeatureRequired`, `OtsProofRequired`.
 
-### Deprecated (one release; `since = "2.1.0"`)
+### Deprecated (one release; `since = "0.7.0"`)
 
 Crate-root type/const aliases: `PackIndex`, `PackEntry`, `PackSegmentRef`, `PACK_INDEX_VERSION`, `PACK_INDEX_FORMAT_LEVEL`, `PACK_INDEX_FORMAT_LEVEL_PUBLIC`, `PACK_INDEX_FORMAT_LEVEL_ENCRYPTED`, `MAX_PACK_ENTRIES`. The `carbonado::pack_index` module re-exports both new and deprecated names.
-
-**Note:** Rust emits `deprecated` warnings only after the crate version reaches **2.1.0** (`Cargo.toml` is currently **2.0.0**).
 
 ### Migration
 
@@ -62,7 +78,7 @@ First public release. Symmetric v2 stack, streaming pipeline, seekable slices, s
 
 - **Symmetric v2 stack:** AES-256-CTR + full 64-byte HMAC-SHA512 Encrypt-then-MAC; HMAC-SHA512 BIP-32-style subkey derivation (`aes-ctr`, `etm-hmac`, `header-auth`).
 - **177-byte authenticated header:** `CARBONADO20\n` magic, `payload_nonce`, `header_mac`, Bao root, SLH-DSA public key slot, format bits, u32 `chunk_index`, lengths, metadata.
-- **Keyed 4 KiB Bao groups** (local `bao-tree` fork): `SLICE_LEN=4096`; root commits to format pipeline byte.
+- **Keyed 4 KiB Bao groups** (n0-computer/bao-tree keyed APIs; originally a local fork, now upstream PR 78): `SLICE_LEN=4096`; root commits to format pipeline byte.
 - **Seekable slice verification (P1):** `verify_slice_inboard_seekable`, `verify_slice_outboard` — O(slice) verified reads without full-stream materialization.
 - **Streaming-first encode/decode (P2):** `encode_stream` / `decode_stream`, `stream_encode_buffer`, `stream_encode_outboard`, `stream_decode_*`; buffer helpers in `encoding`/`decoding` delegate to `src/stream/`.
 - **Segment sharding (P3):** `encode_shard_stream` / `decode_shards_stream` for multi-segment logical files; `SHARDED` Adamantine flag when `PackEntry.segments.len() > 1`.

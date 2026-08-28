@@ -1,13 +1,15 @@
 //! Serial FEC encode path (`fec.rs` `rs.encode` branch) when `parallel` is disabled.
 //!
-//! CI runs this via `cargo test --no-default-features --features "pqc,ots,cli" --test serial_fec_path`.
+//! CI / `just test-serial`:
+//! `cargo test --no-default-features --features "backend-rust,pqc,ots,cli" --test serial_fec_path`
+//! (must name `backend-rust` under `--no-default-features`; never `--all-features`).
 
 #![cfg(not(feature = "parallel"))]
 
 use std::io::Cursor;
 
 use carbonado::constants::FEC_M;
-use carbonado::stream::fec::{encode_inboard_buffer, FecInboardEncoder};
+use carbonado::stream::fec::{FecInboardEncoder, encode_inboard_buffer};
 
 fn patterned(len: usize) -> Vec<u8> {
     (0..len).map(|i| (i % 251) as u8).collect()
@@ -21,11 +23,13 @@ fn serial_fec_encoder_matches_buffer_path_at_stripe_boundaries() {
         let (buffer_encoded, pl, cl) = encode_inboard_buffer(&input).expect("buffer");
 
         let mut enc = FecInboardEncoder::new(logical_len).expect("new");
-        enc.feed(Cursor::new(&input)).expect("feed");
-        let stripe = enc.finish().expect("finish").expect("stripe");
+        let mut stripes = enc.feed(Cursor::new(&input)).expect("feed");
+        stripes.extend(enc.finish().expect("finish"));
         let mut incremental = Vec::new();
-        for shard in &stripe.shards {
-            incremental.extend_from_slice(shard);
+        for stripe in &stripes {
+            for shard in &stripe.shards {
+                incremental.extend_from_slice(shard);
+            }
         }
 
         assert_eq!(pl, enc.padding_len(), "padding len {logical_len}");
@@ -34,6 +38,7 @@ fn serial_fec_encoder_matches_buffer_path_at_stripe_boundaries() {
             incremental, buffer_encoded,
             "serial rs.encode path at logical_len={logical_len}"
         );
-        assert_eq!(incremental.len(), FEC_M * cl as usize);
+        assert_eq!(incremental.len() % (FEC_M * cl as usize), 0);
+        assert_eq!(cl, 4096);
     }
 }

@@ -4,8 +4,14 @@ on:
   - push
   - pull_request
 
+# bao-tree is a git dep (Cargo.toml: n0-computer/bao-tree rev = PR 78 merge SHA).
+# Checkout it *inside* GITHUB_WORKSPACE (`path: bao-tree`). actions/checkout
+# rejects anything outside the workspace, so `path: ../bao-tree` fails before rustc.
+# After checkout, append a CI-only [patch] so cargo uses that tree (do not commit
+# a machine-local path). Local optional sibling remains `just setup-bao-tree`.
 env:
   CARGO_TERM_COLOR: always
+  BAO_TREE_REV: dbc952e32cbda8ffd14c106b770e72987b01618e
 
 jobs:
   lint:
@@ -14,23 +20,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout bao-tree keyed fork (sibling for path dep)
+      - name: Checkout bao-tree (PR 78 merge, in-workspace for path dep)
         uses: actions/checkout@v4
         with:
-          repository: SurmountSystems/bao-tree
-          ref: 76-keyed-bao
-          path: ../bao-tree
+          repository: n0-computer/bao-tree
+          ref: ${{ env.BAO_TREE_REV }}
+          path: bao-tree
+          persist-credentials: false
+
+      - name: Patch cargo to use workspace bao-tree
+        uses: ./.github/actions/ci-patch-bao-tree
 
       - uses: extractions/setup-just@v2
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.0"
+          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
 
       - name: Format check
         run: just fmt
 
-      - name: Lint (native, all targets/features)
+      - name: Lint (native; backend-rust + optional features)
         run: just lint
 
   lint-wasm:
@@ -39,17 +52,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout bao-tree keyed fork (sibling for path dep)
+      - name: Checkout bao-tree (PR 78 merge, in-workspace for path dep)
         uses: actions/checkout@v4
         with:
-          repository: SurmountSystems/bao-tree
-          ref: 76-keyed-bao
-          path: ../bao-tree
+          repository: n0-computer/bao-tree
+          ref: ${{ env.BAO_TREE_REV }}
+          path: bao-tree
+          persist-credentials: false
+
+      - name: Patch cargo to use workspace bao-tree
+        uses: ./.github/actions/ci-patch-bao-tree
 
       - uses: extractions/setup-just@v2
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.98.0"
+          components: rustfmt, clippy
           targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
@@ -64,16 +83,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout bao-tree keyed fork (sibling for path dep)
+      - name: Checkout bao-tree (PR 78 merge, in-workspace for path dep)
         uses: actions/checkout@v4
         with:
-          repository: SurmountSystems/bao-tree
-          ref: 76-keyed-bao
-          path: ../bao-tree
+          repository: n0-computer/bao-tree
+          ref: ${{ env.BAO_TREE_REV }}
+          path: bao-tree
+          persist-credentials: false
+
+      - name: Patch cargo to use workspace bao-tree
+        uses: ./.github/actions/ci-patch-bao-tree
 
       - uses: extractions/setup-just@v2
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.0"
+          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
 
@@ -83,12 +109,12 @@ jobs:
           RUST_BACKTRACE: 1
 
       - name: Test (serial FEC path without parallel)
-        run: cargo test --no-default-features --features "pqc,ots,cli" --test serial_fec_path
+        run: cargo test --no-default-features --features "backend-rust,pqc,ots,cli" --test serial_fec_path
         env:
           RUST_BACKTRACE: 1
 
-      - name: Test (all features)
-        run: cargo test --all-features
+      - name: Test (backend-rust + optional features)
+        run: cargo test --features "async,async-tokio,man-gen"
         env:
           RUST_BACKTRACE: 1
 
@@ -119,24 +145,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout bao-tree keyed fork (sibling for path dep)
+      - name: Checkout bao-tree (PR 78 merge, in-workspace for path dep)
         uses: actions/checkout@v4
         with:
-          repository: SurmountSystems/bao-tree
-          ref: 76-keyed-bao
-          path: ../bao-tree
+          repository: n0-computer/bao-tree
+          ref: ${{ env.BAO_TREE_REV }}
+          path: bao-tree
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Patch cargo to use workspace bao-tree
+        uses: ./.github/actions/ci-patch-bao-tree
+
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.98.0"
+          components: rustfmt, clippy
           targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Check ${{ matrix.target }} (with pqc)
-        run: cargo check --target ${{ matrix.target }} --all-features
+      - name: Check ${{ matrix.target }} (backend-rust + pqc/optional)
+        run: cargo check --target ${{ matrix.target }} --features "async,async-tokio,man-gen"
 
-      - name: Check ${{ matrix.target }} (no pqc)
-        run: cargo check --target ${{ matrix.target }} --no-default-features
+      - name: Check ${{ matrix.target }} (backend-rust only, no pqc)
+        run: cargo check --target ${{ matrix.target }} --no-default-features --features "backend-rust"
 
   # WASM browser testing is limited because libbitcoinpqc uses C code + cmake.
   # Full wasm-pack test can be run locally with:
@@ -148,18 +180,55 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout bao-tree keyed fork (sibling for path dep)
+      - name: Checkout bao-tree (PR 78 merge, in-workspace for path dep)
         uses: actions/checkout@v4
         with:
-          repository: SurmountSystems/bao-tree
-          ref: 76-keyed-bao
-          path: ../bao-tree
+          repository: n0-computer/bao-tree
+          ref: ${{ env.BAO_TREE_REV }}
+          path: bao-tree
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Patch cargo to use workspace bao-tree
+        uses: ./.github/actions/ci-patch-bao-tree
+
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.98.0"
+          components: rustfmt, clippy
           targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Check wasm32 (no pqc)
-        run: cargo check --target wasm32-unknown-unknown --no-default-features
+      - name: Check wasm32 (backend-rust only, no pqc)
+        run: cargo check --target wasm32-unknown-unknown --no-default-features --features "backend-rust"
+
+  # Lean proofs + AOT demo. No libcarbonado / carbonado-sys / Cargo backend-lean.
+  lean-proofs:
+    runs-on: ubuntu-latest
+    needs: lint
+    timeout-minutes: 180
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Free disk for nix
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+          df -h
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v30
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Lean no-sorry + demo
+        run: |
+          set -euo pipefail
+          nix build .#checks.x86_64-linux.no-sorry
+          nix build .#checks.x86_64-linux.tooling-purity
+          nix build .#checks.x86_64-linux.carbonado
+          nix build .#checks.x86_64-linux.demo

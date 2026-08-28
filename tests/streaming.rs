@@ -1,16 +1,18 @@
 //! Streaming encode/decode roundtrip vs buffer path + multi-MiB smoke.
 
+mod common;
+
 use std::fs::File;
 use std::io::{Cursor, Read, Write};
 
 use carbonado::decode;
-use carbonado::encode;
-use carbonado::file::{decode_stream, encode_stream};
+use carbonado::file::decode_stream;
 use carbonado::stream::{
     decode::stream_decode_outboard,
-    encode::{stream_encode_buffer, stream_encode_outboard, stream_encode_outboard_buffer},
-    stream_decode_buffer,
+    encode::{stream_encode_outboard, stream_encode_outboard_buffer},
+    stream_decode_buffer, stream_decode_outboard_buffer,
 };
+use common::{encode, file_encode_stream, stream_encode_buffer};
 use proptest::prelude::*;
 use rand::RngCore;
 
@@ -54,6 +56,7 @@ proptest! {
                 has_zfec.then_some(&mut par_buf),
                 &mut nonce,
                 header_path,
+                &carbonado::ZstdEncode::level(20),
             )?;
 
             let buf = stream_encode_outboard_buffer(
@@ -61,6 +64,7 @@ proptest! {
                 &data,
                 format,
                 if encrypted { Some(nonce) } else { None },
+                &carbonado::ZstdEncode::level(20),
             )?;
 
             prop_assert_eq!(hash, buf.hash);
@@ -115,6 +119,7 @@ fn stream_outboard_empty_zfec_roundtrip() {
         Some(&mut par_buf),
         &mut nonce,
         false,
+        &carbonado::ZstdEncode::level(20),
     )
     .expect("empty encode");
 
@@ -152,6 +157,7 @@ fn stream_outboard_encrypted_header_nonce_roundtrip() {
         None::<&mut Vec<u8>>,
         &mut nonce,
         true,
+        &carbonado::ZstdEncode::level(20),
     )
     .expect("enc encode");
     assert_ne!(nonce, [0u8; 16]);
@@ -189,8 +195,8 @@ fn multi_mib_file_stream_smoke() {
 
     let mut in_f = File::open(&input_path).expect("open input");
     let mut body_buf = Vec::new();
-    let (header, _info) =
-        encode_stream(&MASTER, &mut in_f, 14, None, &mut body_buf).expect("encode_stream");
+    let (header, _info) = file_encode_stream(&MASTER, &mut in_f, 14, None, &mut body_buf)
+        .expect("file_encode_stream");
 
     let mut archive = header.try_to_vec().expect("header");
     archive.extend_from_slice(&body_buf);
@@ -222,7 +228,45 @@ fn multi_mib_file_stream_smoke() {
     assert_eq!(recovered, buffer_recovered);
 }
 
-/// `encode_stream` / `decode_stream` format sweep (~64 KiB) vs buffer path.
+/// W1a smoke: codecode (encode→decode→encode) + decodec (decode→encode→decode) for public c14.
+/// Full matrix lives in post-R10 W2d; this pins stream dual determinism for one format.
+#[test]
+fn decode_stream_codecode_decodec_public_c14() {
+    const FORMAT: u8 = 14;
+    let pt: Vec<u8> = (0..4096).map(|i| (i % 251) as u8).collect();
+
+    let mut body = Vec::new();
+    let (h1, _) = file_encode_stream(&MASTER, std::io::Cursor::new(&pt), FORMAT, None, &mut body)
+        .expect("enc1");
+    let mut a = h1.try_to_vec().expect("hdr");
+    a.extend_from_slice(&body);
+
+    let mut out = Vec::new();
+    let (_h, n) = decode_stream(&MASTER, std::io::Cursor::new(&a), &mut out).expect("dec1");
+    assert_eq!(n as usize, pt.len());
+    assert_eq!(out, pt, "decode_stream plaintext");
+
+    // codecode: re-encode must match wire when public (deterministic)
+    let mut body2 = Vec::new();
+    let (h2, _) = file_encode_stream(
+        &MASTER,
+        std::io::Cursor::new(&out),
+        FORMAT,
+        None,
+        &mut body2,
+    )
+    .expect("enc2");
+    let mut a2 = h2.try_to_vec().expect("hdr2");
+    a2.extend_from_slice(&body2);
+    assert_eq!(a2, a, "codecode: second encode must match first archive");
+
+    // decodec: decode → encode → decode recovers plaintext; wire stable
+    let mut out2 = Vec::new();
+    decode_stream(&MASTER, std::io::Cursor::new(&a2), &mut out2).expect("dec2");
+    assert_eq!(out2, pt, "decodec: plaintext roundtrip");
+}
+
+/// `file_encode_stream` / `decode_stream` format sweep (~64 KiB) vs buffer path.
 #[test]
 fn file_stream_format_sweep() {
     const PAYLOAD_LEN: usize = 64 * 1024;
@@ -252,7 +296,8 @@ fn file_stream_format_sweep() {
         let mut in_f = File::open(&input_path).expect("open input");
         let mut body_buf = Vec::new();
         let (header, _stream_info) =
-            encode_stream(master, &mut in_f, format, None, &mut body_buf).expect("encode_stream");
+            file_encode_stream(master, &mut in_f, format, None, &mut body_buf)
+                .expect("file_encode_stream");
 
         let mut archive = header.try_to_vec().expect("header");
         archive.extend_from_slice(&body_buf);
@@ -292,5 +337,125 @@ fn file_stream_format_sweep() {
             recovered, buffer_recovered,
             "stream vs buffer for c{format}"
         );
+    }
+}
+
+/// W1b: public **non-Compression** outboard stream (c4 Bao, c12 Bao+FEC) multi-MiB
+/// codecode/decodec.
+///
+/// S4 O(chunk/stripe) pipeline. Wire must match the buffer path; public re-encode is deterministic.
+///
+/// **Peak RAM:** architectural O(chunk/stripe) claim (SeekableSpool / stripe FEC / leaf Bao);
+/// not RSS-instrumented here (optional W4 measurement residual).
+#[test]
+fn stream_outboard_public_e2_codecode_decodec_c4_c12() {
+    const PAYLOAD_LEN: usize = 2 * 1024 * 1024; // multi-MiB — exercises O(chunk) spool path
+    let pt: Vec<u8> = (0..PAYLOAD_LEN).map(|i| (i % 251) as u8).collect();
+
+    for &format in &[4u8, 12u8] {
+        let has_bao = format & 4 != 0;
+        let has_fec = format & 8 != 0;
+
+        let mut main1 = Cursor::new(Vec::new());
+        let mut bao1 = Vec::new();
+        let mut par1 = Vec::new();
+        let mut nonce = [0u8; 16];
+        let (hash1, info1) = stream_encode_outboard(
+            &MASTER,
+            Cursor::new(&pt),
+            format,
+            &mut main1,
+            has_bao.then_some(&mut bao1),
+            has_fec.then_some(&mut par1),
+            &mut nonce,
+            false,
+            &carbonado::ZstdEncode::level(20),
+        )
+        .expect("encode1");
+        let main1_bytes = main1.into_inner();
+
+        // Decode recovers plaintext
+        let mut out = Vec::new();
+        stream_decode_outboard(
+            &MASTER,
+            hash1.as_bytes(),
+            Cursor::new(&main1_bytes),
+            has_bao.then_some(Cursor::new(&bao1)),
+            has_fec.then_some(Cursor::new(&par1)),
+            info1.padding_len,
+            format,
+            None,
+            &mut out,
+        )
+        .expect("decode1");
+        assert_eq!(out, pt, "c{format} decode plaintext");
+
+        // codecode: re-encode public must bit-match (deterministic)
+        let mut main2 = Cursor::new(Vec::new());
+        let mut bao2 = Vec::new();
+        let mut par2 = Vec::new();
+        let mut nonce2 = [0u8; 16];
+        let (hash2, info2) = stream_encode_outboard(
+            &MASTER,
+            Cursor::new(&out),
+            format,
+            &mut main2,
+            has_bao.then_some(&mut bao2),
+            has_fec.then_some(&mut par2),
+            &mut nonce2,
+            false,
+            &carbonado::ZstdEncode::level(20),
+        )
+        .expect("encode2");
+        let main2_bytes = main2.into_inner();
+        assert_eq!(hash2, hash1, "c{format} codecode hash");
+        assert_eq!(main2_bytes, main1_bytes, "c{format} codecode main");
+        if has_bao {
+            assert_eq!(bao2, bao1, "c{format} codecode bao outboard");
+        }
+        if has_fec {
+            assert_eq!(par2, par1, "c{format} codecode fec parity");
+            assert_eq!(info2.padding_len, info1.padding_len);
+        }
+
+        // decodec: decode second wire → plaintext
+        let mut out2 = Vec::new();
+        stream_decode_outboard(
+            &MASTER,
+            hash2.as_bytes(),
+            Cursor::new(&main2_bytes),
+            has_bao.then_some(Cursor::new(&bao2)),
+            has_fec.then_some(Cursor::new(&par2)),
+            info2.padding_len,
+            format,
+            None,
+            &mut out2,
+        )
+        .expect("decode2");
+        assert_eq!(out2, pt, "c{format} decodec plaintext");
+
+        // Match buffer path
+        let buf = stream_encode_outboard_buffer(
+            &MASTER,
+            &pt,
+            format,
+            None,
+            &carbonado::ZstdEncode::level(20),
+        )
+        .expect("buf encode");
+        assert_eq!(buf.hash, hash1, "c{format} stream vs buffer hash");
+        assert_eq!(buf.main, main1_bytes, "c{format} stream vs buffer main");
+        let buf_dec = stream_decode_outboard_buffer(
+            &MASTER,
+            buf.hash.as_bytes(),
+            &buf.main,
+            buf.verification_outboard.as_deref(),
+            buf.fec_parity.as_deref(),
+            buf.info.padding_len,
+            format,
+            None,
+        )
+        .expect("buf decode");
+        assert_eq!(buf_dec, pt, "c{format} buffer decode");
     }
 }

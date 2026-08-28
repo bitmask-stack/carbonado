@@ -122,7 +122,7 @@ Carbonado uses **reed-solomon-erasure 4/8**: any **4 of 8** shards reconstruct t
 
 1. ~~Directory segment corruption + centralized bundle extract + FEC scrub~~ **Done** — `tests/directory_archive.rs::{directory_segment_corruption_bao_bundle_extract_scrub_roundtrip,directory_fec_scrub_matrix_c12_c13_c14_c15,directory_multi_segment_fec_bundle_indices}` (c12–c15 segments: verification + FEC parity indexed in Adamantine bundle; `scrub_outboard` recovers corrupt bare mains within ≤4 shard taints; c15 encrypted five-shard knockout documented as `InvalidScrubbedHash` negative)
 2. ~~Cross-tool interop fixtures (manifest + segment naming)~~ **Done** — `tests/fixtures/directory_interop_golden.json` + `tests/filepack_interop.rs::{adamantine_decimal_segment_naming_contract,golden_directory_interop_checksums_and_manifest_wire}`
-3. ~~UDP shard mapping contract test (chaos-injection datagram ↔ shard slot at `InboardShardLayout` coordinates)~~ **Done** — `tests/udp_fec_sim.rs` (datagram drop = `erase_shards` at approximate coordinates; not normative Bao-wrapped wire; ≤4-drop scrub recovery; c12 five-drop irrecoverable)
+3. ~~UDP shard mapping contract test (chaos-injection datagram ↔ RS symbol leaves)~~ **Done** — `tests/udp_fec_sim.rs` (datagram = concatenated 4 KiB stripe leaves per symbol; drop = `erase_shards`; not normative Bao-wrapped wire; ≤4-drop scrub recovery; five-drop irrecoverable at c12; c14 may recover on zero padding leaves)
 
 ### P4 — External normative
 
@@ -132,10 +132,14 @@ Carbonado uses **reed-solomon-erasure 4/8**: any **4 of 8** shards reconstruct t
 ## Running tests
 
 ```bash
-# Full native gate (serial FEC path + full matrix)
-cargo test --features "pqc,ots,cli"
-cargo test --all-features
-cargo clippy --all-targets --all-features -- -D warnings
+# Full native gate (default + serial FEC + optional features)
+cargo test
+cargo test --no-default-features --features "backend-rust,pqc,ots,cli" --test serial_fec_path
+cargo test --features "async,async-tokio,man-gen"
+cargo clippy --all-targets --features "async,async-tokio,man-gen" -- -D warnings
+
+# Lean proofs + AOT demo (not a Cargo Lean engine)
+just test-lean-ci
 
 # FEC-focused
 cargo test --test fec_chaos --test fec_scrub_matrix --test shard_fec_scrub
@@ -154,9 +158,9 @@ cargo test --features async-tokio --test streaming_async
 cargo test --test parallel_determinism
 
 # Serial FEC path without `parallel` (exercises fec.rs rs.encode branch)
-cargo test --no-default-features --features "pqc,ots,cli" --test serial_fec_path
+cargo test --no-default-features --features "backend-rust,pqc,ots,cli" --test serial_fec_path
 
-# WASM lint (no pqc)
+# WASM lint (backend-rust only, no pqc)
 just lint-wasm
 ```
 
@@ -165,7 +169,9 @@ just lint-wasm
 - Keep chaos tests on native Linux (may be slow at 256 KiB × 4 public levels)
 - Shard FEC scrub tests parallel-safe (unique temp dirs per test)
 - **Default gate:** `cargo test` (includes `parallel` and `parallel_determinism`)
-- **Serial FEC gate:** `cargo test --no-default-features --features "pqc,ots,cli" --test serial_fec_path` — must run before or alongside `--all-features`
+- **Serial FEC gate:** `cargo test --no-default-features --features "backend-rust,pqc,ots,cli" --test serial_fec_path` — must name `backend-rust` under `--no-default-features`
+- **Optional rust matrix:** `cargo test --features "async,async-tokio,man-gen"` (never `--all-features`)
 - **Phase 3 determinism:** covered by default `cargo test --test parallel_determinism` (RS parity vs `encode_rs_parity_serial`, c12/c14 bytes + Bao root, scrub roundtrip)
-- **WASM `parallel`:** compile-only in `test-matrix` (`cargo check --target wasm32-unknown-unknown --all-features`); runtime serial fallback documented in `STREAMING_PARALLELISM.md` § Phase 3 WASM
+- **WASM `parallel`:** compile-only in `test-matrix` (`cargo check --target wasm32-unknown-unknown --features "async,async-tokio,man-gen"` and no-pqc `backend-rust` only); runtime serial fallback documented in `STREAMING_PARALLELISM.md` § Phase 3 WASM
+- **Lean proofs:** job `lean-proofs` / `just test-lean-ci` = nix no-sorry + AOT demo
 - Proptest cases capped at 32 for `fec_chaos` (raise when stable)

@@ -151,6 +151,15 @@ pub fn fec_slice_from_bundle(
     bundle_slice_from_bundle(bundle, offset, len, "fec_parity")
 }
 
+/// Extract one segment's RFC 8878 dictionary slice from the bundle.
+pub fn dict_slice_from_bundle(
+    bundle: &[u8],
+    offset: u32,
+    len: u32,
+) -> Result<&[u8], CarbonadoError> {
+    bundle_slice_from_bundle(bundle, offset, len, "dict")
+}
+
 fn bundle_slice_from_bundle<'a>(
     bundle: &'a [u8],
     offset: u32,

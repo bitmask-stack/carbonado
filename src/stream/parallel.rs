@@ -6,7 +6,7 @@
 
 use std::sync::OnceLock;
 
-use reed_solomon_erasure::galois_8::{mul_slice, mul_slice_xor, ReedSolomon};
+use reed_solomon_erasure::galois_8::{ReedSolomon, mul_slice, mul_slice_xor};
 
 use crate::{
     constants::{FEC_K, FEC_M},

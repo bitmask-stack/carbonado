@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use bao::{encode::Encoder, Hash};
+use bao::{Hash, encode::Encoder};
 use log::trace;
 
 use crate::{

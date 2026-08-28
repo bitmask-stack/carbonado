@@ -8,9 +8,9 @@ use anyhow::Result;
 use carbonado::{
     error::CarbonadoError,
     scrub,
-    stream::{decode_shards_stream, encode_shard_stream, ShardEncodeResult, ShardSource},
+    stream::{ShardEncodeResult, ShardSource, decode_shards_stream},
 };
-use common::corruption::InboardShardLayout;
+use common::encode_shard_stream;
 
 const MASTER: [u8; 32] = [0x42; 32];
 const FORMAT: u8 = 14;
@@ -85,9 +85,11 @@ fn shard_body_corruption_scrub_one_segment() -> Result<()> {
     let info = result.encode_info.clone();
 
     let mut corrupted_body = body.clone();
-    let layout = InboardShardLayout::from_encode_info(corrupted_body.len(), info.chunk_len);
-    // Erase four shard stripes (50% RS budget) — guarantees Bao failure + scrub path.
-    common::corruption::erase_shards(&mut corrupted_body, &layout, &[0, 2, 4, 6]);
+    let n_leaves = carbonado::stream::inboard_leaf_data_ranges(&corrupted_body)
+        .expect("leaf ranges")
+        .len() as u32;
+    let mask = common::corruption::leaves_with_symbol_slots(n_leaves, &[0, 2, 4, 6]);
+    common::corruption::wipe_inboard_leaves(&mut corrupted_body, &mask, 0xEE);
 
     let recovered_body = scrub(&corrupted_body, hash_bytes, &info, FORMAT)?;
     assert_eq!(recovered_body, *body);

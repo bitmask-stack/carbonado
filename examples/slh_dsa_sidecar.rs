@@ -7,10 +7,11 @@
 //!
 //! See AGENTS.md §2.3 for the exact sidecar format and security model.
 
+use carbonado::ZstdEncode;
 use carbonado::crypto::{
     read_slh_sidecar, slh_dsa_generate_keypair, slh_dsa_sign, slh_dsa_verify, write_slh_sidecar,
 };
-use carbonado::file::{encode, Header};
+use carbonado::file::{Header, encode_with_zstd};
 use getrandom::getrandom;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -23,7 +24,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let important_data = b"This could be a manifest, a checkpoint, or a critical archive.";
 
-    let (encoded, _info) = encode(&master_key, important_data, 15, None)?;
+    let (encoded, _info) = encode_with_zstd(
+        &master_key,
+        important_data,
+        15,
+        None,
+        &ZstdEncode::level(20),
+    )?;
 
     // The high-level encode includes a Header. Parse it to get the authoritative Bao hash
     // that represents this archive (this is the value we sign for a sidecar).
@@ -85,7 +92,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert!(!still_valid);
 
     println!("\nSLH-DSA sidecar signing example completed successfully.");
-    println!("Remember: SLH-DSA public key is stored in the Carbonado Header; only the signature is handled in the sidecar. Never embed signatures inside the container.");
+    println!(
+        "Remember: SLH-DSA public key is stored in the Carbonado Header; only the signature is handled in the sidecar. Never embed signatures inside the container."
+    );
 
     Ok(())
 }

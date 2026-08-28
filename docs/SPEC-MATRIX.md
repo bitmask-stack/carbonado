@@ -1,0 +1,22 @@
+# carbonado — specification matrix
+
+Every product capability maps to Lean module(s), parity gate(s), and proof status.
+
+| Capability | Lean | Parity gate | Proof status |
+|------------|------|-------------|--------------|
+| Magic / header sizes / format bits | `Carbonado.Constants`, `CarbonadoTest.Scaffold` | `demo` / AOT Main | **scaffold theorems** (no sorry/admit) |
+| Header wire + header_mac | `Carbonado.Header` (177 B parse/build/verify), `Carbonado.Crypto.EtM.computeHeaderMac` | golden in `demo` + `ref/parity-harness/drivers/etm-vectors` | **Program E:** wire codec + header-MAC-before-body; auth_data 113 B formula theorem |
+| AES-CTR + HMAC-SHA512 EtM | `Carbonado.Crypto.{SHA512,HMAC,AESCTR,EtM}` | `demo` goldens; driver `ref/parity-harness/drivers/etm-vectors` | **Program B closed**: MAC-before-decrypt theorems; SHA/HMAC/AES-CTR/EtM goldens; roundtrip + tamper + wrong-key |
+| RS 4/8 + geometry | `Carbonado.Fec.{Galois,Matrix,RS,Inboard}`, `CarbonadoTest.Fec` | `demo` goldens; driver `ref/parity-harness/drivers/rs-vectors` | **Program C closed**: GF; geometry; encode/reconstruct; all 7 `FecError` variants |
+| Keyed Bao 4 KiB | `Carbonado.Bao.{Blake3,Tree,Product}`, `CarbonadoTest.Bao` | `demo` goldens; driver `ref/parity-harness/drivers/bao-vectors` | **Program D closed**: stream slice decode; all `BaoError` variants |
+| Pipeline c0–c15 | `Carbonado.Pipeline`, `CarbonadoTest.Pipeline` | `demo` format matrix; optional future `product-matrix` vs rust | **Program E+F**: compress(zstd-20 when bit set)→encrypt→FEC→Bao + reverse; headered + body paths; `encoded_len` bound; MAC-before-decrypt + header-MAC-before-body; strict `PipelineError` incl. zstd modes |
+| Scrub | `Carbonado.Scrub` | demo knockout recovery | **Program E:** pure RS subset search + re-encode + Bao root compare; `unnecessaryScrub` / `scrubRequiresVerification` / `invalidScrubbedHash` |
+| Outboard | `Carbonado.Bao` create/verify; `Carbonado.Outboard` product body (bare main + FEC parity + verification sidecar) | bao-vectors + `demo` outboard segment roundtrip | **Program D+G**: post-order Bao outboard; directory segments via `encodeOutboardBody` / `decodeOutboardBody` |
+| Streaming bounds | `Carbonado.Stream` | demo greps + theorems | **Program E:** O(stripe) FEC retain theorems (`maxFecStripeRetain`); pure stripe transducer model |
+| Sharding | `Carbonado.Shard` | demo multi-segment roundtrip | **Program E:** budget split + `chunk_index` sequence + headered segments |
+| Zstd-20 compress | `Carbonado.Compress`, `CarbonadoTest.Compress` | `demo` API goldens (empty/hello) + frame-header parse; `tests/zstd_frame_params.rs` reads frames; pipeline c2/c6 | **Program F closed**: linked zstd; status taxonomy; interpreter identity fallback (LIMITS). **Frame parameters specified:** level 20, magic, checksum off, no dict, AOT small-frame `0x20` + FCS, rust streaming `0x00` + windowLog 25. Full compressed-block identity still unproved (W2a). |
+| SLH1 sidecars | `Carbonado.Slh`, `CarbonadoTest.Slh` | `demo` wire + bind-to-root + live sign/verify | **Program F + R9/G10 closed**: wire/binding theorems; live SLH-DSA-SHA2-128s via libbitcoinpqc pin + `carbonado_slh_*` (LIMITS: elaborator fail-closed; dual-suite may keep Rust composition) |
+| Adamantine directory | `Carbonado.Adamantine`, `Filepack`, `RkyvFilepack`, `Outboard`, `Directory`, `CarbonadoTest.Directory` | `demo` Program G greps; pure roundtrip AOT | **Program G + W3 closed**: pure Lean directory/CLI emit **rkyv** FilepackManifestWire v2 (goldens). Rust directory encode remains the production path. |
+| CLI | `Carbonado.Cli`, `Carbonado.Main` | `demo` + CLI subcommands | **Program G + R9:** encode/decode file+dir; single-file default `{bao_root_hex}.c{fmt:02x}`; dir default `{input}-archive/`; `slh parse` wire; `slh verify` live oracle (exit 0 accept / exit 1 reject) |
+
+Component rows track Lean+Nix proof/oracle gates. The Rust behavioral contract is [TEST_CONTRACT.md](./TEST_CONTRACT.md). **G1/W5a closed:** no optional `ref/carbonado-rust` product pin. G8 C-ABI dual-backend was **removed** 2026-08-24.

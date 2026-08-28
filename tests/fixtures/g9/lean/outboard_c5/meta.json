@@ -1,0 +1,14 @@
+{
+  "layout": "outboard",
+  "engine": "lean",
+  "format": 5,
+  "hash_hex": "ab4cf6a9bbc86edb05f4adf1178bd21828c6d79bb8864fde3b4edd15b50f95ea",
+  "padding_len": 0,
+  "header_path": true,
+  "has_verification_outboard": true,
+  "has_fec_parity": false,
+  "has_header": true,
+  "nonce_hex": "0102030405060708090a0b0c0d0e0f10",
+  "plaintext_id": "g9_matrix_v1",
+  "encrypted": true
+}

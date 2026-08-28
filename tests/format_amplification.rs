@@ -8,10 +8,13 @@
 //!
 //! Run: `cargo test --test format_amplification -- --nocapture` to print the matrix.
 
+mod common;
+
 use carbonado::{
     constants::{FEC_K, FEC_M, SLICE_LEN},
     file::{self, Header},
 };
+use common::file_encode;
 
 /// ~1 MiB input (exactly 1_048_576 bytes).
 const INPUT_LEN: usize = 1_048_576;
@@ -71,7 +74,7 @@ struct Row {
 }
 
 fn measure_row(format: u8, input: &[u8]) -> Row {
-    let (encoded, info) = file::encode(&MASTER, input, format, None).expect("encode");
+    let (encoded, info) = file_encode(&MASTER, input, format, None).expect("encode");
     let net_amp = info.output_len as f32 / info.input_len.max(1) as f32;
     Row {
         format,
@@ -232,7 +235,7 @@ fn format_amplification_matrix_all_levels() {
 }
 
 fn roundtrip(format: u8, expected: &[u8]) {
-    let (encoded, _) = file::encode(&MASTER, expected, format, None).expect("encode");
+    let (encoded, _) = file_encode(&MASTER, expected, format, None).expect("encode");
     let (_hdr, decoded) = file::decode(&MASTER, &encoded).expect("decode");
     assert_eq!(decoded, expected, "roundtrip failed for c{format:02X}");
 }

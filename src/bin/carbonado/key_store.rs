@@ -30,17 +30,22 @@ pub struct MnemonicInitNotice {
 /// Resolve the on-disk path for the persisted mnemonic.
 ///
 /// Precedence: `CARBONADO_MNEMONIC_PATH` → XDG-style config dir (`directories` crate).
-pub fn mnemonic_path() -> PathBuf {
+/// Returns `Err` when no home/config dir is available and the env override is unset
+/// (no `.expect` in production paths).
+pub fn mnemonic_path() -> Result<PathBuf, String> {
     if let Ok(p) = std::env::var("CARBONADO_MNEMONIC_PATH") {
-        return PathBuf::from(p);
+        return Ok(PathBuf::from(p));
     }
-    let proj = directories::ProjectDirs::from("com", "bitmask-stack", "carbonado")
-        .expect("home directory required for default mnemonic path");
-    proj.config_dir().join(MNEMONIC_FILENAME)
+    let proj =
+        directories::ProjectDirs::from("com", "bitmask-stack", "carbonado").ok_or_else(|| {
+            "home directory required for default mnemonic path; set CARBONADO_MNEMONIC_PATH"
+                .to_string()
+        })?;
+    Ok(proj.config_dir().join(MNEMONIC_FILENAME))
 }
 
 pub fn mnemonic_exists() -> bool {
-    mnemonic_path().is_file()
+    mnemonic_path().map(|p| p.is_file()).unwrap_or(false)
 }
 
 /// Generate a new English BIP39 mnemonic (`word_count` must be 12, 15, 18, 21, or 24).
@@ -70,7 +75,7 @@ pub fn ensure_mnemonic() -> Result<Option<MnemonicInitNotice>, String> {
 
 /// Write mnemonic to [`mnemonic_path`] (fails if file exists unless `force`).
 pub fn save_mnemonic(mnemonic: &Mnemonic, force: bool) -> Result<PathBuf, String> {
-    let path = mnemonic_path();
+    let path = mnemonic_path()?;
     if path.exists() && !force {
         return Err(format!(
             "mnemonic already exists at {}; use --force to overwrite or `carbonado key import`",
@@ -87,7 +92,7 @@ pub fn save_mnemonic(mnemonic: &Mnemonic, force: bool) -> Result<PathBuf, String
 
 /// Load persisted mnemonic from disk.
 pub fn load_mnemonic() -> Result<Mnemonic, String> {
-    let path = mnemonic_path();
+    let path = mnemonic_path()?;
     let raw = fs::read_to_string(&path)
         .map_err(|e| format!("failed to read mnemonic at {}: {e}", path.display()))?;
     let phrase = raw.trim();
@@ -95,7 +100,7 @@ pub fn load_mnemonic() -> Result<Mnemonic, String> {
         return Err(format!("mnemonic file at {} is empty", path.display()));
     }
     Mnemonic::parse_in(Language::English, phrase)
-        .map_err(|e| format!("invalid mnemonic in {}: {e}", mnemonic_path().display()))
+        .map_err(|e| format!("invalid mnemonic in {}: {e}", path.display()))
 }
 
 /// Derive the 32-byte Carbonado master key from a BIP39 mnemonic (empty BIP39 passphrase).

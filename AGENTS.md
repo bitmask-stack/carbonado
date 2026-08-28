@@ -1,8 +1,44 @@
 # AGENTS.md — Carbonado Development Guidelines
 
 **Project:** Carbonado (bitmask-stack/carbonado)  
-**Mission:** Apocalypse-resistant archival format for consensus-critical data, with a focus on Bitcoin quantum resistance.  
-**Current Status (as of 2026-07):** Symmetric v2 stack (`CARBONADO20\n`, AES-256-CTR + HMAC-SHA512 EtM) stable. **P1:** `SLICE_LEN=4096`, keyed 4 KiB Bao groups, seekable slice verify. **P2:** streaming-first encode/decode. **P3:** segment sharding. **P4:** Adamantine 1.0 directory archives (see §7.1). FEC: reed-solomon-erasure RS 4/8. Outboard + scrub complete.
+**Mission:** Apocalypse-resistant archival format for consensus-critical data, with a focus on Bitcoin quantum resistance.
+
+## Product model (Rust engine + Lean proofs)
+
+| Concern | Role |
+|---------|------|
+| **Rust** (`src/`, default `backend-rust`) | Production library + CLI |
+| **Rust tests** (`tests/`) | **Normative behavioral contract** for the Rust engine |
+| **Lean 4** (`Carbonado/`, `CarbonadoTest/`) | Spec + machine-checked proofs + AOT demo binary |
+| **Nix flakes** | Lean compile, no-sorry, demo, Rust quality packages |
+| **`ref/`** | Pinned oracles (bao-tree, RustCrypto, zstd, …) |
+
+There is **no** `carbonado-sys` crate, **no** Cargo `backend-lean`, and **no** product C ABI (`libcarbonado.so` is gone). Do **not** claim G8 C-ABI parity. Lean remains proofs; Rust `tests/` remain the Rust contract.
+
+```bash
+cargo test            # Rust engine (default features)
+just test-lean-ci     # Lean no-sorry + AOT demo (nix); not cargo --features backend-lean
+```
+
+`backend-rust` is an empty default marker so `--no-default-features --features "backend-rust,pqc,ots,cli"` still names the Rust engine.
+
+| Concern | Allowed |
+|---------|---------|
+| Lean product logic, proofs, AOT demo | `Carbonado/`, `CarbonadoTest/` (not `Tests/` — collides with Rust `tests/` on Darwin) |
+| Rust product + contract tests | `src/`, `tests/` |
+| Build Lean / packaging | Nix flakes (`flake.nix`, `nix/`) |
+| Tiny C for Lean AOT **demo only** | `nix/native/carbonado_zstd.c`, `nix/native/carbonado_slh.c` (`@[extern]` into the Lean executable). Not a Rust-link target. |
+| Oracles / pins | `ref/` |
+
+**Prove everything:** machine-checked Lean theorems **and** the Rust suite on the Rust engine. Historical Lean AOT goldens under `tests/fixtures/g9/lean/` are decoded by Rust (`just test-g9`); they are not a live second Cargo engine.
+
+**Agents:** implement and verify (`nix build`, `nix flake check`, `cargo test`, `just test-lean-ci` when touching Lean). Do **not** create commits or push; agents do not own git history. **Never regress default `cargo test`.** Do not invent a fargo / Systems Lean integration. Do not re-add `backend-lean` as a stub.
+
+**Gates:** `just check` / `just check-remote` (sequential fmt, clippy, nextest, then Lean, on the Nix remote builder); `just check-local` / `nix flake check` (same named checks, no force-remote; `nix flake check` is parallel); `cargo test` (Rust default / CI `desktop`); `just test-lean-ci` (Lean no-sorry + demo / CI `lean-proofs`); `just test-g9` for Rust decode of Lean goldens. GitHub Actions must not call `check-remote`.
+
+---
+
+**Current Status (as of 2026-07):** Lean 4 + Nix product scaffold started (`Carbonado/Constants`, flake). Historical Rust: Symmetric v2 stack (`CARBONADO20\n`, AES-256-CTR + HMAC-SHA512 EtM) stable. **P1:** `SLICE_LEN=4096`, keyed 4 KiB Bao groups, seekable slice verify. **P2:** streaming-first encode/decode. **P3:** segment sharding. **P4:** Adamantine 1.0 directory archives (see §7.1). FEC: reed-solomon-erasure RS 4/8. Outboard + scrub complete.
 
 **Unified streaming stack (three independent axes — do not conflate):**
 | Axis | Status |
@@ -74,7 +110,7 @@ These rules were added because the same misunderstandings have caused significan
      - Full documentation of every security-relevant decision (nonce scope, subkey labels, single-nonce behavior, sidecar signing rules, CTR counter management, etc.).
      - Real benchmarks proving hardware acceleration claims.
      - WASM support either works cleanly or has precise documented limitations.
-     - CI is strict (full clippy --all-targets --all-features -D warnings, relevant targets tested).
+     - CI is strict: `cargo clippy --all-targets --features "async,async-tokio,man-gen" -D warnings`. Lean proof gate: `just test-lean-ci` (nix no-sorry + demo).
      - Error handling is complete and specific; no lossy or generic errors hiding crypto failures.
      - Zeroization of secret material where practical.
      - Test coverage includes adversarial, large-payload, and cross-layer cases.
@@ -128,12 +164,12 @@ The overarching principle is a **clean cryptographic break** (see §1). v1 ECIES
 | Header               | ~160B with secp pubkey + Schnorr sig   | 177B: MAGIC + payload_nonce + header_mac (64B) + bao hash + slh_pk + format + u32 chunk + lengths + meta | Separate header_mac (header-auth subkey) for integrity of public metadata. No secret key material. slh_pk moved to header (sig stays sidecar). |
 | Post-Quantum sigs    | None (or ad-hoc)                        | SLH-DSA (SHA2-128s) **sidecars only** (`<hash>.cXX.slh`) | Sidecars preserve content-addressing and avoid bloat. bitcoinpqc 0.4 dogfooding per Surmount/BIP-360 mission. |
 | Forward Error Correction | zfec 4/8 (non-deterministic scrub for >~8KB, vulnerable to hits across all 8 chunks) | reed-solomon-erasure (RS 4/8): deterministic encode, reproducible scrub, better tolerance for distributed corruption ("chaos rays") while keeping 4/8 model | RS (BCH subclass) for pure determinism (critical for scrub re-encode + bao hash compare) and stronger erasure properties against partial corruption in every shard. Kept 4/8 for storage model ("application RAID"), alignment with 4 KiB slices/Bao leaves, and user intuition. |
-| Verifiability (Bao)  | bao 0.12/0.13 (1KB groups)             | bao-tree fork: 4KB groups (BlockSize log=2) + keyed on format byte | 4KB aligns with disk sectors + reduces tree overhead. Keyed roots make Bao hash multi-dimensional (commits to Format pipeline for markets). |
+| Verifiability (Bao)  | bao 0.12/0.13 (1KB groups)             | n0-computer/bao-tree (PR 78 keyed): 4KB groups (BlockSize log=2) + keyed on format byte | 4KB aligns with disk sectors + reduces tree overhead. Keyed roots make Bao hash multi-dimensional (commits to Format pipeline for markets). |
 | Slice / chunk counts | u16 limits (~64MiB FEC cap)            | u32 (theoretical ~4GiB+ per segment)               | Removed artificial caps for large archives. P1: `SLICE_LEN=4096` (one slice = one 4 KiB Bao leaf). |
 | Passphrase KDF       | Argon2id wrapper inside library        | Removed; caller responsibility (Argon2id recommended outside) | Keeps container security contract simple. Master key is 32/64B high-entropy material. |
 | Magic number         | CARBONADO01 or similar (ECIES)         | CARBONADO20\n (stable v2); 02 was dev transitional | Signals official stabilized 2.0 format. Old magic → clear external migration error. |
 | Version              | Pre-0.7 (ECIES)                        | 2.0.0 (post-FEC + docs stabilization)              | Marks end of fluid dev period. API now stable for semver. |
-| Dependencies         | ecies + secp + ...                      | aes+ctr+hmac+sha2 + reed-solomon-erasure + bao-tree fork + bitcoinpqc (optional pqc) | Clean break removal of ECIES-only crates. Hardware-accel friendly. |
+| Dependencies         | ecies + secp + ...                      | aes+ctr+hmac+sha2 + reed-solomon-erasure + n0-computer/bao-tree 0.16.1 (keyed) + bitcoinpqc (optional pqc) | Clean break removal of ECIES-only crates. Hardware-accel friendly. |
 | Optional hybrid layer | (the only encryption was the ECIES hybrid) | Pure symmetric is default. Added *optional* inner secp256k1-ECDH + ChaCha20-Poly1305 AEAD wrapped by outer AES-CTR + HMAC-EtM (via new hybrid_* and ecc_aead_* APIs) | "Maximal paranoia" defense-in-depth: different cipher families, different key-gen (ECDH+derive vs pure HMAC labels), HMAC + AEAD. See dedicated rationale below. Pure sym path and Encrypted bit semantics unchanged for normal use. secp here is *not* for the main container (no pubkeys in headers etc.). |
 
 #### Detailed Decision Rationales
@@ -637,7 +673,7 @@ Current registered labels (must be kept in sync with code — full table in **Su
    - Suggestion: Use a keyed variant of the Bao tree (keyed on the format bitmask byte, or a small header prefix) so that the root hash cryptographically commits to which processing pipeline was used.
    - This would be extremely useful for data markets (see §9), because different format combinations (especially encrypted vs public) would produce distinguishable roots even for related data.
    - **Endianness for key material**: All integer fields in Carbonado (and in the Bao format itself) are little-endian. If a keyed Bao implementation derives a 32-byte key from header fields, those fields should be serialized in LE order for consistency. A minimal implementation that only keys on the single-byte `format` bitmask has no endianness issues at all.
-   - (Implemented) Original `bao` 0.13 lacked BlockSize and public keyed. Now using local SurmountSystems/bao-tree fork with BlockSize(2) for 4KB + keyed_hash on format byte (root commits to pipeline). See constants::BAO_BLOCK_SIZE and encoding::bao. Temporary fork pending upstream.
+   - (Implemented) Original `bao` 0.13 lacked BlockSize and public keyed. Now using n0-computer/bao-tree 0.16.1 (crates.io; PR 78 keyed) with BlockSize(2) for 4KB + keyed_hash on format byte (root commits to pipeline). See constants::BAO_BLOCK_SIZE and stream::bao.
 
    Because there are 16 possible format combinations, the same logical input can produce up to 16 different Bao hashes. In this sense the naming is **multi-dimensional**:
    - When the `Encrypted` bit is set (symmetric encryption), the hash primarily names an *encrypted+protected container*.
@@ -797,6 +833,7 @@ Offset  Size  Field
 
 **Directory archive layout (fixed v1.0):**
 - **Catalog:** inboard headered `{catalog_root}.adam.c14` or `.adam.c15` (`CARBONADO20\n` + body); no `.out`/`.par`
+- **Single-file (0.7.1):** inboard is one `{hash}.adam.cXX` (Header + body + optional Adamantine after `encoded_len`). Outboard is `{hash}.cXX` + `{hash}.adam.cXX` sidecar starting with `ADAMANTINE10\n`. Same-stem pair is not a directory catalog. Zstd level is encoder input (no silent default 20). Dict lives in the Adamantine bundle, not a `.dict` sibling.
 - **Segments:** bare mains `{seg_root}.c12`/`.c14`/`.c13`/`.c15` only; verification outboard + FEC parity centralized in Adam payload bundle
 - **No** directory `.out`, `.par`, or `.ots` sidecar files
 - **Scrub:** directory segments are FEC-capable (c12–c15). Slice verification + FEC parity from the centralized bundle; `scrub_outboard` recovers corrupt bare mains within the RS 4/8 budget (≤4 shard taints). `MissingFecParity` when `Format::Fec` is set, `main_len > 0`, and `fec_parity_len` is zero (zero-byte mains use empty FEC slice at decode).
@@ -917,8 +954,8 @@ This tension is acknowledged but not resolved in the current design. Carbonado i
 
 Remaining open (documented; active work called out):
 - **Pipeline memory residual (hard-break track):** fused encode/decode is O(chunk) spool + O(stripe) FEC encode; non-FEC verification decode is O(chunk) via `SeekWriteAt`; FEC verification decode retains O(FEC body) shard buffers (`FecInboardWriteAt`); outboard verify uses `PostOrderOutboard` + `ReadAt` (O(hash pair) per node); `stream_decode_async` fully spools encoded body to disk. Distinct from Bao **slice** verification (already O(slice) memory). See [doc/STREAMING_PARALLELISM.md](doc/STREAMING_PARALLELISM.md).
-- **WASM:** `cargo clippy --target wasm32-unknown-unknown --no-default-features` is green (CI `lint-wasm`). **wasm32 + `pqc` probe (2026-07-08):** pointing global `CC_wasm32-unknown-unknown` at `libbitcoinpqc-bindings/wasm/clang-wasm32.sh` breaks **`zstd-sys`** (it tries to assemble `huf_decompress_amd64.S` with the wasm clang). Residual is build-env / dep CC scoping — not Carbonado crypto logic. Keep CI wasm lint **no-pqc** until bitcoinpqc (or zstd) wasm build is isolated.
-- Bao crate: Surmount keyed bao-tree fork (`76-keyed-bao`), 4 KiB groups, `default-features = false` (no tokio/fs on wasm). Temporary until upstream.
+- **WASM:** `cargo clippy --target wasm32-unknown-unknown --no-default-features --features "backend-rust"` is green (CI `lint-wasm`). **wasm32 + `pqc` probe (2026-07-08):** pointing global `CC_wasm32-unknown-unknown` at `libbitcoinpqc-bindings/wasm/clang-wasm32.sh` breaks **`zstd-sys`** (it tries to assemble `huf_decompress_amd64.S` with the wasm clang). Residual is build-env / dep CC scoping — not Carbonado crypto logic. Keep CI wasm lint **no-pqc** until bitcoinpqc (or zstd) wasm build is isolated.
+- Bao crate: n0-computer/bao-tree **0.16.1** (crates.io; PR 78 keyed APIs), 4 KiB groups, `default-features = false` (no tokio/fs on wasm).
 - reed-solomon-erasure: upstream "looking for maintainers"; periodic re-eval (no runtime issues).
 - (Perf: inboard `verify_slice` is O(slice) memory but O(N) encoded-byte I/O; outboard slice verify is O(slice) time+memory; scrub pre-check uses `verify_inboard_keyed` with O(1) retained decode memory (S5).)
 
@@ -944,7 +981,7 @@ Major items completed in this session:
 - `chunk_index` widened u8 → u32 in Header + full auth coverage
 - `payload_nonce` semantics fully documented
 - All u16 slice bookkeeping (`EncodeInfo`, `extract_slice`, `verify_slice`, `scrub`) widened to u32, removing the ~64 MiB FEC segment cap
-- Bao migrated from bao 0.13 (1KB fixed) to bao-tree fork with BAO_BLOCK_SIZE=from_chunk_log(2) for 4KB groups + keyed roots bound to format byte. P1: SLICE_LEN=4096, seekable slice module. Prefix+response for size in verifiable.
+- Bao migrated from bao 0.13 (1KB fixed) to n0-computer/bao-tree with BAO_BLOCK_SIZE=from_chunk_log(2) for 4KB groups + keyed roots bound to format byte. P1: SLICE_LEN=4096, seekable slice module. Prefix+response for size in verifiable.
 - Theoretical max size calculation (≈17.18 billion GiB)
 - Extensive hardening of AGENTS.md, rustdocs, tests, CI, examples, and removal of all legacy ECIES/Nostr material
 - Full production verification gates passed repeatedly (strict clippy + tests)

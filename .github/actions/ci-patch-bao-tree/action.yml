@@ -1,0 +1,35 @@
+name: Patch cargo to workspace bao-tree
+description: >
+  Append a CI-only [patch] so cargo uses the in-workspace bao-tree checkout.
+  Does not overwrite the committed bitcoinpqc crates-io patch.
+
+runs:
+  using: composite
+  steps:
+    - name: Append bao-tree path patch
+      shell: bash
+      run: |
+        set -euo pipefail
+        cfg=".cargo/config.toml"
+        dest="${GITHUB_WORKSPACE}/bao-tree"
+        mkdir -p .cargo
+        if [[ ! -f "${dest}/Cargo.toml" ]]; then
+          echo "bao-tree checkout missing at ${dest} (expected path: bao-tree)"
+          exit 1
+        fi
+        if [[ ! -f "${cfg}" ]]; then
+          echo "expected committed ${cfg} (bitcoinpqc patch); creating empty"
+          : > "${cfg}"
+        fi
+        if grep -Fq '[patch."https://github.com/n0-computer/bao-tree.git"]' "${cfg}"; then
+          echo "bao-tree cargo patch already present in ${cfg}"
+        else
+          {
+            printf '\n'
+            printf '[patch."https://github.com/n0-computer/bao-tree.git"]\n'
+            printf 'bao-tree = { path = "%s" }\n' "${dest}"
+          } >> "${cfg}"
+          echo "appended bao-tree path patch -> ${dest}"
+        fi
+        echo "---- ${cfg} ----"
+        cat "${cfg}"

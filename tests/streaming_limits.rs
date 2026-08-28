@@ -11,23 +11,23 @@ use std::io::Cursor;
 use carbonado::constants::FEC_M;
 use carbonado::decode as low_level_decode;
 use carbonado::error::CarbonadoError;
-use carbonado::file::{decode, decode_stream, encode, encode_stream, Header};
+use carbonado::file::{Header, decode, decode_stream};
 use carbonado::stream::crypto_stream::{
     stream_decrypt, stream_decrypt_seek, stream_decrypt_with_nonce, stream_decrypt_with_nonce_seek,
 };
 use carbonado::stream::encode::stream_encode_outboard;
-use carbonado::stream::encode::{stream_encode_inboard_body, PreprocessStats};
-use carbonado::stream::fec::{encode_inboard_buffer, FecInboardEncoder};
+use carbonado::stream::encode::{PreprocessStats, stream_encode_inboard_body};
+use carbonado::stream::fec::{FecInboardEncoder, encode_inboard_buffer};
 use carbonado::stream::{
     stream_decode, stream_decode_buffer, stream_decode_outboard, stream_decode_outboard_buffer,
-    stream_encode_buffer,
 };
-use carbonado::{encode_outboard, scrub, scrub_outboard, verify_inboard_keyed_oracle};
+use carbonado::{scrub, scrub_outboard, verify_inboard_keyed_oracle};
 use rand::RngCore;
 
 use common::inboard_parity::{
-    assert_bounded_inboard_body_roundtrip, assert_inboard_body_roundtrip, BoundedReadSeek,
+    BoundedReadSeek, assert_bounded_inboard_body_roundtrip, assert_inboard_body_roundtrip,
 };
+use common::{encode_outboard, file_encode, file_encode_stream, stream_encode_buffer};
 
 const MASTER: [u8; 32] = [0x42; 32];
 
@@ -40,23 +40,28 @@ fn inboard_fec_encoder_incremental_feed_matches_buffer_path() {
 
     let mut enc = FecInboardEncoder::new(input.len()).expect("new");
     let mut off = 0usize;
+    let mut stripes = Vec::new();
     while off < input.len() {
         let step = 256.min(input.len() - off);
-        let _ = enc
-            .feed(Cursor::new(&input[off..off + step]))
-            .expect("feed");
+        stripes.extend(
+            enc.feed(Cursor::new(&input[off..off + step]))
+                .expect("feed"),
+        );
         off += step;
     }
-    let stripe = enc.finish().expect("finish").expect("stripe");
+    stripes.extend(enc.finish().expect("finish"));
     let mut incremental = Vec::new();
-    for shard in &stripe.shards {
-        incremental.extend_from_slice(shard);
+    for stripe in &stripes {
+        for shard in &stripe.shards {
+            incremental.extend_from_slice(shard);
+        }
     }
 
     assert_eq!(pl, enc.padding_len());
     assert_eq!(cl, enc.chunk_len());
     assert_eq!(incremental.len(), buffer_encoded.len());
     assert_eq!(incremental, buffer_encoded);
+    assert_eq!(stripes.len(), 4);
 }
 
 /// `stream_encode_inboard_body` FEC path feeds post-preprocess data incrementally (S2).
@@ -401,7 +406,7 @@ fn stream_decode_short_bao_body_invalid_header_length_all_entry_points() {
         "stream_decode_buffer: {err_buffer:?}"
     );
 
-    let (archive, _) = encode(&master, b"hello", 12, None).expect("encode file");
+    let (archive, _) = file_encode(&master, b"hello", 12, None).expect("encode file");
     let truncated = &archive[..Header::LEN + 4];
 
     let err_file = decode(&master, truncated).expect_err("file::decode");
@@ -443,6 +448,60 @@ fn stream_decode_encrypted_bounded_read_matches_buffer_path_c15() {
     assert_stream_decode_parity(&enc_master, 15, &input, Some(512));
 }
 
+/// W1a / M1: invalid `header_mac` fails before body I/O under both backends.
+///
+/// Uses a huge unauthenticated `encoded_len` so a MAC-after-body path would attempt
+/// a multi-MiB read. A `Read` that panics on body bytes proves fail-closed order.
+#[test]
+fn decode_stream_rejects_bad_header_mac_before_body_read() {
+    use std::io::{self, Read};
+
+    /// First `Header::LEN` bytes are the forged header; any further read panics.
+    struct HeaderOnlyThenPanic {
+        header: Cursor<Vec<u8>>,
+        body_reads: u64,
+    }
+
+    impl Read for HeaderOnlyThenPanic {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = self.header.read(buf)?;
+            if n > 0 {
+                return Ok(n);
+            }
+            self.body_reads += 1;
+            panic!(
+                "body read attempted after invalid header_mac (body_reads={})",
+                self.body_reads
+            );
+        }
+    }
+
+    let mut archive = file_encode(&[0u8; 32], b"mac-before-body", 14, None)
+        .expect("encode public c14")
+        .0;
+    assert!(archive.len() > Header::LEN);
+    // Flip a header_mac byte (bytes 28..92 of the 177-byte header).
+    archive[40] ^= 0xFF;
+    // Claim a large body so MAC-after-body would be expensive / force body read.
+    // encoded_len is at offset 12+16+64+32+32+1+4 = 161 (u32 LE).
+    let huge = (16 * 1024 * 1024u32).to_le_bytes();
+    archive[161..165].copy_from_slice(&huge);
+
+    let mut reader = HeaderOnlyThenPanic {
+        header: Cursor::new(archive[..Header::LEN].to_vec()),
+        body_reads: 0,
+    };
+    let mut out = Vec::new();
+    let err =
+        decode_stream(&[0u8; 32], &mut reader, &mut out).expect_err("bad header_mac must fail");
+    assert!(
+        matches!(err, CarbonadoError::AuthenticationFailed),
+        "expected AuthenticationFailed before body read, got {err:?}"
+    );
+    assert!(out.is_empty());
+    assert_eq!(reader.body_reads, 0, "must not touch body after bad MAC");
+}
+
 /// Header-path encode_stream / decode_stream roundtrip without intermediate body staging.
 #[test]
 fn encode_stream_decode_stream_roundtrip_c14_c15() {
@@ -452,8 +511,8 @@ fn encode_stream_decode_stream_roundtrip_c14_c15() {
     for &(master, format) in &[(&[0u8; 32], 14u8), (&enc_master, 15u8)] {
         let input: Vec<u8> = (0..65_536).map(|i| (i % 251) as u8).collect();
         let mut body = Vec::new();
-        let (header, _) =
-            encode_stream(master, Cursor::new(&input), format, None, &mut body).expect("encode");
+        let (header, _) = file_encode_stream(master, Cursor::new(&input), format, None, &mut body)
+            .expect("encode");
         let mut archive = header.try_to_vec().expect("header");
         archive.extend_from_slice(&body);
 
@@ -478,7 +537,7 @@ fn stream_decrypt_rejects_tampered_tag_before_plaintext() {
     rand::thread_rng().fill_bytes(&mut enc_master);
 
     let (archive, _) =
-        encode(&enc_master, b"streaming etm mac-before-decrypt", 3, None).expect("encode c3");
+        file_encode(&enc_master, b"streaming etm mac-before-decrypt", 3, None).expect("encode c3");
     let mut tampered = archive;
     tampered[Header::LEN] ^= 0xFF;
 
@@ -704,6 +763,7 @@ fn stream_decode_outboard_bounded_read_matches_buffer_path() {
         Some(&mut par_buf),
         &mut nonce,
         true,
+        &carbonado::ZstdEncode::level(20),
     )
     .expect("header-path encode");
     assert_stream_decode_outboard_parity(

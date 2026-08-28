@@ -18,6 +18,16 @@ pub enum CarbonadoError {
     #[error("zstd encode/decode failed: {0}")]
     ZstdError(String),
 
+    /// Compression bit is set but no zstd level was supplied (level is encoder input, not a library default).
+    #[error("zstd compression requires an explicit level")]
+    MissingZstdLevel,
+
+    /// Zstd frame names a Dictionary_ID but the Adamantine dict section is empty or absent.
+    #[error(
+        "zstd frame Dictionary_ID {dictionary_id} requires dictionary bytes in the Adamantine bundle"
+    )]
+    MissingZstdDictionary { dictionary_id: u32 },
+
     // The old EciesError variant was removed as part of the clean break to the v2 symmetric model.
     // All encryption-related errors now go through the new symmetric primitives (see crypto.rs).
     /// bao decode error
@@ -59,11 +69,15 @@ pub enum CarbonadoError {
     InvalidScrubbedHash,
 
     /// FEC padding should be zero when encoding (Carbonado adds its own)
-    #[error("Padding from FEC should always be zero, since Carbonado adds its own padding. Padding was {0}.")]
+    #[error(
+        "Padding from FEC should always be zero, since Carbonado adds its own padding. Padding was {0}."
+    )]
     EncodeFecPaddingError(usize),
 
     /// Invalid chunk length
-    #[error("Chunk length should be as calculated. Calculated chunk length was {0}, but actual chunk length was {1}")]
+    #[error(
+        "Chunk length should be as calculated. Calculated chunk length was {0}, but actual chunk length was {1}"
+    )]
     EncodeInvalidChunkLength(u32, usize),
 
     /// Invalid verifiable slice length
@@ -71,7 +85,9 @@ pub enum CarbonadoError {
     InvalidVerifiableSliceCount(u32),
 
     /// Invalid magic number
-    #[error("File header lacks Carbonado magic number and may not be a proper Carbonado file. Magic number found was {0}.")]
+    #[error(
+        "File header lacks Carbonado magic number and may not be a proper Carbonado file. Magic number found was {0}."
+    )]
     InvalidMagicNumber(String),
 
     /// Invalid header length calculation
@@ -160,10 +176,8 @@ pub enum CarbonadoError {
     #[error("Invalid Adamantine flags: {0}")]
     InvalidAdamantineFlags(u8),
 
-    /// Adamantine carbonado_fmt byte is not a valid directory catalog format (c14/c15)
-    #[error(
-        "Invalid Adamantine carbonado format: expected 0x0E (c14) or 0x0F (c15), got 0x{0:02x}"
-    )]
+    /// Adamantine carbonado_fmt byte is not a valid format (0–15)
+    #[error("Invalid Adamantine carbonado format: expected 0–15, got 0x{0:02x}")]
     InvalidAdamantineCarbonadoFormat(u8),
 
     /// Adamantine header `carbonado_fmt` disagrees with the format parsed from the `.adam.c{N}` filename
@@ -277,9 +291,7 @@ pub enum CarbonadoError {
     MissingShardIndex { expected: u32, found: u32 },
 
     /// Caller-supplied `ShardSource.chunk_index` does not match the authenticated header value.
-    #[error(
-        "Shard index mismatch: caller claimed {claimed}, header authenticated {authenticated}"
-    )]
+    #[error("Shard index mismatch: caller claimed {claimed}, header authenticated {authenticated}")]
     ShardIndexMismatch { claimed: u32, authenticated: u32 },
 }
 

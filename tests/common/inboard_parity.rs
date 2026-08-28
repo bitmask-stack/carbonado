@@ -2,11 +2,12 @@
 
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
+use super::stream_encode_buffer;
 use bao::Hash;
 use carbonado::constants::Format;
 use carbonado::file::Header;
-use carbonado::stream::encode::{stream_encode_inboard_body, PreprocessStats};
-use carbonado::stream::{stream_decode_buffer, stream_encode_buffer, stream_preprocess};
+use carbonado::stream::encode::{PreprocessStats, stream_encode_inboard_body};
+use carbonado::stream::{stream_decode_buffer, stream_preprocess};
 use carbonado::structs::EncodeInfo;
 
 /// Reader that caps each `read` to `max_chunk` bytes.
@@ -123,6 +124,8 @@ pub fn preprocess_and_body(
         &mut staging,
         &mut nonce,
         true,
+        None, // CSPRNG when encrypted (production path)
+        &carbonado::ZstdEncode::level(20),
     )
     .expect("preprocess");
     (stats, staging.into_inner(), nonce)

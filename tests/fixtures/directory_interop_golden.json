@@ -1,21 +1,21 @@
 {
   "description": "Golden checksums for encode_directory(tests/samples, ZERO_KEY). Adamantine 1.0 uses decimal format suffixes in filenames (.c12/.c14/.adam.c14), not hex (.c0c). Canonical platform: Linux CI.",
   "generated_with": {
-    "carbonado": "2.1.0",
+    "carbonado": "0.7.1",
     "infer": "0.19.0",
     "platform": "linux",
     "master_key": "zero",
-    "command": "cargo run --bin carbonado --features cli -- encode tests/samples -o <outdir>",
+    "command": "cargo run --bin carbonado --features cli -- encode tests/samples --zstd-level 20 -o <outdir>",
     "regenerate": "cargo test --test filepack_interop dump_interop_golden_fixture_values -- --ignored --nocapture"
   },
-  "catalog_bao_root": "3b91ff89d0215cc48c83529de78798f5890c04dbfa298e192dd2f07ce08c5b45",
-  "catalog_filename": "3b91ff89d0215cc48c83529de78798f5890c04dbfa298e192dd2f07ce08c5b45.adam.c14",
-  "manifest_version": 2,
+  "catalog_bao_root": "34e0e1e07e19f9a2face94d72fd0bfb3597215dae5e0647c70bcfb4a2a2fb216",
+  "catalog_filename": "34e0e1e07e19f9a2face94d72fd0bfb3597215dae5e0647c70bcfb4a2a2fb216.adam.c14",
+  "manifest_version": 3,
   "format_level": 14,
   "entry_count": 3,
-  "manifest_rkyv_len": 391,
-  "manifest_rkyv_sha256": "aed51d8b667f2c10f3e05faa03e92c3aaa74c89cd659aeb6ab6dcf32ba8a5b35",
-  "bundle_sha256": "d48c8db5b7f6b679c6d031a3cd542c62712254a3117417b344d252f2a21c0668",
+  "manifest_rkyv_len": 415,
+  "manifest_rkyv_sha256": "64ee0003bde24a0c9a8d369a47fd59321e11dc302bbfdfbe062f1e79ae981e25",
+  "bundle_sha256": "e505c0cc1bb19a474ccc647526cb40ef503c590b6ac6e82dbe591605afce7953",
   "entries": [
     {
       "rel_path": "code.tar",
@@ -25,7 +25,9 @@
           "verification_outboard_offset": 0,
           "verification_outboard_len": 128,
           "fec_parity_offset": 128,
-          "fec_parity_len": 16384
+          "fec_parity_len": 16384,
+          "dict_offset": 0,
+          "dict_len": 0
         }
       ]
     },
@@ -37,7 +39,9 @@
           "verification_outboard_offset": 16512,
           "verification_outboard_len": 9600,
           "fec_parity_offset": 26112,
-          "fec_parity_len": 622592
+          "fec_parity_len": 622592,
+          "dict_offset": 0,
+          "dict_len": 0
         }
       ]
     },
@@ -49,15 +53,17 @@
           "verification_outboard_offset": 648704,
           "verification_outboard_len": 0,
           "fec_parity_offset": 648704,
-          "fec_parity_len": 16384
+          "fec_parity_len": 16384,
+          "dict_offset": 0,
+          "dict_len": 0
         }
       ]
     }
   ],
   "artifacts": {
-    "3b91ff89d0215cc48c83529de78798f5890c04dbfa298e192dd2f07ce08c5b45.adam.c14": {
+    "34e0e1e07e19f9a2face94d72fd0bfb3597215dae5e0647c70bcfb4a2a2fb216.adam.c14": {
       "len": 1331321,
-      "sha256": "9946a7a49218a3a4f1e677cf7aeda5f3099669afd717cf27a38bc1f9fcb1cbb5",
+      "sha256": "ac81339f61e1c5624332039f0114d759b84d76572e5731565fffe3fbef8840cd",
       "decimal_format_suffix": "14"
     },
     "797216a438ea69c1c6885b31700e93a7e1ef492825a1c38d8f50c6250ab0a5f4.c14": {

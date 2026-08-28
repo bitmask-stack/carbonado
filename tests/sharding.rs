@@ -8,10 +8,10 @@ use carbonado::{
     constants::MAGICNO,
     error::CarbonadoError,
     stream::{
-        decode_shards_stream, encode_shard_stream, ShardEncodeResult, ShardSource,
-        DEFAULT_SEGMENT_PLAINTEXT_BUDGET,
+        DEFAULT_SEGMENT_PLAINTEXT_BUDGET, ShardEncodeResult, ShardSource, decode_shards_stream,
     },
 };
+use common::encode_shard_stream;
 use rand::RngCore;
 
 use common::{

@@ -13,7 +13,13 @@ Encode a file or directory into a Carbonado archive
 Format level 0–15 (default 14 = public verifiable; odd values = encrypted)
 .TP
 \fB\-\-outboard\fR
-Single\-file only: bare main + `.out`/`.par` sidecars (default single\-file is inboard)
+Single\-file only: `{hash}.cXX` + `{hash}.adam.cXX` sidecar (default single\-file is inboard)
+.TP
+\fB\-\-zstd\-level\fR \fI<LEVEL>\fR
+Zstd compression level (required when the Compression bit is set)
+.TP
+\fB\-\-zstd\-dict\fR \fI<PATH>\fR
+Optional RFC 8878 zstd dictionary file (bytes stored in the Adamantine dict section)
 .TP
 \fB\-\-encrypted\fR
 Directory only: encrypted catalog c15 and segment formats c13/c15 (auto\-creates BIP39 seed if needed)
